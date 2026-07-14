@@ -8,6 +8,7 @@ build/
 # ── 虚拟环境 ──
 .venv/
 venv/
+.python-version
 
 # ── 环境变量 & 密钥 ──
 .env
@@ -30,3 +31,7 @@ logs/
 # ── OS ──
 .DS_Store
 Thumbs.db
+
+# 鏈湴 uv / 宸ュ叿缂撳瓨
+.uv-cache/
+nano.md

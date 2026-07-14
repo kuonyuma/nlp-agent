@@ -97,7 +97,7 @@ def get_planner_llm() -> ChatOpenAI:
 
 
 def get_tool_llm() -> ChatOpenAI:
-    """Worker 默认 LLM（走完整解析链，包括 AGENTIC_RAG_WORKER_MODEL 环境变量）。"""
+    """Worker 默认 LLM（支持 NLP_AGENT_WORKER_MODEL 环境变量覆盖）。"""
     return _build_llm(settings.tool_llm)
 
 

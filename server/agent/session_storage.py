@@ -1,5 +1,5 @@
 """
-峨眉山文旅智能体 - 会话持久化模块 (JSONL Transcript)
+通用 NLP 智能体 - 会话持久化模块 (JSONL Transcript)
 
 该模块借鉴 Claude Code 的存储设计，将基于 LangGraph 的会话记录追加保存为单文件 JSONL。
 主要特性：

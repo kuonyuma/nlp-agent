@@ -244,7 +244,7 @@ async def spawn_worker(agent_name: str, directive: str, config: RunnableConfig, 
     """启动一个新的 Worker 执行任务。使用此工具时，Worker 没有之前的记忆。
 
     Worker 模型解析优先级（由高到低）：
-    1. AGENTIC_RAG_WORKER_MODEL 环境变量（全局覆盖）
+    1. NLP_AGENT_WORKER_MODEL 环境变量（全局覆盖）
     2. 本函数的 model 参数（Coordinator 调用时动态指定）
     3. agent_config.yaml 中 agents.<name>.model
     4. agent_config.yaml 中 defaults.worker
@@ -292,7 +292,7 @@ async def spawn_worker(agent_name: str, directive: str, config: RunnableConfig, 
 不可违背的硬性规则：
 1. 【禁止闲聊】：绝对不要问好、不要提问、不要建议下一步操作。
 2. 【禁止主观发挥】：不要在回复中加入任何自我评价或多余的解释。
-3. 【直接执行】：直接且仅使用你被授予的工具来完成指令。如果同时拥有 search_knowledge_base 和其他搜索工具，必须优先使用 search_knowledge_base。
+3. 【直接执行】：直接且仅使用你被授予的工具来完成指令，不得调用未授权能力。
 4. 【强制输出格式】：你的回复【必须】严格以"执行范围："开头。
 5. 【陈述事实】：只汇报客观事实结果，汇报完毕后立刻停止。
 [/后台特工硬性约束]
