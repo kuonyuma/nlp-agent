@@ -17,8 +17,8 @@ Functions:
         2. 调用 `global_task_manager.get_task(target_id)` 查验任务是否存在。
         3. 若任务不存在 → 返回 success=False, error_code=1。
         4. 若任务非 running 状态 → 返回 success=False, error_code=3。
-        5. 调用 `global_task_manager.stop_task(target_id)` 执行 future.cancel()，
-           标记 status="killed"，返回 success=True 及任务摘要。
+        5. 调用 `global_task_manager.stop_task(target_id)` 发起取消；Worker 收尾后
+           进入 status="cancelled"，返回 success=True 及任务摘要。
         6. 内部异常兜底 → 返回 success=False, error_code=500。
 
 Constants:
@@ -68,11 +68,11 @@ async def task_stop_tool(task_id: str = None, shell_id: str = None) -> str:
         ).model_dump_json(exclude_none=True)
 
     # 失败路径 2：任务没在运行
-    if task.status != "running":
+    if not global_task_manager.get_active_task(target_id):
         logger.warning("尝试停止非运行中的任务", task_id=target_id, status=task.status)
         return TaskStopOutputSpec(
             success=False,
-            message=f"Task {target_id} is not running (status: {task.status})",
+            message=f"Task {target_id} is already terminal (status: {task.status})",
             error_code=3
         ).model_dump_json(exclude_none=True)
 

@@ -70,6 +70,12 @@ class CoordinatorRuntime:
     ) -> None:
         while plan := global_task_manager.build_wait_plan(session_id, parent_turn_id):
             events, timed_out = await self._collect_barrier_events(plan)
+            if timed_out:
+                completed = {event.worker_id for event in events}
+                global_task_manager.cancel_workers(
+                    plan.worker_ids.difference(completed),
+                    reason=f"barrier_timeout:{parent_turn_id}",
+                )
             global_task_manager.mark_wait_consumed(plan.worker_ids)
             await self._invoke(
                 [self._worker_results_message(events, plan=plan, timed_out=timed_out)],
@@ -157,10 +163,7 @@ class CoordinatorRuntime:
                     "parent_turn_id": event.parent_turn_id,
                     "attempt": event.attempt,
                     "sequence": event.sequence,
-                    "status": event.status,
-                    "summary": event.summary,
-                    "result": event.result,
-                    "usage": event.usage.model_dump() if event.usage else None,
+                    "execution": event.execution.model_dump(),
                     "join": event.join,
                 }
                 for event in events

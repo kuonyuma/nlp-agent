@@ -61,10 +61,16 @@ Side effects:
 """
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, global_worker_event_bus
+from core.worker_lifecycle import (
+    WorkerResourceBudget,
+    WorkerRetryPolicy,
+    classify_worker_error,
+)
 from core.worker_protocol import WorkerCommand, WorkerWaitMode
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
@@ -80,7 +86,13 @@ from server.agent.node.session_storage import (
 )
 from utils.logger import get_logger
 from utils.uuid import create_agent_id
-from schemas.models import WorkerNotificationSpec, WorkerUsageSpec
+from schemas.models import (
+    WorkerErrorSpec,
+    WorkerExecutionResultSpec,
+    WorkerNotificationSpec,
+    WorkerTimingSpec,
+    WorkerUsageSpec,
+)
 
 logger = get_logger("shiliu.tools.worker")
 
@@ -93,6 +105,11 @@ class SpawnWorkerInput(BaseModel):
     wait_mode: WorkerWaitMode = Field(default="all", description="等待策略：all、any 或 quorum。")
     quorum: int = Field(default=1, ge=1, description="quorum 模式所需的完成数量。")
     wait_timeout_s: float = Field(default=60.0, gt=0, le=600, description="最长等待秒数。")
+    max_turns: int = Field(default=6, ge=1, le=50, description="Worker 最大 ReAct 轮数。")
+    max_duration_s: float = Field(default=60.0, gt=0, le=1800, description="Worker 单次尝试最长执行秒数。")
+    max_tokens: int = Field(default=32000, ge=1, description="Worker 单次尝试最大 Token 数。")
+    max_tool_calls: int = Field(default=12, ge=0, le=200, description="Worker 单次尝试最大工具调用次数。")
+    max_attempts: int = Field(default=3, ge=1, le=5, description="可恢复错误的最大执行尝试次数。")
 
 
 class SendMessageInput(BaseModel):
@@ -106,120 +123,249 @@ async def _execute_sandbox_loop(
     messages: list,
     allowed_tools_objects: list,
     model_name: str = "",
-) -> str:
-    """沙箱 ReAct 循环：模型思考 → 工具调用 → 结果回写。
-
-    Args:
-        worker_id: Worker 唯一标识符（UUID）。
-        session_id: 所属会话 ID，用于磁盘持久化定位。
-        messages: 初始消息列表（SystemMessage + HumanMessage），循环中追加 ToolMessage。
-        allowed_tools_objects: Worker 被授权使用的工具对象列表。
-        model_name: 已解析的 provider 名称。为空时走默认解析链（get_tool_llm）。
-
-    Returns:
-        JSON 字符串（WorkerNotificationSpec），包含执行结果和遥测数据。
-    """
+    *,
+    budget: WorkerResourceBudget | None = None,
+    attempt: int = 1,
+) -> WorkerExecutionResultSpec:
+    """Execute one isolated Worker attempt under an explicit resource budget."""
     worker_logger = logger.bind(worker_id=worker_id, session_id=session_id)
-
+    budget = budget or WorkerResourceBudget()
     llm = get_worker_llm(tool_specified_model=model_name) if model_name else get_tool_llm()
     if allowed_tools_objects:
         llm = llm.bind_tools(allowed_tools_objects)
     tools_by_name = {t.name: t for t in allowed_tools_objects}
-
     start_time = time.time()
     total_tokens_used = 0
     tool_uses_count = 0
 
-    try:
-        async def query_loop():
-            nonlocal total_tokens_used, tool_uses_count
-
-            for turn in range(6):
-                # 每轮思考前清空 Coordinator 插队消息
-                task_info = global_task_manager.get_task(worker_id)
-                if task_info and not task_info.pending_messages.empty():
-                    while not task_info.pending_messages.empty():
-                        command = task_info.pending_messages.get_nowait()
-                        interruption_msg = HumanMessage(
-                            content=(
-                                f"【Coordinator {command.kind} 指令】\n"
-                                f"command_id={command.command_id}\n{command.content}\n"
-                                "请优先处理此指令！"
-                            )
-                        )
-                        messages.append(interruption_msg)
-                        record_sidechain_transcript(session_id, worker_id, [interruption_msg])
-                        task_info.pending_messages.task_done()
-                        worker_logger.info(
-                            "Worker command received",
-                            command_id=command.command_id,
-                            command_kind=command.kind,
-                        )
-
-                response = await llm.ainvoke(messages)
-                messages.append(response)
-
-                if hasattr(response, "usage_metadata") and response.usage_metadata:
-                    total_tokens_used += response.usage_metadata.get("total_tokens", 0)
-
-                record_sidechain_transcript(session_id, worker_id, [response])
-
-                if not response.tool_calls:
-                    return response.content
-
-                for tool_call in response.tool_calls:
-                    tool_uses_count += 1
-                    t_name, t_args, t_id = tool_call["name"], tool_call["args"], tool_call["id"]
-                    worker_logger.info("发起工具调用", tool_name=t_name)
-
-                    if t_name in tools_by_name:
-                        try:
-                            tool_result_content = await tools_by_name[t_name].ainvoke(t_args)
-                        except Exception as e:
-                            tool_result_content = f"执行出错: {str(e)}"
-                    else:
-                        tool_result_content = f"权限拒绝: 不允许使用工具 {t_name}"
-
-                    tool_msg = ToolMessage(content=str(tool_result_content), tool_call_id=t_id)
-                    messages.append(tool_msg)
-                    record_sidechain_transcript(session_id, worker_id, [tool_msg])
-
-            return "强制停止：调用工具超过最大次数(6次)。"
-
-        final_answer = await asyncio.wait_for(query_loop(), timeout=60.0)
-        duration_ms = int((time.time() - start_time) * 1000)
-        worker_logger.info("Worker 执行成功", duration_ms=duration_ms, tokens=total_tokens_used)
-
-        notif = WorkerNotificationSpec(
-            task_id=worker_id,
-            status="completed",
-            summary="工作节点（Worker）成功执行了任务",
-            result=final_answer,
-            usage=WorkerUsageSpec(total_tokens=total_tokens_used, tool_uses=tool_uses_count, duration_ms=duration_ms),
+    def result(
+        *,
+        status: str,
+        summary: str,
+        termination_reason: str,
+        output: str | None = None,
+        error: WorkerErrorSpec | None = None,
+    ) -> WorkerExecutionResultSpec:
+        completed_at = time.time()
+        duration_ms = int((completed_at - start_time) * 1000)
+        return WorkerExecutionResultSpec(
+            status=status,
+            summary=summary,
+            output=output,
+            error=error,
+            usage=WorkerUsageSpec(
+                total_tokens=total_tokens_used,
+                tool_uses=tool_uses_count,
+                duration_ms=duration_ms,
+            ),
+            timing=WorkerTimingSpec(
+                started_at=start_time,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+            ),
+            termination_reason=termination_reason,
+            attempt=attempt,
         )
-        return notif.model_dump_json(exclude_none=True)
 
-    except asyncio.TimeoutError:
-        duration_ms = int((time.time() - start_time) * 1000)
-        worker_logger.error("Worker 执行超时被强制杀死")
-        notif = WorkerNotificationSpec(
-            task_id=worker_id,
-            status="killed",
-            summary="执行超时（超过 60 秒）",
-            usage=WorkerUsageSpec(total_tokens=total_tokens_used, tool_uses=tool_uses_count, duration_ms=duration_ms),
-        )
-        return notif.model_dump_json(exclude_none=True)
+    async def query_loop() -> WorkerExecutionResultSpec:
+        nonlocal total_tokens_used, tool_uses_count
+        for _turn in range(budget.max_turns):
+            task_info = global_task_manager.get_active_task(worker_id)
+            if task_info:
+                while not task_info.pending_messages.empty():
+                    command = task_info.pending_messages.get_nowait()
+                    if command.kind == "cancel":
+                        raise asyncio.CancelledError
+                    interruption_msg = HumanMessage(
+                        content=(
+                            f"【Coordinator {command.kind} 指令】\n"
+                            f"command_id={command.command_id}\n{command.content}\n"
+                            "请优先处理此指令！"
+                        )
+                    )
+                    messages.append(interruption_msg)
+                    record_sidechain_transcript(session_id, worker_id, [interruption_msg])
+                    task_info.pending_messages.task_done()
+                    worker_logger.info(
+                        "Worker command received",
+                        command_id=command.command_id,
+                        command_kind=command.kind,
+                    )
 
-    except Exception as e:
-        duration_ms = int((time.time() - start_time) * 1000)
-        worker_logger.exception("Worker 执行内部崩溃")
-        notif = WorkerNotificationSpec(
-            task_id=worker_id,
+            response = await llm.ainvoke(messages)
+            messages.append(response)
+            if getattr(response, "usage_metadata", None):
+                total_tokens_used += response.usage_metadata.get("total_tokens", 0)
+            record_sidechain_transcript(session_id, worker_id, [response])
+
+            if total_tokens_used > budget.max_tokens:
+                return result(
+                    status="failed",
+                    summary="Worker exceeded its token budget.",
+                    termination_reason="token_budget",
+                    error=WorkerErrorSpec(
+                        category="budget",
+                        message=f"Token budget exceeded: {total_tokens_used}/{budget.max_tokens}",
+                        retryable=False,
+                    ),
+                )
+            if not response.tool_calls:
+                return result(
+                    status="completed",
+                    summary="Worker completed the assigned task.",
+                    termination_reason="completed",
+                    output=str(response.content),
+                )
+
+            for tool_call in response.tool_calls:
+                if tool_uses_count >= budget.max_tool_calls:
+                    return result(
+                        status="failed",
+                        summary="Worker exceeded its tool-call budget.",
+                        termination_reason="tool_budget",
+                        error=WorkerErrorSpec(
+                            category="budget",
+                            message=f"Tool-call budget exceeded: {budget.max_tool_calls}",
+                            retryable=False,
+                        ),
+                    )
+                tool_uses_count += 1
+                t_name, t_args, t_id = tool_call["name"], tool_call["args"], tool_call["id"]
+                worker_logger.info("发起工具调用", tool_name=t_name)
+                if t_name in tools_by_name:
+                    try:
+                        tool_result_content = await tools_by_name[t_name].ainvoke(t_args)
+                    except Exception as error:
+                        tool_result_content = f"执行出错: {error}"
+                else:
+                    tool_result_content = f"权限拒绝: 不允许使用工具 {t_name}"
+                tool_msg = ToolMessage(content=str(tool_result_content), tool_call_id=t_id)
+                messages.append(tool_msg)
+                record_sidechain_transcript(session_id, worker_id, [tool_msg])
+
+        return result(
             status="failed",
-            summary=f"Worker 执行内部崩溃: {str(e)}",
-            usage=WorkerUsageSpec(total_tokens=total_tokens_used, tool_uses=tool_uses_count, duration_ms=duration_ms),
+            summary="Worker exhausted its ReAct turn budget.",
+            termination_reason="max_turns",
+            error=WorkerErrorSpec(
+                category="budget",
+                message=f"Maximum turns reached: {budget.max_turns}",
+                retryable=False,
+            ),
         )
-        return notif.model_dump_json(exclude_none=True)
+
+    try:
+        execution = await asyncio.wait_for(query_loop(), timeout=budget.max_duration_s)
+        worker_logger.info(
+            "Worker attempt finished",
+            status=execution.status,
+            duration_ms=execution.timing.duration_ms,
+            tokens=execution.usage.total_tokens,
+            attempt=attempt,
+        )
+        return execution
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError as error:
+        return result(
+            status="timed_out",
+            summary=f"Worker attempt timed out after {budget.max_duration_s:g} seconds.",
+            termination_reason="timeout",
+            error=WorkerErrorSpec(category="timeout", message=str(error) or "timeout", retryable=True),
+        )
+    except Exception as error:
+        category, retryable = classify_worker_error(error)
+        worker_logger.exception("Worker attempt failed", category=category, retryable=retryable)
+        return result(
+            status="failed",
+            summary=f"Worker attempt failed: {error}",
+            termination_reason="unrecoverable_error",
+            error=WorkerErrorSpec(
+                category=category,
+                message=str(error),
+                retryable=retryable,
+            ),
+        )
+
+
+async def _execute_with_retries(
+    worker_id: str,
+    execute_attempt: Callable[[int], Awaitable[WorkerExecutionResultSpec]],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> WorkerExecutionResultSpec:
+    """Run recoverable attempts with exponential backoff and aggregate telemetry."""
+    task = global_task_manager.get_active_task(worker_id)
+    if task is None:
+        raise RuntimeError(f"Worker {worker_id} is not registered")
+    policy = task.retry_policy
+    base_attempt = task.attempt
+    started_at = time.time()
+    total_tokens = 0
+    total_tools = 0
+    final: WorkerExecutionResultSpec | None = None
+
+    for run_index in range(1, policy.max_attempts + 1):
+        attempt = base_attempt + run_index - 1
+        global_task_manager.set_attempt(worker_id, attempt)
+        final = await execute_attempt(attempt)
+        total_tokens += final.usage.total_tokens
+        total_tools += final.usage.tool_uses
+        if final.status == "completed":
+            break
+
+        category = final.error.category if final.error else "internal"
+        if (
+            final.error is None
+            or not final.error.retryable
+            or not policy.should_retry(category, run_index)
+        ):
+            if final.error and final.error.retryable and run_index >= policy.max_attempts:
+                final = final.model_copy(
+                    update={
+                        "status": "failed",
+                        "summary": f"{final.summary} Retry attempts exhausted.",
+                        "termination_reason": "retries_exhausted",
+                    }
+                )
+            break
+
+        delay = policy.delay_for(run_index)
+        global_task_manager.transition_task(
+            worker_id,
+            "retrying",
+            "recoverable_failure",
+            category=category,
+            next_attempt=attempt + 1,
+            delay_s=delay,
+        )
+        await sleep(delay)
+        global_task_manager.transition_task(
+            worker_id,
+            "running",
+            "retry_started",
+            attempt=attempt + 1,
+        )
+
+    if final is None:
+        raise RuntimeError("Worker retry loop produced no result")
+    completed_at = time.time()
+    duration_ms = int((completed_at - started_at) * 1000)
+    return final.model_copy(
+        update={
+            "usage": WorkerUsageSpec(
+                total_tokens=total_tokens,
+                tool_uses=total_tools,
+                duration_ms=duration_ms,
+            ),
+            "timing": WorkerTimingSpec(
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+            ),
+            "attempt": task.attempt,
+        }
+    )
 
 
 async def _background_task_wrapper(
@@ -228,48 +374,78 @@ async def _background_task_wrapper(
     initial_messages: list,
     allowed_tools: list,
     model_name: str = "",
-):
-    """包裹沙箱循环，结束时将结果投递到全局消息队列。
-
-    Args:
-        worker_id: Worker 唯一标识符（UUID）。
-        session_id: 所属会话 ID。
-        initial_messages: 初始消息列表。
-        allowed_tools: Worker 被授权使用的工具对象列表。
-        model_name: 已解析的 provider 名称。
-    """
-    notification: WorkerNotificationSpec
+) -> None:
+    """Own the complete Worker lifecycle and publish exactly one terminal result."""
+    task = global_task_manager.get_active_task(worker_id)
+    execution: WorkerExecutionResultSpec | None = None
     try:
-        notification_json = await _execute_sandbox_loop(
-            worker_id, session_id, initial_messages, allowed_tools, model_name
-        )
-        notification = WorkerNotificationSpec.model_validate_json(notification_json)
+        await global_task_manager.acquire_execution_slot(worker_id)
+        task = global_task_manager.get_active_task(worker_id)
+        if task is None:
+            raise asyncio.CancelledError
+
+        async def execute(attempt: int) -> WorkerExecutionResultSpec:
+            return await _execute_sandbox_loop(
+                worker_id,
+                session_id,
+                initial_messages,
+                allowed_tools,
+                model_name,
+                budget=task.budget,
+                attempt=attempt,
+            )
+
+        execution = await _execute_with_retries(worker_id, execute)
     except asyncio.CancelledError:
-        notification = WorkerNotificationSpec(
-            task_id=worker_id,
-            status="killed",
-            summary="Worker was cancelled by the Coordinator.",
+        now = time.time()
+        reason = task.cancellation_reason if task and task.cancellation_reason else "cancelled"
+        started_at = (task.started_at or task.created_at) if task else now
+        execution = WorkerExecutionResultSpec(
+            status="cancelled",
+            summary="Worker was cancelled before completing the task.",
+            error=WorkerErrorSpec(category="cancelled", message=reason, retryable=False),
+            timing=WorkerTimingSpec(
+                started_at=started_at,
+                completed_at=now,
+                duration_ms=int((now - started_at) * 1000),
+            ),
+            termination_reason="cancelled",
+            attempt=task.attempt if task else 1,
         )
-    except Exception as e:
-        notification = WorkerNotificationSpec(
-            task_id=worker_id,
+    except Exception as error:
+        now = time.time()
+        started_at = (task.started_at or task.created_at) if task else now
+        logger.exception("Worker lifecycle wrapper failed", worker_id=worker_id)
+        execution = WorkerExecutionResultSpec(
             status="failed",
-            summary=f"沙箱外壳崩溃 {str(e)}",
+            summary=f"Worker lifecycle wrapper failed: {error}",
+            error=WorkerErrorSpec(category="internal", message=str(error), retryable=False),
+            timing=WorkerTimingSpec(
+                started_at=started_at,
+                completed_at=now,
+                duration_ms=int((now - started_at) * 1000),
+            ),
+            termination_reason="unrecoverable_error",
+            attempt=task.attempt if task else 1,
         )
-    task = global_task_manager.get_task(worker_id)
+    finally:
+        global_task_manager.release_execution_slot(worker_id)
+
+    task = global_task_manager.get_active_task(worker_id) or task
+    if execution is None:
+        return
     join = task.join if task else True
-    global_task_manager.complete_task(worker_id, notification.status)
+    parent_turn_id = task.parent_turn_id if task else ""
+    attempt = task.attempt if task else execution.attempt
+    global_task_manager.complete_task(worker_id, execution.status, execution)
     try:
         await global_worker_event_bus.publish(
             WorkerCompletedEvent.create(
                 session_id=session_id,
                 worker_id=worker_id,
-                parent_turn_id=task.parent_turn_id if task else "",
-                attempt=task.attempt if task else 1,
-                status=notification.status,
-                summary=notification.summary,
-                result=notification.result,
-                usage=notification.usage,
+                parent_turn_id=parent_turn_id,
+                attempt=attempt,
+                execution=execution,
                 join=join,
             )
         )
@@ -292,6 +468,11 @@ async def spawn_worker(
     wait_mode: WorkerWaitMode = "all",
     quorum: int = 1,
     wait_timeout_s: float = 60.0,
+    max_turns: int = 6,
+    max_duration_s: float = 60.0,
+    max_tokens: int = 32_000,
+    max_tool_calls: int = 12,
+    max_attempts: int = 3,
 ) -> str:
     """启动一个新的 Worker 执行任务。使用此工具时，Worker 没有之前的记忆。
 
@@ -315,6 +496,7 @@ async def spawn_worker(
 
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
     parent_turn_id = config.get("configurable", {}).get("turn_id", "")
+    parent_worker_id = config.get("configurable", {}).get("worker_id", "")
     worker_id = create_agent_id(agent_name)
 
     resolved_model = settings._resolve_model_name(agent_name, model or None)
@@ -372,6 +554,14 @@ async def spawn_worker(
         "waitMode": wait_mode,
         "quorum": quorum,
         "waitTimeoutS": wait_timeout_s,
+        "parentWorkerId": parent_worker_id,
+        "budget": {
+            "maxTurns": max_turns,
+            "maxDurationS": max_duration_s,
+            "maxTokens": max_tokens,
+            "maxToolCalls": max_tool_calls,
+        },
+        "retry": {"maxAttempts": max_attempts},
     })
     record_sidechain_transcript(session_id, worker_id, initial_messages)
 
@@ -387,9 +577,17 @@ async def spawn_worker(
         session_id=session_id,
         join=join,
         parent_turn_id=parent_turn_id,
+        parent_worker_id=parent_worker_id,
         wait_mode=wait_mode,
         quorum=quorum,
         wait_timeout_s=wait_timeout_s,
+        budget=WorkerResourceBudget(
+            max_turns=max_turns,
+            max_duration_s=max_duration_s,
+            max_tokens=max_tokens,
+            max_tool_calls=max_tool_calls,
+        ),
+        retry_policy=WorkerRetryPolicy(max_attempts=max_attempts),
     )
 
     return WorkerNotificationSpec(
@@ -466,6 +664,8 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
         _background_task_wrapper(to_agent_id, session_id, messages, allowed_tools_objects, resolved_model)
     )
 
+    budget_data = metadata.get("budget", {})
+    retry_data = metadata.get("retry", {})
     global_task_manager.register_task(
         task_id=to_agent_id,
         task_type=agent_name,
@@ -474,9 +674,19 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
         session_id=session_id,
         join=bool(metadata.get("join", True)),
         parent_turn_id=current_turn_id or str(metadata.get("parentTurnId", "")),
+        parent_worker_id=str(metadata.get("parentWorkerId", "")),
         wait_mode=metadata.get("waitMode", "all"),
         quorum=int(metadata.get("quorum", 1)),
         wait_timeout_s=float(metadata.get("waitTimeoutS", 60.0)),
+        budget=WorkerResourceBudget(
+            max_turns=int(budget_data.get("maxTurns", 6)),
+            max_duration_s=float(budget_data.get("maxDurationS", 60.0)),
+            max_tokens=int(budget_data.get("maxTokens", 32_000)),
+            max_tool_calls=int(budget_data.get("maxToolCalls", 12)),
+        ),
+        retry_policy=WorkerRetryPolicy(
+            max_attempts=int(retry_data.get("maxAttempts", 3))
+        ),
     )
 
     return WorkerNotificationSpec(
