@@ -89,10 +89,10 @@ async def main() -> None:
     active_session = {"id": get_active_session_id() or create_new_session()}
     init_snip_tool(app, lambda: active_session["id"])
 
-    async def invoke(messages, session_id: str, background: bool) -> None:
+    async def invoke(messages, session_id: str, background: bool, turn_id: str) -> None:
         """The only Coordinator invocation path used by this process."""
         active_session["id"] = session_id
-        config = {"configurable": {"thread_id": session_id}}
+        config = {"configurable": {"thread_id": session_id, "turn_id": turn_id}}
         printed = False
         prefix = "\nAgent: " if not background else "\nAgent (worker update): "
         async for event in app.astream_events({"messages": messages}, config=config, version="v2"):
