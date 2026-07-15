@@ -1,0 +1,113 @@
+"""Strict Pydantic-v2 configuration for tools, policies, profiles, and MCP."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from core.tool_runtime import ToolScope
+
+
+class StrictConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RoleToolPolicy(StrictConfigModel):
+    allowed_tools: set[str] = Field(default_factory=set)
+    allowed_capabilities: set[str] = Field(default_factory=set)
+    denied_tools: set[str] = Field(default_factory=set)
+    denied_capabilities: set[str] = Field(default_factory=set)
+
+
+class ToolPoliciesConfig(StrictConfigModel):
+    coordinator: RoleToolPolicy = Field(
+        default_factory=lambda: RoleToolPolicy(
+            allowed_tools={
+                "spawn_worker",
+                "send_message",
+                "TaskStop",
+                "read_local_file",
+                "get_current_time",
+            },
+            allowed_capabilities={"context.manage"},
+            denied_capabilities={"business.write"},
+        )
+    )
+    worker: RoleToolPolicy = Field(
+        default_factory=lambda: RoleToolPolicy(
+            denied_capabilities={"runtime.control", "worker.manage"}
+        )
+    )
+
+
+class CustomToolsConfig(StrictConfigModel):
+    modules: list[str] = Field(default_factory=list)
+    entrypoint_group: str = "nlp_agent.tools"
+
+
+class MCPServerConfig(StrictConfigModel):
+    transport: Literal["stdio", "sse", "streamable_http"] | None = None
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str = ""
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    allow_private_network: bool = False
+    enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
+    timeout_s: float = Field(default=30.0, gt=0, le=1800)
+    scopes: set[ToolScope] = Field(default_factory=lambda: {ToolScope.WORKER})
+
+    @model_validator(mode="after")
+    def validate_transport(self) -> "MCPServerConfig":
+        transport = self.transport
+        if transport is None:
+            transport = "stdio" if self.command else "streamable_http" if self.url else None
+            object.__setattr__(self, "transport", transport)
+        if transport == "stdio" and not self.command:
+            raise ValueError("stdio MCP server requires command")
+        if transport in {"sse", "streamable_http"} and not self.url:
+            raise ValueError(f"{transport} MCP server requires url")
+        return self
+
+
+class ToolRuntimeConfig(StrictConfigModel):
+    policies: ToolPoliciesConfig = Field(default_factory=ToolPoliciesConfig)
+    custom: CustomToolsConfig = Field(default_factory=CustomToolsConfig)
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
+class WorkerProfileSpec(StrictConfigModel):
+    name: str
+    description: str = ""
+    model: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    capabilities: set[str] = Field(default_factory=set)
+    allowed_tools: set[str] = Field(default_factory=set)
+    denied_tools: set[str] = Field(default_factory=set)
+
+
+class AgentRuntimeConfig(StrictConfigModel):
+    tools: ToolRuntimeConfig = Field(default_factory=ToolRuntimeConfig)
+    worker_profiles: dict[str, WorkerProfileSpec] = Field(default_factory=dict)
+
+
+def load_agent_runtime_config(path: Path | None = None) -> AgentRuntimeConfig:
+    if path is None:
+        path = Path(__file__).resolve().parent.parent / "configs" / "agent_config.yaml"
+    with path.open("r", encoding="utf-8") as file:
+        raw = yaml.safe_load(file) or {}
+    payload = {
+        "tools": raw.get("tools", {}),
+        "worker_profiles": raw.get("worker_profiles", {}),
+    }
+    profiles = payload["worker_profiles"]
+    if isinstance(profiles, dict):
+        payload["worker_profiles"] = {
+            name: ({"name": name, **value} if isinstance(value, dict) else value)
+            for name, value in profiles.items()
+        }
+    return AgentRuntimeConfig.model_validate(payload)

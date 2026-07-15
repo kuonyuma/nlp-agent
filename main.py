@@ -65,6 +65,7 @@ async def _input(prompt: str) -> str:
 
 async def main() -> None:
     from core.coordinator_runtime import CoordinatorRuntime
+    from core.tool_registry import physical_tool_manager
     from core.worker_events import global_worker_event_bus
     from server.agent.grapy import build_agent
     from server.agent.node.coordinator import init_snip_tool
@@ -169,6 +170,7 @@ async def main() -> None:
         if memory_tasks:
             await asyncio.gather(*memory_tasks, return_exceptions=True)
         await global_session_storage.flush()
+        await physical_tool_manager.close()
         save_session_on_exit()
         await connection.close()
 

@@ -1,6 +1,6 @@
 [project]
 name = "nlp-agent"
-version = "0.8.0"
+version = "0.9.0"
 description = "A generic Coordinator/Worker NLP agent derived from Agentic-Travel"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,7 @@ dependencies = [
     "langchain-openai>=0.3",
     "langgraph>=0.2",
     "langgraph-checkpoint-sqlite>=2",
+    "mcp>=1.0",
     "openai>=1.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -27,6 +28,6 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["scripts"]
+testpaths = ["scripts", "tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
@@ -30,7 +31,9 @@ def read_local_file(file_path: str, offset: int = 0, limit: int = DEFAULT_READ_L
     except Exception:
         return f"错误：无法解析文件路径 '{file_path}'。"
 
-    if not resolved.startswith(ALLOWED_BASE):
+    try:
+        Path(resolved).relative_to(Path(ALLOWED_BASE).resolve())
+    except ValueError:
         return (
             f"安全限制：只允许读取 .data/ 目录下的文件。\n"
             f"请求路径：{file_path}\n"
