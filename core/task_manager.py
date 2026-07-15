@@ -1,73 +1,60 @@
-"""
-后台任务生命周期管理模块。
+"""Lifecycle, mailbox, retention, and wait-policy management for Workers."""
 
-该模块实现了 Worker 异步任务的注册、追踪、插队通信与强制终止，
-是 Coordinator 对后台 Worker 进行运行时管控的操作手柄。
-不涉及任何大模型逻辑，纯粹为 Python asyncio 层面的任务调度提供簿记能力。
-主要功能包括：
-- 提供 `ActiveTaskInfo` 数据类，封装单个任务的元信息（ID、类型、指令、
-  asyncio.Task future、状态、挂起消息队列）。
-- 提供 `TaskManager` 类，作为全局任务注册中心，支持任务注册、查询、
-  物理强杀（future.cancel）以及运行中插队消息投递。
-- 通过模块级单例 `global_task_manager` 供 `worker_tool`（生产者）
-  和 `task_stop_tool` / `send_message_tool`（消费者）跨模块共享。
+from __future__ import annotations
 
-Classes:
-    ActiveTaskInfo
-        单个后台任务的数据容器。字段：
-        - task_id: 任务唯一标识符。
-        - task_type: 任务类型（如 skill 名称或 base_tool 名称）。
-        - command: 任务启动时的指令字符串。
-        - future: asyncio.Task 对象，持有沙箱循环协程的引用，可用于 cancel 或 await。
-        - status: 任务状态（"running" 或 "killed"）。
-        - pending_messages: asyncio.Queue，接收 Coordinator 运行中追加的指令。
-
-    TaskManager
-        全局任务注册中心。内部维护 `active_tasks` 字典（task_id → ActiveTaskInfo）。
-        主要方法：
-        - register_task(task_id, task_type, command, future): 注册一个新任务。
-        - get_task(task_id): 按 ID 查询任务信息，不存在返回 None。
-        - stop_task(task_id): 取消 future 并将状态标记为 "killed"，返回任务摘要。
-        - queue_message(task_id, message): 向运行中任务的 pending_messages 插队投递消息。
-
-Side effects:
-    - 模块导入时即实例化 `global_task_manager` 单例，全局唯一。
-    - `stop_task` 直接调用 `future.cancel()`，会向对应协程注入 CancelledError，
-      被取消的沙箱循环应立即清理资源并退出。
-    - `pending_messages` 队列在每次 LLM 推理前被 `_execute_sandbox_loop` 清空，
-      不在本模块中消费。
-"""
 import asyncio
-from typing import Dict, Optional
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from typing import Optional
+
+from core.worker_protocol import WorkerCommand, WorkerWaitMode, WorkerWaitPlan
 from utils.logger import get_logger
 
-logger = get_logger("shiliu.core.task_manager")
+
+logger = get_logger("nlp_agent.task_manager")
 
 
+@dataclass(slots=True)
+class TaskManagerMetrics:
+    commands_enqueued: int = 0
+    commands_rejected: int = 0
+    terminal_tasks_pruned: int = 0
+
+
+@dataclass(slots=True)
 class ActiveTaskInfo:
-    def __init__(
-        self,
-        task_id: str,
-        task_type: str,
-        command: str,
-        future: asyncio.Task,
-        session_id: str,
-        join: bool,
-    ):
-        self.task_id = task_id
-        self.task_type = task_type
-        self.command = command
-        self.future = future
-        self.session_id = session_id
-        self.join = join
-        self.status = "running"
-        # 挂起队列，供 send_message 插队使用
-        self.pending_messages: asyncio.Queue = asyncio.Queue(maxsize=20)
+    task_id: str
+    task_type: str
+    command: str
+    future: asyncio.Task
+    session_id: str
+    join: bool
+    parent_turn_id: str = ""
+    wait_mode: WorkerWaitMode = "all"
+    quorum: int = 1
+    wait_timeout_s: float = 60.0
+    attempt: int = 1
+    status: str = "running"
+    completed_at: float | None = None
+    wait_consumed: bool = False
+    pending_messages: asyncio.Queue[WorkerCommand] = field(default_factory=asyncio.Queue)
 
 
 class TaskManager:
-    def __init__(self):
-        self.active_tasks: Dict[str, ActiveTaskInfo] = {}
+    def __init__(
+        self,
+        *,
+        mailbox_size: int = 20,
+        terminal_limit: int = 100,
+        terminal_ttl_s: float = 3600.0,
+    ) -> None:
+        self.mailbox_size = mailbox_size
+        self.terminal_limit = terminal_limit
+        self.terminal_ttl_s = terminal_ttl_s
+        self.active_tasks: dict[str, ActiveTaskInfo] = {}
+        self.terminal_tasks: OrderedDict[str, ActiveTaskInfo] = OrderedDict()
+        self.metrics = TaskManagerMetrics()
 
     def register_task(
         self,
@@ -77,51 +64,124 @@ class TaskManager:
         future: asyncio.Task,
         session_id: str,
         join: bool = True,
-    ):
-        self.active_tasks[task_id] = ActiveTaskInfo(
-            task_id, task_type, command, future, session_id, join
+        *,
+        parent_turn_id: str = "",
+        wait_mode: WorkerWaitMode = "all",
+        quorum: int = 1,
+        wait_timeout_s: float = 60.0,
+    ) -> ActiveTaskInfo:
+        previous = self.active_tasks.pop(task_id, None) or self.terminal_tasks.pop(task_id, None)
+        attempt = previous.attempt + 1 if previous else 1
+        task = ActiveTaskInfo(
+            task_id=task_id,
+            task_type=task_type,
+            command=command,
+            future=future,
+            session_id=session_id,
+            join=join,
+            parent_turn_id=parent_turn_id,
+            wait_mode=wait_mode,
+            quorum=max(1, quorum),
+            wait_timeout_s=max(0.1, wait_timeout_s),
+            attempt=attempt,
+            pending_messages=asyncio.Queue(maxsize=self.mailbox_size),
         )
-        logger.debug("后台任务已注册", task_id=task_id)
+        self.active_tasks[task_id] = task
+        logger.debug("Worker registered", task_id=task_id, attempt=attempt)
+        return task
 
     def get_task(self, task_id: str) -> Optional[ActiveTaskInfo]:
+        self.cleanup_terminal()
+        return self.active_tasks.get(task_id) or self.terminal_tasks.get(task_id)
+
+    def get_active_task(self, task_id: str) -> Optional[ActiveTaskInfo]:
         return self.active_tasks.get(task_id)
 
-    def joined_running_count(self, session_id: str) -> int:
-        return sum(
-            task.status == "running" and task.join and task.session_id == session_id
-            for task in self.active_tasks.values()
-        )
+    def queue_command(self, command: WorkerCommand) -> bool:
+        task = self.active_tasks.get(command.worker_id)
+        if task is None or task.session_id != command.session_id:
+            self.metrics.commands_rejected += 1
+            return False
+        try:
+            task.pending_messages.put_nowait(command)
+        except asyncio.QueueFull:
+            self.metrics.commands_rejected += 1
+            logger.warning("Worker mailbox is full", task_id=command.worker_id)
+            return False
+        self.metrics.commands_enqueued += 1
+        return True
 
     def complete_task(self, task_id: str, status: str) -> None:
-        task = self.active_tasks.get(task_id)
-        if task:
-            task.status = status
+        task = self.active_tasks.pop(task_id, None)
+        if task is None:
+            task = self.terminal_tasks.get(task_id)
+        if task is None:
+            return
+        task.status = status
+        task.completed_at = time.monotonic()
+        self.terminal_tasks[task_id] = task
+        self.terminal_tasks.move_to_end(task_id)
+        self.cleanup_terminal()
 
     def stop_task(self, task_id: str) -> dict:
-        task_info = self.active_tasks.get(task_id)
-        if not task_info:
-            raise ValueError(f"No task found with ID: {task_id}")
+        task = self.active_tasks.get(task_id)
+        if task is None:
+            raise ValueError(f"No running task found with ID: {task_id}")
+        task.future.cancel()
+        self.complete_task(task_id, "killed")
+        return {"taskId": task.task_id, "taskType": task.task_type, "command": task.command}
 
-        # 物理强杀
-        task_info.future.cancel()
-        task_info.status = "killed"
-        logger.warning("后台任务已被强制终止", task_id=task_id)
+    def build_wait_plan(self, session_id: str, parent_turn_id: str) -> WorkerWaitPlan | None:
+        tasks = [
+            task
+            for task in [*self.active_tasks.values(), *self.terminal_tasks.values()]
+            if task.session_id == session_id
+            and task.parent_turn_id == parent_turn_id
+            and task.join
+            and not task.wait_consumed
+        ]
+        if not tasks:
+            return None
+        modes = {task.wait_mode for task in tasks}
+        mode: WorkerWaitMode = modes.pop() if len(modes) == 1 else "all"
+        quorum = min(len(tasks), max(task.quorum for task in tasks))
+        timeout_s = min(task.wait_timeout_s for task in tasks)
+        return WorkerWaitPlan(
+            session_id=session_id,
+            parent_turn_id=parent_turn_id,
+            worker_ids=frozenset(task.task_id for task in tasks),
+            mode=mode,
+            quorum=quorum,
+            timeout_s=timeout_s,
+        )
+
+    def mark_wait_consumed(self, worker_ids: frozenset[str]) -> None:
+        for task_id in worker_ids:
+            task = self.active_tasks.get(task_id) or self.terminal_tasks.get(task_id)
+            if task:
+                task.wait_consumed = True
+
+    def cleanup_terminal(self, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        removed = 0
+        for task_id, task in list(self.terminal_tasks.items()):
+            expired = task.completed_at is not None and now - task.completed_at > self.terminal_ttl_s
+            over_limit = len(self.terminal_tasks) - removed > self.terminal_limit
+            if not expired and not over_limit:
+                continue
+            self.terminal_tasks.pop(task_id, None)
+            removed += 1
+        self.metrics.terminal_tasks_pruned += removed
+        return removed
+
+    def metrics_snapshot(self) -> dict[str, int]:
         return {
-            "taskId": task_info.task_id,
-            "taskType": task_info.task_type,
-            "command": task_info.command
+            "active_tasks": len(self.active_tasks),
+            "terminal_tasks": len(self.terminal_tasks),
+            "commands_enqueued": self.metrics.commands_enqueued,
+            "commands_rejected": self.metrics.commands_rejected,
+            "terminal_tasks_pruned": self.metrics.terminal_tasks_pruned,
         }
 
-    def queue_message(self, task_id: str, message: str):
-        task_info = self.active_tasks.get(task_id)
-        if task_info and task_info.status == "running":
-            try:
-                task_info.pending_messages.put_nowait(message)
-            except asyncio.QueueFull:
-                logger.warning("Worker mailbox is full", task_id=task_id)
-                return False
-            logger.info("已将追加指令放入任务队列", task_id=task_id)
-            return True
-        return False
 
 global_task_manager = TaskManager()

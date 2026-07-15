@@ -39,6 +39,7 @@ def _get_system_message() -> SystemMessage:
 
 ## 编排工具
 - spawn_worker：启动一个新 Worker。默认 join=true：当前会话等待它的结果并由系统批量恢复你；只有结果不影响当前答复的后台工作才设 join=false。
+- join=true 时可选择 wait_mode：all 等待全部、any 等待任意一个、quorum 等待指定数量；为等待设置合理的 wait_timeout_s。
 - send_message：继续已有 Worker，必须传入其 task_id。
 - TaskStop：停止仍在运行的 Worker。
 - SnipTool：压缩早期无关上下文。
