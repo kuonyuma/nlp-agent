@@ -13,8 +13,45 @@ providers:
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
 
+# 工具注册、权限与扩展均在此处集中配置。未声明的工具不会被隐式授权。
+tools:
+  policies:
+    coordinator:
+      allowed_tools:
+        - spawn_worker
+        - send_message
+        - TaskStop
+        - read_local_file
+        - get_current_time
+      allowed_capabilities:
+        - context.manage
+      denied_capabilities:
+        - business.write
+    worker:
+      allowed_tools: []
+      allowed_capabilities: []
+      denied_tools: []
+      denied_capabilities:
+        - runtime.control
+        - worker.manage
+  custom:
+    modules: []
+    entrypoint_group: nlp_agent.tools
+  mcp_servers: {}
+  # 示例：
+  # mcp_servers:
+  #   filesystem:
+  #     transport: stdio
+  #     command: npx
+  #     args: ["-y", "@modelcontextprotocol/server-filesystem", ".data"]
+  #     enabled_tools: ["read_file"]
+  #     allow_private_network: false
+  #     scopes: [worker]
+
+# Profile 只组合 Skill、能力与工具授权；Skill 本身负责 SOP 指令。
+worker_profiles: {}
+
 # 可按智能体名称覆盖 Worker 模型。
 # agents:
 #   code-reviewer:
 #     model: deepseek-reasoner
-
