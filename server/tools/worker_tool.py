@@ -65,6 +65,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, global_worker_event_bus
+from core.worker_protocol import WorkerCommand, WorkerWaitMode
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
@@ -89,6 +90,9 @@ class SpawnWorkerInput(BaseModel):
     directive: str = Field(..., description="详尽的操作指令，需包含所有参数。")
     model: str = Field(default="", description="可选模型覆盖，如 deepseek-v3.2、doubao-1-6-flash。留空则走默认解析链。")
     join: bool = Field(default=True, description="是否等待该 Worker 的结果后再继续 Coordinator。")
+    wait_mode: WorkerWaitMode = Field(default="all", description="等待策略：all、any 或 quorum。")
+    quorum: int = Field(default=1, ge=1, description="quorum 模式所需的完成数量。")
+    wait_timeout_s: float = Field(default=60.0, gt=0, le=600, description="最长等待秒数。")
 
 
 class SendMessageInput(BaseModel):
@@ -135,13 +139,22 @@ async def _execute_sandbox_loop(
                 task_info = global_task_manager.get_task(worker_id)
                 if task_info and not task_info.pending_messages.empty():
                     while not task_info.pending_messages.empty():
-                        new_msg = task_info.pending_messages.get_nowait()
+                        command = task_info.pending_messages.get_nowait()
                         interruption_msg = HumanMessage(
-                            content=f"【Coordinator 追加指令】：\n{new_msg}\n请优先处理此指令！"
+                            content=(
+                                f"【Coordinator {command.kind} 指令】\n"
+                                f"command_id={command.command_id}\n{command.content}\n"
+                                "请优先处理此指令！"
+                            )
                         )
                         messages.append(interruption_msg)
                         record_sidechain_transcript(session_id, worker_id, [interruption_msg])
-                        worker_logger.warning("接收到运行中插队指令", new_msg=new_msg)
+                        task_info.pending_messages.task_done()
+                        worker_logger.info(
+                            "Worker command received",
+                            command_id=command.command_id,
+                            command_kind=command.kind,
+                        )
 
                 response = await llm.ainvoke(messages)
                 messages.append(response)
@@ -246,17 +259,27 @@ async def _background_task_wrapper(
     task = global_task_manager.get_task(worker_id)
     join = task.join if task else True
     global_task_manager.complete_task(worker_id, notification.status)
-    await global_worker_event_bus.publish(
-        WorkerCompletedEvent(
-            session_id=session_id,
-            worker_id=worker_id,
-            status=notification.status,
-            summary=notification.summary,
-            result=notification.result,
-            usage=notification.usage,
-            join=join,
+    try:
+        await global_worker_event_bus.publish(
+            WorkerCompletedEvent.create(
+                session_id=session_id,
+                worker_id=worker_id,
+                parent_turn_id=task.parent_turn_id if task else "",
+                attempt=task.attempt if task else 1,
+                status=notification.status,
+                summary=notification.summary,
+                result=notification.result,
+                usage=notification.usage,
+                join=join,
+            )
         )
-    )
+    except RuntimeError as error:
+        logger.error(
+            "Worker result delivery hit backpressure",
+            worker_id=worker_id,
+            session_id=session_id,
+            error=str(error),
+        )
 
 
 @tool("spawn_worker", args_schema=SpawnWorkerInput)
@@ -266,6 +289,9 @@ async def spawn_worker(
     config: RunnableConfig,
     model: str = "",
     join: bool = True,
+    wait_mode: WorkerWaitMode = "all",
+    quorum: int = 1,
+    wait_timeout_s: float = 60.0,
 ) -> str:
     """启动一个新的 Worker 执行任务。使用此工具时，Worker 没有之前的记忆。
 
@@ -288,6 +314,7 @@ async def spawn_worker(
     from configs.settings import settings
 
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
+    parent_turn_id = config.get("configurable", {}).get("turn_id", "")
     worker_id = create_agent_id(agent_name)
 
     resolved_model = settings._resolve_model_name(agent_name, model or None)
@@ -341,6 +368,10 @@ async def spawn_worker(
         "directive": directive,
         "model": resolved_model,
         "join": join,
+        "parentTurnId": parent_turn_id,
+        "waitMode": wait_mode,
+        "quorum": quorum,
+        "waitTimeoutS": wait_timeout_s,
     })
     record_sidechain_transcript(session_id, worker_id, initial_messages)
 
@@ -355,6 +386,10 @@ async def spawn_worker(
         future=bg_task,
         session_id=session_id,
         join=join,
+        parent_turn_id=parent_turn_id,
+        wait_mode=wait_mode,
+        quorum=quorum,
+        wait_timeout_s=wait_timeout_s,
     )
 
     return WorkerNotificationSpec(
@@ -380,11 +415,25 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
         JSON 字符串（WorkerNotificationSpec），包含 task_id 和状态摘要。
     """
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
+    current_turn_id = config.get("configurable", {}).get("turn_id", "")
 
     # 情况 A：Worker 正在运行 → 插队投递，不重启
-    task = global_task_manager.get_task(to_agent_id)
-    if task and task.status == "running":
-        global_task_manager.queue_message(to_agent_id, message)
+    task = global_task_manager.get_active_task(to_agent_id)
+    if task:
+        accepted = global_task_manager.queue_command(
+            WorkerCommand.create(
+                session_id=session_id,
+                worker_id=to_agent_id,
+                kind="continue",
+                content=message,
+            )
+        )
+        if not accepted:
+            return WorkerNotificationSpec(
+                task_id=to_agent_id,
+                status="failed",
+                summary="Worker mailbox is full; retry later.",
+            ).model_dump_json(exclude_none=True)
         return WorkerNotificationSpec(
             task_id=to_agent_id,
             status="started",
@@ -424,6 +473,10 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
         future=bg_task,
         session_id=session_id,
         join=bool(metadata.get("join", True)),
+        parent_turn_id=current_turn_id or str(metadata.get("parentTurnId", "")),
+        wait_mode=metadata.get("waitMode", "all"),
+        quorum=int(metadata.get("quorum", 1)),
+        wait_timeout_s=float(metadata.get("waitTimeoutS", 60.0)),
     )
 
     return WorkerNotificationSpec(

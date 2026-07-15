@@ -1,55 +1,131 @@
-"""Typed, session-scoped events emitted by isolated Worker agents."""
+"""Typed, deduplicated, session-scoped Worker completion events."""
 
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+import inspect
+import time
+import uuid
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal
 
 from schemas.models import WorkerUsageSpec
+from utils.logger import get_logger
 
 
+logger = get_logger("nlp_agent.worker_events")
 WorkerTerminalStatus = Literal["completed", "failed", "killed"]
-SessionNotifier = Callable[[str], Awaitable[None]]
+SessionNotifier = Callable[[str], Awaitable[None] | None]
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerCompletedEvent:
-    """A terminal Worker result; this is never a user-authored message."""
-
+    event_id: str
     session_id: str
     worker_id: str
+    parent_turn_id: str
+    attempt: int
+    sequence: int
+    created_at: float
     status: WorkerTerminalStatus
     summary: str
     result: str | None
     usage: WorkerUsageSpec | None
     join: bool
 
+    @classmethod
+    def create(
+        cls,
+        *,
+        session_id: str,
+        worker_id: str,
+        parent_turn_id: str,
+        attempt: int,
+        status: WorkerTerminalStatus,
+        summary: str,
+        result: str | None,
+        usage: WorkerUsageSpec | None,
+        join: bool,
+        sequence: int = 1,
+        event_id: str | None = None,
+    ) -> "WorkerCompletedEvent":
+        return cls(
+            event_id=event_id or str(uuid.uuid4()),
+            session_id=session_id,
+            worker_id=worker_id,
+            parent_turn_id=parent_turn_id,
+            attempt=attempt,
+            sequence=sequence,
+            created_at=time.time(),
+            status=status,
+            summary=summary,
+            result=result,
+            usage=usage,
+            join=join,
+        )
+
+
+@dataclass(slots=True)
+class WorkerEventMetrics:
+    published: int = 0
+    consumed: int = 0
+    duplicate_events: int = 0
+    publish_timeouts: int = 0
+    queue_depth_peak: int = 0
+
 
 class WorkerEventBus:
-    """Routes Worker completion events to the owning Coordinator session only."""
-
-    def __init__(self, max_events_per_session: int = 100) -> None:
+    def __init__(
+        self,
+        max_events_per_session: int = 100,
+        *,
+        publish_timeout_s: float = 5.0,
+        dedupe_window: int = 1000,
+    ) -> None:
         self._max_events_per_session = max_events_per_session
+        self._publish_timeout_s = publish_timeout_s
+        self._dedupe_window = dedupe_window
         self._queues: dict[str, asyncio.Queue[WorkerCompletedEvent]] = defaultdict(
             lambda: asyncio.Queue(maxsize=self._max_events_per_session)
         )
-        self._notifier: SessionNotifier | None = None
+        self._subscribers: dict[str, tuple[str | None, SessionNotifier]] = {}
+        self._seen_ids: dict[str, set[str]] = defaultdict(set)
+        self._seen_order: dict[str, deque[str]] = defaultdict(deque)
+        self.metrics = WorkerEventMetrics()
 
-    def set_notifier(self, notifier: SessionNotifier | None) -> None:
-        self._notifier = notifier
+    def subscribe(self, notifier: SessionNotifier, session_id: str | None = None) -> str:
+        subscription_id = str(uuid.uuid4())
+        self._subscribers[subscription_id] = (session_id, notifier)
+        return subscription_id
 
-    async def publish(self, event: WorkerCompletedEvent) -> None:
+    def unsubscribe(self, subscription_id: str) -> None:
+        self._subscribers.pop(subscription_id, None)
+
+    async def publish(self, event: WorkerCompletedEvent) -> bool:
+        seen = self._seen_ids[event.session_id]
+        if event.event_id in seen:
+            self.metrics.duplicate_events += 1
+            return False
         queue = self._queues[event.session_id]
-        await queue.put(event)
-        if self._notifier is not None:
-            await self._notifier(event.session_id)
+        try:
+            await asyncio.wait_for(queue.put(event), timeout=self._publish_timeout_s)
+        except asyncio.TimeoutError:
+            self.metrics.publish_timeouts += 1
+            raise RuntimeError(f"Worker event queue is full for session {event.session_id}")
+        self._remember(event.session_id, event.event_id)
+        self.metrics.published += 1
+        self.metrics.queue_depth_peak = max(self.metrics.queue_depth_peak, queue.qsize())
+        self._notify_subscribers(event.session_id)
+        return True
 
-    async def get(self, session_id: str) -> WorkerCompletedEvent:
-        return await self._queues[session_id].get()
+    async def get(self, session_id: str, timeout_s: float | None = None) -> WorkerCompletedEvent:
+        queue = self._queues[session_id]
+        event = await queue.get() if timeout_s is None else await asyncio.wait_for(queue.get(), timeout_s)
+        self.metrics.consumed += 1
+        return event
 
-    def drain(self, session_id: str, limit: int = 20) -> list[WorkerCompletedEvent]:
+    def drain(self, session_id: str, limit: int = 100) -> list[WorkerCompletedEvent]:
         queue = self._queues[session_id]
         events: list[WorkerCompletedEvent] = []
         while len(events) < limit:
@@ -57,10 +133,48 @@ class WorkerEventBus:
                 events.append(queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
+        self.metrics.consumed += len(events)
         return events
 
     def has_pending(self, session_id: str) -> bool:
         return not self._queues[session_id].empty()
+
+    def metrics_snapshot(self) -> dict[str, int]:
+        return {
+            "published": self.metrics.published,
+            "consumed": self.metrics.consumed,
+            "duplicate_events": self.metrics.duplicate_events,
+            "publish_timeouts": self.metrics.publish_timeouts,
+            "queue_depth_peak": self.metrics.queue_depth_peak,
+        }
+
+    def _remember(self, session_id: str, event_id: str) -> None:
+        seen = self._seen_ids[session_id]
+        order = self._seen_order[session_id]
+        seen.add(event_id)
+        order.append(event_id)
+        while len(order) > self._dedupe_window:
+            seen.discard(order.popleft())
+
+    def _notify_subscribers(self, session_id: str) -> None:
+        for subscribed_session, notifier in list(self._subscribers.values()):
+            if subscribed_session is not None and subscribed_session != session_id:
+                continue
+            try:
+                result = notifier(session_id)
+                if inspect.isawaitable(result):
+                    task = asyncio.create_task(result)
+                    task.add_done_callback(self._log_notifier_error)
+            except Exception:
+                logger.exception("Worker event subscriber failed", session_id=session_id)
+
+    @staticmethod
+    def _log_notifier_error(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error:
+            logger.error("Worker event subscriber failed", error=str(error))
 
 
 global_worker_event_bus = WorkerEventBus()
