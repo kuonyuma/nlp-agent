@@ -64,7 +64,7 @@ import time
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from core.task_manager import global_task_manager
-from core.message_queue import global_message_queue
+from core.worker_events import WorkerCompletedEvent, global_worker_event_bus
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
@@ -225,19 +225,38 @@ async def _background_task_wrapper(
         allowed_tools: Worker 被授权使用的工具对象列表。
         model_name: 已解析的 provider 名称。
     """
+    notification: WorkerNotificationSpec
     try:
         notification_json = await _execute_sandbox_loop(
             worker_id, session_id, initial_messages, allowed_tools, model_name
         )
+        notification = WorkerNotificationSpec.model_validate_json(notification_json)
+    except asyncio.CancelledError:
+        notification = WorkerNotificationSpec(
+            task_id=worker_id,
+            status="killed",
+            summary="Worker was cancelled by the Coordinator.",
+        )
     except Exception as e:
-        notif = WorkerNotificationSpec(
+        notification = WorkerNotificationSpec(
             task_id=worker_id,
             status="failed",
             summary=f"沙箱外壳崩溃 {str(e)}",
         )
-        notification_json = notif.model_dump_json(exclude_none=True)
-
-    await global_message_queue.enqueue(session_id=session_id, message=notification_json)
+    task = global_task_manager.get_task(worker_id)
+    join = task.join if task else True
+    global_task_manager.complete_task(worker_id, notification.status)
+    await global_worker_event_bus.publish(
+        WorkerCompletedEvent(
+            session_id=session_id,
+            worker_id=worker_id,
+            status=notification.status,
+            summary=notification.summary,
+            result=notification.result,
+            usage=notification.usage,
+            join=join,
+        )
+    )
 
 
 @tool("spawn_worker", args_schema=SpawnWorkerInput)
