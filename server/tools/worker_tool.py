@@ -78,6 +78,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from core.skill_loader import skill_loader
 from server.agent.llm_factory import get_worker_llm, get_tool_llm
 from core.tool_registry import physical_tool_manager
+from core.tool_runtime import ToolGrantSnapshot, ToolSet
 from server.agent.node.session_storage import (
     write_agent_metadata,
     record_sidechain_transcript,
@@ -121,7 +122,7 @@ async def _execute_sandbox_loop(
     worker_id: str,
     session_id: str,
     messages: list,
-    allowed_tools_objects: list,
+    toolset: ToolSet | list,
     model_name: str = "",
     *,
     budget: WorkerResourceBudget | None = None,
@@ -130,10 +131,15 @@ async def _execute_sandbox_loop(
     """Execute one isolated Worker attempt under an explicit resource budget."""
     worker_logger = logger.bind(worker_id=worker_id, session_id=session_id)
     budget = budget or WorkerResourceBudget()
+    if not isinstance(toolset, ToolSet):
+        toolset = physical_tool_manager.get_worker_toolset(
+            allowed_names=[item.name for item in toolset],
+            session_id=session_id,
+            profile="legacy",
+        )
     llm = get_worker_llm(tool_specified_model=model_name) if model_name else get_tool_llm()
-    if allowed_tools_objects:
-        llm = llm.bind_tools(allowed_tools_objects)
-    tools_by_name = {t.name: t for t in allowed_tools_objects}
+    if toolset.tools:
+        llm = llm.bind_tools(toolset.tools)
     start_time = time.time()
     total_tokens_used = 0
     tool_uses_count = 0
@@ -217,29 +223,31 @@ async def _execute_sandbox_loop(
                     output=str(response.content),
                 )
 
-            for tool_call in response.tool_calls:
-                if tool_uses_count >= budget.max_tool_calls:
-                    return result(
-                        status="failed",
-                        summary="Worker exceeded its tool-call budget.",
-                        termination_reason="tool_budget",
-                        error=WorkerErrorSpec(
-                            category="budget",
-                            message=f"Tool-call budget exceeded: {budget.max_tool_calls}",
-                            retryable=False,
-                        ),
-                    )
-                tool_uses_count += 1
-                t_name, t_args, t_id = tool_call["name"], tool_call["args"], tool_call["id"]
-                worker_logger.info("发起工具调用", tool_name=t_name)
-                if t_name in tools_by_name:
-                    try:
-                        tool_result_content = await tools_by_name[t_name].ainvoke(t_args)
-                    except Exception as error:
-                        tool_result_content = f"执行出错: {error}"
-                else:
-                    tool_result_content = f"权限拒绝: 不允许使用工具 {t_name}"
-                tool_msg = ToolMessage(content=str(tool_result_content), tool_call_id=t_id)
+            remaining = budget.max_tool_calls - tool_uses_count
+            if remaining < len(response.tool_calls):
+                return result(
+                    status="failed",
+                    summary="Worker exceeded its tool-call budget.",
+                    termination_reason="tool_budget",
+                    error=WorkerErrorSpec(
+                        category="budget",
+                        message=f"Tool-call budget exceeded: {budget.max_tool_calls}",
+                        retryable=False,
+                    ),
+                )
+            tool_uses_count += len(response.tool_calls)
+            calls = [(call["name"], call["args"]) for call in response.tool_calls]
+            for name, _arguments in calls:
+                worker_logger.info("发起工具调用", tool_name=name)
+            tool_results = await toolset.execute_many(calls)
+            for tool_call, execution in zip(response.tool_calls, tool_results, strict=True):
+                tool_msg = ToolMessage(
+                    content=execution.to_model_content(),
+                    tool_call_id=tool_call["id"],
+                    name=tool_call["name"],
+                    status="success" if execution.ok else "error",
+                    artifact=execution.model_dump(mode="json"),
+                )
                 messages.append(tool_msg)
                 record_sidechain_transcript(session_id, worker_id, [tool_msg])
 
@@ -372,7 +380,7 @@ async def _background_task_wrapper(
     worker_id: str,
     session_id: str,
     initial_messages: list,
-    allowed_tools: list,
+    toolset: ToolSet,
     model_name: str = "",
 ) -> None:
     """Own the complete Worker lifecycle and publish exactly one terminal result."""
@@ -389,7 +397,7 @@ async def _background_task_wrapper(
                 worker_id,
                 session_id,
                 initial_messages,
-                allowed_tools,
+                toolset,
                 model_name,
                 budget=task.budget,
                 attempt=attempt,
@@ -499,22 +507,22 @@ async def spawn_worker(
     parent_worker_id = config.get("configurable", {}).get("worker_id", "")
     worker_id = create_agent_id(agent_name)
 
-    resolved_model = settings._resolve_model_name(agent_name, model or None)
-
-    sop_prompt = ""
-    allowed_tools_objects = []
-
-    if skill_loader.is_skill(agent_name):
-        skill = skill_loader.skills[agent_name]
-        sop_prompt = skill.prompt_sop
-        allowed_tools_objects = physical_tool_manager.get_worker_tools(skill.allowed_tools)
-    elif skill_loader.is_base_tool(agent_name):
-        sop_prompt = "你是一个精确的工具执行特工。直接使用工具获取数据，不要推理。"
-        allowed_tools_objects = physical_tool_manager.get_worker_tools([agent_name])
-    else:
+    try:
+        profile = skill_loader.resolve_profile(agent_name)
+        skill_loader.validate_tool_references(set(physical_tool_manager.runtime.catalog.names()))
+        toolset = physical_tool_manager.get_worker_toolset(
+            allowed_names=profile.allowed_tools,
+            capabilities=profile.capabilities,
+            denied_names=profile.denied_tools,
+            session_id=session_id,
+            profile=profile.name,
+        )
+    except ValueError as error:
         return WorkerNotificationSpec(
-            task_id=worker_id, status="failed", summary="未知特工"
+            task_id=worker_id, status="failed", summary=str(error)
         ).model_dump_json(exclude_none=True)
+    resolved_model = settings._resolve_model_name(agent_name, model or profile.model)
+    sop_prompt = profile.system_prompt
 
     import datetime
     current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')
@@ -549,6 +557,9 @@ async def spawn_worker(
         "agentType": agent_name,
         "directive": directive,
         "model": resolved_model,
+        "profile": profile.name,
+        "skills": list(profile.skills),
+        "toolGrant": toolset.snapshot.model_dump(mode="json"),
         "join": join,
         "parentTurnId": parent_turn_id,
         "waitMode": wait_mode,
@@ -566,7 +577,7 @@ async def spawn_worker(
     record_sidechain_transcript(session_id, worker_id, initial_messages)
 
     bg_task = asyncio.create_task(
-        _background_task_wrapper(worker_id, session_id, initial_messages, allowed_tools_objects, resolved_model)
+        _background_task_wrapper(worker_id, session_id, initial_messages, toolset, resolved_model)
     )
 
     global_task_manager.register_task(
@@ -653,15 +664,29 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
 
     agent_name = metadata.get("agentType", "unknown")
     resolved_model = metadata.get("model", "")
-    allowed_tools_objects = []
-
-    if skill_loader.is_skill(agent_name):
-        allowed_tools_objects = physical_tool_manager.get_worker_tools(skill_loader.skills[agent_name].allowed_tools)
-    elif skill_loader.is_base_tool(agent_name):
-        allowed_tools_objects = physical_tool_manager.get_worker_tools([agent_name])
+    try:
+        grant_data = metadata.get("toolGrant")
+        if grant_data:
+            snapshot = ToolGrantSnapshot.model_validate(grant_data)
+            toolset = physical_tool_manager.get_worker_toolset_from_snapshot(snapshot)
+        else:
+            profile = skill_loader.resolve_profile(agent_name)
+            toolset = physical_tool_manager.get_worker_toolset(
+                allowed_names=profile.allowed_tools,
+                capabilities=profile.capabilities,
+                denied_names=profile.denied_tools,
+                session_id=session_id,
+                profile=profile.name,
+            )
+    except ValueError as error:
+        return WorkerNotificationSpec(
+            task_id=to_agent_id,
+            status="failed",
+            summary=f"Worker 工具授权无法恢复：{error}",
+        ).model_dump_json(exclude_none=True)
 
     bg_task = asyncio.create_task(
-        _background_task_wrapper(to_agent_id, session_id, messages, allowed_tools_objects, resolved_model)
+        _background_task_wrapper(to_agent_id, session_id, messages, toolset, resolved_model)
     )
 
     budget_data = metadata.get("budget", {})
