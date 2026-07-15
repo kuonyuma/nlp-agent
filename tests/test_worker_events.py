@@ -1,21 +1,27 @@
 import asyncio
+import time
 
 import pytest
 
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
+from schemas.models import WorkerExecutionResultSpec, WorkerTimingSpec
 
 
 def make_event(event_id="event-1"):
+    now = time.time()
     return WorkerCompletedEvent.create(
         event_id=event_id,
         session_id="session-a",
         worker_id="worker-a",
         parent_turn_id="turn-a",
         attempt=1,
-        status="completed",
-        summary="done",
-        result="result",
-        usage=None,
+        execution=WorkerExecutionResultSpec(
+            status="completed",
+            summary="done",
+            output="result",
+            timing=WorkerTimingSpec(started_at=now, completed_at=now, duration_ms=0),
+            termination_reason="completed",
+        ),
         join=True,
     )
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -7,6 +8,7 @@ from langchain_core.messages import HumanMessage
 from core.coordinator_runtime import CoordinatorRuntime
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
+from schemas.models import WorkerExecutionResultSpec, WorkerTimingSpec
 
 
 @pytest.fixture(autouse=True)
@@ -40,16 +42,20 @@ def register_worker(worker_id, turn_id, *, mode="all", quorum=1, timeout=1.0):
 
 
 def event(worker_id, turn_id, *, event_id=None):
+    now = time.time()
     return WorkerCompletedEvent.create(
         event_id=event_id,
         session_id="session-a",
         worker_id=worker_id,
         parent_turn_id=turn_id,
         attempt=1,
-        status="completed",
-        summary="done",
-        result=f"answer-{worker_id}",
-        usage=None,
+        execution=WorkerExecutionResultSpec(
+            status="completed",
+            summary="done",
+            output=f"answer-{worker_id}",
+            timing=WorkerTimingSpec(started_at=now, completed_at=now, duration_ms=0),
+            termination_reason="completed",
+        ),
         join=True,
     )
 
@@ -73,6 +79,7 @@ async def test_wait_barrier_resumes_at_configured_threshold(mode, quorum, comple
     )
     await asyncio.sleep(0)
     for worker_id in completed_workers:
+        global_task_manager.transition_task(worker_id, "running", "test_started")
         global_task_manager.complete_task(worker_id, "completed")
         await bus.publish(event(worker_id, "turn-1"))
     await asyncio.wait_for(turn, 1)
@@ -126,10 +133,15 @@ async def test_detached_result_is_serialized_through_runtime():
         worker_id="detached",
         parent_turn_id="turn-detached",
         attempt=1,
-        status="completed",
-        summary="done",
-        result="later",
-        usage=None,
+        execution=WorkerExecutionResultSpec(
+            status="completed",
+            summary="done",
+            output="later",
+            timing=WorkerTimingSpec(
+                started_at=time.time(), completed_at=time.time(), duration_ms=0
+            ),
+            termination_reason="completed",
+        ),
         join=False,
     )
     await bus.publish(detached)
