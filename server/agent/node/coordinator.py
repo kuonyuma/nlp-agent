@@ -16,6 +16,7 @@ from utils.logger import get_logger
 logger = get_logger("nlp_agent.coordinator")
 _CACHED_SYSTEM_MESSAGE = None
 _CACHED_LLM_WITH_TOOLS = None
+_CACHED_TOOLSET_KEY = None
 _CACHED_SNIP_TOOL = None
 _SNIP_APP_REF = None
 _SNIP_SESSION_GETTER = None
@@ -60,38 +61,35 @@ Worker 工具调用会先返回 started，最终结构化结果随后以 [INTERN
 def init_snip_tool(app, session_id_getter) -> None:
     """绑定依赖当前 LangGraph 实例的 SnipTool。"""
 
-    global _SNIP_APP_REF, _SNIP_SESSION_GETTER, _CACHED_SNIP_TOOL, _CACHED_LLM_WITH_TOOLS
+    global _SNIP_APP_REF, _SNIP_SESSION_GETTER, _CACHED_SNIP_TOOL, _CACHED_LLM_WITH_TOOLS, _CACHED_TOOLSET_KEY
     _SNIP_APP_REF = app
     _SNIP_SESSION_GETTER = session_id_getter
 
     from server.tools.snip_tool import make_snip_tool
 
     _CACHED_SNIP_TOOL = make_snip_tool(app, session_id_getter)
-    tool_node = getattr(app, "_tool_node", None)
-    if tool_node is not None:
-        if hasattr(tool_node, "tools"):
-            tool_node.tools.append(_CACHED_SNIP_TOOL)
-        if hasattr(tool_node, "tools_by_name"):
-            tool_node.tools_by_name[_CACHED_SNIP_TOOL.name] = _CACHED_SNIP_TOOL
-
+    physical_tool_manager.register_orchestration_tool(
+        _CACHED_SNIP_TOOL, capability="context.manage"
+    )
     _CACHED_LLM_WITH_TOOLS = None
+    _CACHED_TOOLSET_KEY = None
+
+
+def get_coordinator_toolset():
+    tools = [spawn_worker, send_message, task_stop_tool]
+    if _CACHED_SNIP_TOOL is not None:
+        tools.append(_CACHED_SNIP_TOOL)
+    return physical_tool_manager.get_coordinator_toolset(tools)
 
 
 def _get_llm_with_tools() -> BaseChatModel:
-    global _CACHED_LLM_WITH_TOOLS, _CACHED_SNIP_TOOL
-    if _CACHED_LLM_WITH_TOOLS is not None:
+    global _CACHED_LLM_WITH_TOOLS, _CACHED_SNIP_TOOL, _CACHED_TOOLSET_KEY
+    toolset = get_coordinator_toolset()
+    cache_key = (physical_tool_manager.catalog_revision, toolset.names)
+    if _CACHED_LLM_WITH_TOOLS is not None and _CACHED_TOOLSET_KEY == cache_key:
         return _CACHED_LLM_WITH_TOOLS
-
-    tools = [spawn_worker, send_message, task_stop_tool]
-    if _SNIP_APP_REF is not None and _SNIP_SESSION_GETTER is not None:
-        if _CACHED_SNIP_TOOL is None:
-            from server.tools.snip_tool import make_snip_tool
-
-            _CACHED_SNIP_TOOL = make_snip_tool(_SNIP_APP_REF, _SNIP_SESSION_GETTER)
-        tools.append(_CACHED_SNIP_TOOL)
-
-    coordinator_tools = physical_tool_manager.get_coordinator_tools(tools)
-    _CACHED_LLM_WITH_TOOLS = get_planner_llm().bind_tools(coordinator_tools)
+    _CACHED_LLM_WITH_TOOLS = get_planner_llm().bind_tools(toolset.tools)
+    _CACHED_TOOLSET_KEY = cache_key
     return _CACHED_LLM_WITH_TOOLS
 
 

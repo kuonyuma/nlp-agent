@@ -35,13 +35,14 @@ import aiosqlite
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.prebuilt import tools_condition
-from server.agent.compression.tool_persistence import PersistingToolNode
 
 from server.agent.state import AgentState
 from server.tools.task_stop_tool import task_stop_tool
 from server.agent.node.session_storage import DATA_DIR
-from server.agent.node.coordinator import coordinator_node
+from server.agent.node.coordinator import coordinator_node, get_coordinator_toolset
 from server.tools.worker_tool import spawn_worker, send_message
+from server.tools.runtime_tool_node import RuntimeToolNode
+from core.tool_registry import physical_tool_manager
 
 
 async def build_agent():
@@ -52,11 +53,8 @@ async def build_agent():
 
     """
     workflow = StateGraph(AgentState)
-    # SnipTool 在 build_agent 之后才能初始化（需要 app 实例），
-    # 所以这里只注册基础工具，SnipTool 通过 coordinator.init_snip_tool() 动态注入到 LLM 绑定中。
-    # PersistingToolNode 使用可变列表，init_snip_tool 会在初始化时追加 SnipTool 到这个列表。
-    _base_tools = [spawn_worker, send_message, task_stop_tool]
-    tool_node = PersistingToolNode(_base_tools)
+    await physical_tool_manager.start_extensions()
+    tool_node = RuntimeToolNode(get_coordinator_toolset)
     workflow.add_node("coordinator", coordinator_node)
     workflow.add_node("tools", tool_node)
 
@@ -76,6 +74,4 @@ async def build_agent():
     checkpointer = AsyncSqliteSaver(conn)
 
     compiled = workflow.compile(checkpointer=checkpointer)
-    # 暴露 tool_node 引用，供 init_snip_tool 动态追加 SnipTool 工具
-    compiled._tool_node = tool_node
     return compiled, conn
