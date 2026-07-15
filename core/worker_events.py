@@ -8,14 +8,13 @@ import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable
 
-from schemas.models import WorkerUsageSpec
+from schemas.models import WorkerExecutionResultSpec
 from utils.logger import get_logger
 
 
 logger = get_logger("nlp_agent.worker_events")
-WorkerTerminalStatus = Literal["completed", "failed", "killed"]
 SessionNotifier = Callable[[str], Awaitable[None] | None]
 
 
@@ -28,10 +27,7 @@ class WorkerCompletedEvent:
     attempt: int
     sequence: int
     created_at: float
-    status: WorkerTerminalStatus
-    summary: str
-    result: str | None
-    usage: WorkerUsageSpec | None
+    execution: WorkerExecutionResultSpec
     join: bool
 
     @classmethod
@@ -42,10 +38,7 @@ class WorkerCompletedEvent:
         worker_id: str,
         parent_turn_id: str,
         attempt: int,
-        status: WorkerTerminalStatus,
-        summary: str,
-        result: str | None,
-        usage: WorkerUsageSpec | None,
+        execution: WorkerExecutionResultSpec,
         join: bool,
         sequence: int = 1,
         event_id: str | None = None,
@@ -58,10 +51,7 @@ class WorkerCompletedEvent:
             attempt=attempt,
             sequence=sequence,
             created_at=time.time(),
-            status=status,
-            summary=summary,
-            result=result,
-            usage=usage,
+            execution=execution,
             join=join,
         )
 

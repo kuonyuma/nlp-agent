@@ -34,6 +34,7 @@ async def test_terminal_tasks_leave_active_set_and_are_pruned():
         future = asyncio.create_task(asyncio.sleep(10))
         futures.append(future)
         manager.register_task(worker_id, "research", "task", future, "s1")
+        manager.transition_task(worker_id, "running", "test_started")
         manager.complete_task(worker_id, "completed")
 
     assert manager.active_tasks == {}
