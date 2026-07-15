@@ -88,6 +88,7 @@ class SpawnWorkerInput(BaseModel):
     agent_name: str = Field(..., description="必须是黄页中存在的技能包名或基础工具名。")
     directive: str = Field(..., description="详尽的操作指令，需包含所有参数。")
     model: str = Field(default="", description="可选模型覆盖，如 deepseek-v3.2、doubao-1-6-flash。留空则走默认解析链。")
+    join: bool = Field(default=True, description="是否等待该 Worker 的结果后再继续 Coordinator。")
 
 
 class SendMessageInput(BaseModel):
@@ -240,7 +241,13 @@ async def _background_task_wrapper(
 
 
 @tool("spawn_worker", args_schema=SpawnWorkerInput)
-async def spawn_worker(agent_name: str, directive: str, config: RunnableConfig, model: str = "") -> str:
+async def spawn_worker(
+    agent_name: str,
+    directive: str,
+    config: RunnableConfig,
+    model: str = "",
+    join: bool = True,
+) -> str:
     """启动一个新的 Worker 执行任务。使用此工具时，Worker 没有之前的记忆。
 
     Worker 模型解析优先级（由高到低）：
@@ -314,6 +321,7 @@ async def spawn_worker(agent_name: str, directive: str, config: RunnableConfig, 
         "agentType": agent_name,
         "directive": directive,
         "model": resolved_model,
+        "join": join,
     })
     record_sidechain_transcript(session_id, worker_id, initial_messages)
 
@@ -326,12 +334,15 @@ async def spawn_worker(agent_name: str, directive: str, config: RunnableConfig, 
         task_type=agent_name,
         command=directive,
         future=bg_task,
+        session_id=session_id,
+        join=join,
     )
 
     return WorkerNotificationSpec(
         task_id=worker_id,
         status="started",
-        summary="任务已在后台启动。如需终止，请使用 TaskStop 工具。"
+        summary="任务已在后台启动。如需终止，请使用 TaskStop 工具。",
+        join=join,
     ).model_dump_json(exclude_none=True)
 
 
@@ -392,6 +403,8 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
         task_type=agent_name,
         command=message,
         future=bg_task,
+        session_id=session_id,
+        join=bool(metadata.get("join", True)),
     )
 
     return WorkerNotificationSpec(
