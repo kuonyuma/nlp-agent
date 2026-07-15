@@ -45,26 +45,57 @@ logger = get_logger("shiliu.core.task_manager")
 
 
 class ActiveTaskInfo:
-    def __init__(self, task_id: str, task_type: str, command: str, future: asyncio.Task):
+    def __init__(
+        self,
+        task_id: str,
+        task_type: str,
+        command: str,
+        future: asyncio.Task,
+        session_id: str,
+        join: bool,
+    ):
         self.task_id = task_id
         self.task_type = task_type
         self.command = command
         self.future = future
+        self.session_id = session_id
+        self.join = join
         self.status = "running"
         # 挂起队列，供 send_message 插队使用
-        self.pending_messages: asyncio.Queue = asyncio.Queue()
+        self.pending_messages: asyncio.Queue = asyncio.Queue(maxsize=20)
 
 
 class TaskManager:
     def __init__(self):
         self.active_tasks: Dict[str, ActiveTaskInfo] = {}
 
-    def register_task(self, task_id: str, task_type: str, command: str, future: asyncio.Task):
-        self.active_tasks[task_id] = ActiveTaskInfo(task_id, task_type, command, future)
+    def register_task(
+        self,
+        task_id: str,
+        task_type: str,
+        command: str,
+        future: asyncio.Task,
+        session_id: str,
+        join: bool = True,
+    ):
+        self.active_tasks[task_id] = ActiveTaskInfo(
+            task_id, task_type, command, future, session_id, join
+        )
         logger.debug("后台任务已注册", task_id=task_id)
 
     def get_task(self, task_id: str) -> Optional[ActiveTaskInfo]:
         return self.active_tasks.get(task_id)
+
+    def joined_running_count(self, session_id: str) -> int:
+        return sum(
+            task.status == "running" and task.join and task.session_id == session_id
+            for task in self.active_tasks.values()
+        )
+
+    def complete_task(self, task_id: str, status: str) -> None:
+        task = self.active_tasks.get(task_id)
+        if task:
+            task.status = status
 
     def stop_task(self, task_id: str) -> dict:
         task_info = self.active_tasks.get(task_id)
@@ -84,7 +115,11 @@ class TaskManager:
     def queue_message(self, task_id: str, message: str):
         task_info = self.active_tasks.get(task_id)
         if task_info and task_info.status == "running":
-            task_info.pending_messages.put_nowait(message)
+            try:
+                task_info.pending_messages.put_nowait(message)
+            except asyncio.QueueFull:
+                logger.warning("Worker mailbox is full", task_id=task_id)
+                return False
             logger.info("已将追加指令放入任务队列", task_id=task_id)
             return True
         return False

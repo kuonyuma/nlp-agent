@@ -38,7 +38,7 @@ def _get_system_message() -> SystemMessage:
 - 当上下文过长且早期内容已经无关时，可以使用 SnipTool 压缩历史。
 
 ## 编排工具
-- spawn_worker：启动一个新 Worker。
+- spawn_worker：启动一个新 Worker。默认 join=true：当前会话等待它的结果并由系统批量恢复你；只有结果不影响当前答复的后台工作才设 join=false。
 - send_message：继续已有 Worker，必须传入其 task_id。
 - TaskStop：停止仍在运行的 Worker。
 - SnipTool：压缩早期无关上下文。
@@ -122,4 +122,3 @@ async def coordinator_node(state: AgentState) -> dict:
 
     response = await _get_llm_with_tools().ainvoke(messages)
     return {"messages": [*state_modifiers, response]}
-

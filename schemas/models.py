@@ -15,4 +15,4 @@ class WorkerNotificationSpec(BaseModel):
     summary: str
     result: str | None = None
     usage: WorkerUsageSpec | None = None
-
+    join: bool = True
