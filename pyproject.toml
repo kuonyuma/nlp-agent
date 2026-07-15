@@ -28,6 +28,6 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["scripts"]
+testpaths = ["scripts", "tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
