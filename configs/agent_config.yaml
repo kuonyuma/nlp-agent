@@ -50,6 +50,13 @@ tools:
   #     args: ["-y", "@modelcontextprotocol/server-filesystem", ".data"]
   #     enabled_tools: ["read_file"]
   #     allow_private_network: false
+  #     read_only_tools: ["read_file"]
+  #     idempotent_tools: []
+  #     high_risk_tools: []
+  #     session_exclusive_tools: []
+  #     global_exclusive_tools: []
+  #     retry_attempts: 2
+  #     max_concurrency: 1
   #     scopes: [worker]
 
 # Profile 只组合 Skill、能力与工具授权；Skill 本身负责 SOP 指令。

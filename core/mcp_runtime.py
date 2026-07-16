@@ -20,6 +20,8 @@ from core.tool_config import MCPServerConfig
 from core.tool_runtime import (
     ToolCatalog,
     ToolDescriptor,
+    ToolLockScope,
+    ToolRetryPolicy,
     ToolRisk,
     ToolSource,
 )
@@ -108,6 +110,7 @@ class MCPRuntime:
         self.catalog = catalog
         self._connections: dict[str, _Connection] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._call_semaphores: dict[str, asyncio.Semaphore] = {}
 
     async def connect_all(self, configs: Mapping[str, Any]) -> None:
         validated = {
@@ -138,6 +141,9 @@ class MCPRuntime:
                 session = await self._open_session(stack, config)
                 await asyncio.wait_for(session.initialize(), timeout=config.timeout_s)
                 self._connections[name] = _Connection(config, stack, session)
+                self._call_semaphores.setdefault(
+                    name, asyncio.Semaphore(config.max_concurrency)
+                )
                 await self._discover(name, session, config)
                 logger.info("MCP server connected", server=name)
             except Exception:
@@ -186,6 +192,20 @@ class MCPRuntime:
 
     async def _discover(self, server: str, session: Any, config: MCPServerConfig) -> None:
         discovered = await asyncio.wait_for(session.list_tools(), timeout=config.timeout_s)
+        available = {definition.name for definition in discovered.tools}
+        declared = set().union(
+            config.read_only_tools,
+            config.idempotent_tools,
+            config.high_risk_tools,
+            config.session_exclusive_tools,
+            config.global_exclusive_tools,
+        )
+        unknown_safety = declared.difference(available)
+        if unknown_safety:
+            raise ValueError(
+                f"MCP server {server!r} safety metadata references unknown tools: "
+                + ", ".join(sorted(unknown_safety))
+            )
         enabled = set(config.enabled_tools)
         allow_all = "*" in enabled
         matched: set[str] = set()
@@ -217,6 +237,14 @@ class MCPRuntime:
                 infer_schema=False,
             )
 
+        read_only = definition.name in config.read_only_tools
+        idempotent = definition.name in config.idempotent_tools
+        if definition.name in config.global_exclusive_tools:
+            lock_scope = ToolLockScope.GLOBAL
+        elif definition.name in config.session_exclusive_tools:
+            lock_scope = ToolLockScope.SESSION
+        else:
+            lock_scope = ToolLockScope.NONE
         self.catalog.register(
             ToolDescriptor(
                 name=name,
@@ -225,30 +253,46 @@ class MCPRuntime:
                 provider=server,
                 scopes=frozenset(config.scopes),
                 capabilities=frozenset({f"mcp.{server}.{definition.name}"}),
-                risk=ToolRisk.MEDIUM,
+                risk=(
+                    ToolRisk.HIGH
+                    if definition.name in config.high_risk_tools
+                    else ToolRisk.MEDIUM
+                ),
+                read_only=read_only,
+                idempotent=idempotent,
+                concurrency_safe=read_only and lock_scope == ToolLockScope.NONE,
+                lock_scope=lock_scope,
                 timeout_s=config.timeout_s,
+                retry=ToolRetryPolicy(
+                    max_attempts=config.retry_attempts if (read_only or idempotent) else 1
+                ),
+                max_concurrency=config.max_concurrency,
                 factory=factory,
             )
         )
 
     async def call_tool(self, server: str, raw_name: str, arguments: dict[str, Any]) -> str:
-        connection = self._connections.get(server)
-        if connection is None:
+        initial = self._connections.get(server)
+        if initial is None:
             raise RuntimeError(f"MCP server {server!r} is not connected")
-        try:
-            result = await asyncio.wait_for(
-                connection.session.call_tool(raw_name, arguments),
-                timeout=connection.config.timeout_s,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            config = connection.config
-            await self._connect(server, config)
-            result = await asyncio.wait_for(
-                self._connections[server].session.call_tool(raw_name, arguments),
-                timeout=config.timeout_s,
-            )
+        semaphore = self._call_semaphores.setdefault(
+            server, asyncio.Semaphore(initial.config.max_concurrency)
+        )
+        async with semaphore:
+            connection = self._connections.get(server)
+            if connection is None:
+                raise RuntimeError(f"MCP server {server!r} is not connected")
+            try:
+                result = await asyncio.wait_for(
+                    connection.session.call_tool(raw_name, arguments),
+                    timeout=connection.config.timeout_s,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                config = connection.config
+                await self._connect(server, config)
+                raise
         return _render_content(result)
 
     async def _disconnect(self, server: str) -> None:
