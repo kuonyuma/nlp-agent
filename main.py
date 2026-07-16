@@ -19,7 +19,7 @@ def check_config() -> bool:
     config = settings.planner_llm
     print(f"Coordinator: {config['model_id']} ({config['base_url']})")
     print(f"Worker:      {settings.tool_llm['model_id']}")
-    if not config.get("api_key"):
+    if not config.get("api_key_configured"):
         print("Missing DEEPSEEK_API_KEY; create .env in the project root.")
         return False
     return True

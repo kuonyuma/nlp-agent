@@ -38,6 +38,8 @@ class TelemetryRepository:
                     input_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL DEFAULT 0,
                     cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
                     usage_source TEXT NOT NULL DEFAULT 'none',
                     error_kind TEXT, error_message TEXT, attributes_json TEXT NOT NULL
@@ -54,6 +56,8 @@ class TelemetryRepository:
                     input_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL DEFAULT 0,
                     cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
                     usage_source TEXT NOT NULL DEFAULT 'none',
                     error_kind TEXT, error_message TEXT, attributes_json TEXT NOT NULL
@@ -73,10 +77,23 @@ class TelemetryRepository:
                     errors INTEGER NOT NULL DEFAULT 0, duration_sum_ms INTEGER NOT NULL DEFAULT 0,
                     input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
                     cached_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(day, component, name)
                 );
                 """
             )
+            self._ensure_column("traces", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("traces", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("spans", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("spans", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("daily_metrics", "cache_miss_tokens", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("daily_metrics", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     @staticmethod
     def _json(value: dict[str, Any]) -> str:
@@ -95,25 +112,37 @@ class TelemetryRepository:
     def _write_trace(self, item: TraceRecord) -> None:
         u = item.usage
         self._conn.execute(
-            """INSERT OR REPLACE INTO traces VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT OR REPLACE INTO traces (
+               trace_id,request_id,session_id,turn_id,workspace_id,user_id,channel,source,
+               started_at,completed_at,duration_ms,ttft_ms,status,input_tokens,output_tokens,
+               cached_tokens,total_tokens,usage_source,error_kind,error_message,attributes_json,
+               cache_miss_tokens,reasoning_tokens
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item.trace_id, item.request_id, item.session_id, item.turn_id,
              item.workspace_id, item.user_id, item.channel, item.source,
              item.started_at.isoformat(), item.completed_at.isoformat() if item.completed_at else None,
              item.duration_ms, item.ttft_ms, item.status.value, u.input_tokens,
              u.output_tokens, u.cached_tokens, u.total_tokens, u.source,
-             item.error_kind, item.error_message, self._json(item.attributes)),
+             item.error_kind, item.error_message, self._json(item.attributes),
+             u.cache_miss_tokens, u.reasoning_tokens),
         )
 
     def _write_span(self, item: SpanRecord) -> None:
         u = item.usage
         self._conn.execute(
-            """INSERT OR REPLACE INTO spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT OR REPLACE INTO spans (
+               span_id,trace_id,parent_span_id,session_id,turn_id,worker_id,kind,name,
+               started_at,completed_at,duration_ms,status,attempt,input_tokens,output_tokens,
+               cached_tokens,total_tokens,usage_source,error_kind,error_message,attributes_json,
+               cache_miss_tokens,reasoning_tokens
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (item.span_id, item.trace_id, item.parent_span_id, item.session_id,
              item.turn_id, item.worker_id, item.kind.value, item.name,
              item.started_at.isoformat(), item.completed_at.isoformat() if item.completed_at else None,
              item.duration_ms, item.status.value, item.attempt, u.input_tokens,
              u.output_tokens, u.cached_tokens, u.total_tokens, u.source,
-             item.error_kind, item.error_message, self._json(item.attributes)),
+             item.error_kind, item.error_message, self._json(item.attributes),
+             u.cache_miss_tokens, u.reasoning_tokens),
         )
         if item.completed_at is not None:
             day = item.completed_at.date().isoformat()
@@ -123,16 +152,22 @@ class TelemetryRepository:
             error = 1 if item.status.value in {"error", "timeout"} else 0
             success = 1 if item.status.value == "ok" else 0
             self._conn.execute(
-                """INSERT INTO daily_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """INSERT INTO daily_metrics (
+                   day,component,name,requests,successes,errors,duration_sum_ms,input_tokens,
+                   output_tokens,cached_tokens,total_tokens,cache_miss_tokens,reasoning_tokens
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(day,component,name) DO UPDATE SET
                    requests=requests+1, successes=successes+excluded.successes,
                    errors=errors+excluded.errors, duration_sum_ms=duration_sum_ms+excluded.duration_sum_ms,
                    input_tokens=input_tokens+excluded.input_tokens,
                    output_tokens=output_tokens+excluded.output_tokens,
                    cached_tokens=cached_tokens+excluded.cached_tokens,
-                   total_tokens=total_tokens+excluded.total_tokens""",
+                   total_tokens=total_tokens+excluded.total_tokens,
+                   cache_miss_tokens=cache_miss_tokens+excluded.cache_miss_tokens,
+                   reasoning_tokens=reasoning_tokens+excluded.reasoning_tokens""",
                 (day, item.kind.value, metric_name, 1, success, error, item.duration_ms or 0,
-                 u.input_tokens, u.output_tokens, u.cached_tokens, u.total_tokens),
+                 u.input_tokens, u.output_tokens, u.cached_tokens, u.total_tokens,
+                 u.cache_miss_tokens, u.reasoning_tokens),
             )
 
     def _write_event(self, item: TelemetryEvent) -> None:
@@ -158,7 +193,8 @@ class TelemetryRepository:
     def overview(self, days: int = 30) -> dict[str, Any]:
         since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
         rows = self._rows(
-            "SELECT status,duration_ms,ttft_ms,input_tokens,output_tokens,cached_tokens,total_tokens "
+            "SELECT status,duration_ms,ttft_ms,input_tokens,output_tokens,cached_tokens,"
+            "cache_miss_tokens,reasoning_tokens,total_tokens "
             "FROM traces WHERE started_at>=? AND completed_at IS NOT NULL", (since,)
         )
         durations = sorted(r["duration_ms"] for r in rows if r["duration_ms"] is not None)
@@ -172,7 +208,8 @@ class TelemetryRepository:
             "latency_ms": {"p50": percentile(durations, .50), "p95": percentile(durations, .95)},
             "ttft_ms": {"p50": percentile(ttfts, .50), "p95": percentile(ttfts, .95)},
             "tokens": {key: sum(r[key] for r in rows) for key in
-                       ("input_tokens", "output_tokens", "cached_tokens", "total_tokens")},
+                       ("input_tokens", "output_tokens", "cached_tokens", "cache_miss_tokens",
+                        "reasoning_tokens", "total_tokens")},
         }
 
     def list_traces(self, *, limit: int = 100, session_id: str | None = None,

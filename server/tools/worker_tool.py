@@ -82,7 +82,7 @@ from core.tool_registry import physical_tool_manager
 from core.tool_runtime import ToolGrantSnapshot, ToolSet
 from core.session_context import SessionContext
 from core.observability.context import current_telemetry_context
-from core.observability.models import SpanKind, SpanStatus, TokenUsage
+from core.observability.models import SpanKind, SpanStatus
 from core.observability.runtime import global_telemetry
 from server.agent.compression.context_manager import global_context_manager
 from utils.tokens import build_context_budget
@@ -166,7 +166,9 @@ async def _execute_sandbox_loop(
     tool_uses_count = 0
     from configs.settings import settings
 
-    context_window, output_reserve = settings.get_context_limits(model_name or None)
+    fallback_context, fallback_output = settings.get_context_limits(model_name or None)
+    context_window = getattr(llm, "context_window_tokens", fallback_context)
+    output_reserve = getattr(llm, "max_output_tokens", fallback_output)
     context_budget = build_context_budget(
         context_window=context_window,
         output_reserve=output_reserve,
@@ -246,24 +248,7 @@ async def _execute_sandbox_loop(
                         tokens_saved=max(0, context_view.tokens_before - context_view.tokens_after),
                         actions=context_view.actions,
                     )
-            async with _observed_worker_span(
-                SpanKind.MODEL, "worker.model", worker_id=worker_id,
-                attempt=attempt, model=model_name or "default",
-            ) as model_span:
-                response = await llm.ainvoke(context_view.messages)
-                if model_span is not None:
-                    usage_metadata = getattr(response, "usage_metadata", None)
-                    if usage_metadata:
-                        model_span.set_usage(usage_metadata)
-                    else:
-                        from utils.tokens import rough_estimation_for_messages, rough_token_count_estimation
-
-                        input_tokens = rough_estimation_for_messages(context_view.messages)
-                        output_tokens = rough_token_count_estimation(response.content)
-                        model_span.set_usage(TokenUsage(
-                            input_tokens=input_tokens, output_tokens=output_tokens,
-                            total_tokens=input_tokens + output_tokens, source="estimated",
-                        ))
+            response = await llm.ainvoke(context_view.messages)
             messages.append(response)
             if getattr(response, "usage_metadata", None):
                 total_tokens_used += response.usage_metadata.get("total_tokens", 0)
@@ -606,9 +591,6 @@ async def spawn_worker(
     resolved_model = settings._resolve_model_name(agent_name, model or profile.model)
     sop_prompt = profile.system_prompt
 
-    import datetime
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')
-
     system_instruction = f"""[后台特工硬性约束]
 停止，请先仔细阅读本协议。
 你是一个被独立唤醒的后台执行特工（Worker 子进程），你不是与用户对话的主控系统。
@@ -622,16 +604,17 @@ async def spawn_worker(
 5. 【陈述事实】：只汇报客观事实结果，汇报完毕后立刻停止。
 [/后台特工硬性约束]
 
-[当前系统环境]
-当前真实时间：{current_time}
-[/当前系统环境]
-
 [专家领域与标准操作流程 (SOP)]
 {sop_prompt}
 [/专家领域与标准操作流程 (SOP)]"""
 
+    import datetime
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')
+    runtime_context = f"[当前系统环境]\n当前真实时间：{current_time}\n[/当前系统环境]"
+
     initial_messages = [
         SystemMessage(content=system_instruction),
+        SystemMessage(content=runtime_context),
         HumanMessage(content=f"【任务指令】：\n{directive}")
     ]
 

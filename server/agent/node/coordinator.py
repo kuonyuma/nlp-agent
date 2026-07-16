@@ -2,13 +2,12 @@
 
 from contextlib import asynccontextmanager
 
-from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from core.session_context import SessionContext
 from core.observability.context import TelemetryContext, current_telemetry_context
-from core.observability.models import SpanKind, TokenUsage
+from core.observability.models import SpanKind
 from core.observability.runtime import global_telemetry
 from core.skill_loader import skill_loader
 from core.tool_registry import physical_tool_manager
@@ -101,7 +100,7 @@ def get_coordinator_toolset(config: RunnableConfig | None = None):
     )
 
 
-def _get_llm_with_tools(config: RunnableConfig) -> BaseChatModel:
+def _get_llm_with_tools(config: RunnableConfig):
     global _CACHED_LLM_WITH_TOOLS, _CACHED_SNIP_TOOL, _CACHED_TOOLSET_KEY
     toolset = get_coordinator_toolset(config)
     cache_key = (physical_tool_manager.catalog_revision, toolset.names)
@@ -124,13 +123,14 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         messages.append(memory_message)
     messages.extend(state.get("messages", []))
 
-    from configs.settings import settings
     from server.agent.compression.context_manager import global_context_manager
     from utils.tokens import build_context_budget
 
     state_modifiers = []
     toolset = get_coordinator_toolset(config)
-    context_window, output_reserve = settings.get_context_limits()
+    active_model = _get_llm_with_tools(config)
+    context_window = active_model.context_window_tokens
+    output_reserve = active_model.max_output_tokens
     budget = build_context_budget(
         context_window=context_window,
         output_reserve=output_reserve,
@@ -157,23 +157,5 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
                 state_modifiers.append(message)
     messages = transform.messages
 
-    model_config = settings.planner_llm
-    async with _observed_span(
-        SpanKind.MODEL, "coordinator.model", config,
-        provider=model_config.get("base_url", ""), model=model_config.get("model_id", ""),
-    ) as model_span:
-        response = await _get_llm_with_tools(config).ainvoke(messages)
-        if model_span is not None:
-            usage = getattr(response, "usage_metadata", None)
-            if usage:
-                model_span.set_usage(usage)
-            else:
-                from utils.tokens import rough_estimation_for_messages, rough_token_count_estimation
-
-                input_tokens = rough_estimation_for_messages(messages)
-                output_tokens = rough_token_count_estimation(response.content)
-                model_span.set_usage(TokenUsage(
-                    input_tokens=input_tokens, output_tokens=output_tokens,
-                    total_tokens=input_tokens + output_tokens, source="estimated",
-                ))
+    response = await active_model.ainvoke(messages, config=config)
     return {"messages": [*state_modifiers, response]}

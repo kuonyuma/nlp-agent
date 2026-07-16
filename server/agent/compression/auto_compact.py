@@ -110,8 +110,8 @@ async def _generate_global_summary(messages: List[BaseMessage]) -> str:
     Returns:
         str: 生成的全局摘要文本，应该系统性总结用户未满足的需求、关键报错信息、重要文件路径等核心内容。
     """
-    from server.agent.llm_factory import get_planner_llm
-    llm = get_planner_llm()
+    from server.agent.llm_factory import get_utility_llm
+    llm = get_utility_llm()
 
     prompt = "请作为系统核心记忆压缩模块，将以下用户与 AI 的完整交互历史（包含已经过局部折叠的片段）进行全局、系统性总结。必须保留所有用户未满足的需求、关键报错信息、和重要文件路径。\n\n"
     

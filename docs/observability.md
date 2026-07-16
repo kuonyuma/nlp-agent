@@ -36,7 +36,7 @@ Coordinator / Worker / Model / Tool / Memory / Compression
 - `coordinator.turn`、`coordinator.worker_resume`；
 - `memory.inject`、`memory.curate`；
 - `context.prepare`、`worker.context.prepare`，包含压缩前后 Token 和动作；
-- `coordinator.model`、`worker.model`，包含 Provider 或估算 Token；
+- `model.request`，包含每次尝试、fallback、思考强度、TTFT、缓存命中/未命中；
 - `worker.queue_wait`、`worker.attempt`、`worker.barrier_wait`；
 - `tool.<name>`，包含权限、重试、超时、耗时和参数键名。
 

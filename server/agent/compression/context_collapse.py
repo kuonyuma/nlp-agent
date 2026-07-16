@@ -232,8 +232,8 @@ async def _generate_span_summary(span_messages: List[BaseMessage]) -> str:
         str: 生成的摘要文本，应该极简地总结 span_messages 中的核心信息，包括关键事实、结论、文件路径或实体状态等，确保不遗漏任何影响后续任务的内容。
 
     """
-    from server.agent.llm_factory import get_planner_llm
-    llm = get_planner_llm()
+    from server.agent.llm_factory import get_utility_llm
+    llm = get_utility_llm()
     
     prompt = "请用一段话极简地总结以下历史对话和工具调用的核心信息。不要遗漏任何影响后续任务的关键事实、结论、文件路径或实体状态。\n\n"
     for m in span_messages:
