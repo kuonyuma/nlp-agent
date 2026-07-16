@@ -191,11 +191,18 @@ class CoordinatorRuntime:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        from core.tool_safety import global_tool_authorizations
+
+        for session_id in tuple(self._sessions):
+            global_tool_authorizations.revoke_session(session_id)
 
     async def release_session(self, session_id: str) -> None:
         """Release one WebUI session runtime without affecting other sessions."""
         runtime = self._sessions.pop(session_id, None)
         global_task_manager.cancel_session(session_id, reason="session_released")
+        from core.tool_safety import global_tool_authorizations
+
+        global_tool_authorizations.revoke_session(session_id)
         if runtime and runtime.resume_task and not runtime.resume_task.done():
             runtime.resume_task.cancel()
             await asyncio.gather(runtime.resume_task, return_exceptions=True)

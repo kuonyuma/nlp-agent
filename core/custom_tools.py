@@ -14,6 +14,8 @@ from core.tool_runtime import (
     ToolCatalog,
     ToolDescriptor,
     ToolRisk,
+    ToolLockScope,
+    ToolRetryPolicy,
     ToolScope,
     ToolSource,
 )
@@ -46,9 +48,15 @@ def _descriptor(tool: BaseTool, provider: str) -> ToolDescriptor:
         capabilities=frozenset({f"custom.{tool.name}"}),
         risk=ToolRisk.MEDIUM,
         read_only=bool(getattr(tool, "read_only", False)),
+        idempotent=bool(getattr(tool, "idempotent", False)),
         concurrency_safe=bool(getattr(tool, "concurrency_safe", False)),
         exclusive=bool(getattr(tool, "exclusive", False)),
+        lock_scope=ToolLockScope(getattr(tool, "lock_scope", "none")),
         timeout_s=float(getattr(tool, "timeout_s", 30.0)),
+        max_concurrency=int(getattr(tool, "max_concurrency", 0)),
+        retry=ToolRetryPolicy.model_validate(
+            getattr(tool, "retry_policy", {"max_attempts": 1})
+        ),
         factory=lambda tool=tool: tool.model_copy(deep=True),
     )
 

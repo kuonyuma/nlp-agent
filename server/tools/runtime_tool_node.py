@@ -13,7 +13,7 @@ from server.agent.compression.tool_persistence import persist_tool_messages
 
 
 class RuntimeToolNode:
-    def __init__(self, toolset_provider: Callable[[], ToolSet]) -> None:
+    def __init__(self, toolset_provider: Callable[[RunnableConfig], ToolSet]) -> None:
         self._toolset_provider = toolset_provider
 
     async def __call__(self, state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
@@ -21,7 +21,7 @@ class RuntimeToolNode:
         if not messages:
             return {"messages": []}
         tool_calls = list(getattr(messages[-1], "tool_calls", None) or [])
-        toolset = self._toolset_provider()
+        toolset = self._toolset_provider(config)
         results = await toolset.execute_many(
             [(call.get("name", ""), call.get("args", {})) for call in tool_calls],
             config,

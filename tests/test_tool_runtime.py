@@ -100,7 +100,7 @@ async def test_runtime_node_executes_the_same_granted_toolset(monkeypatch):
         "server.tools.runtime_tool_node.persist_tool_messages",
         lambda messages, _config: messages,
     )
-    node = RuntimeToolNode(lambda: tools)
+    node = RuntimeToolNode(lambda _config: tools)
     state = {
         "messages": [
             AIMessage(

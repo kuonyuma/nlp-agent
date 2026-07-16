@@ -5,6 +5,7 @@ from core.tool_runtime import (
     ToolCatalog,
     ToolDescriptor,
     ToolRisk,
+    ToolRetryPolicy,
     ToolScope,
     ToolSource,
     global_tool_runtime,
@@ -31,6 +32,7 @@ def register_builtin_tools(catalog: ToolCatalog | None = None) -> list[str]:
             read_only=True,
             concurrency_safe=True,
             timeout_s=10,
+            retry=ToolRetryPolicy(max_attempts=2),
             factory=lambda: read_local_file.model_copy(deep=True),
         ),
         ToolDescriptor(
@@ -43,6 +45,7 @@ def register_builtin_tools(catalog: ToolCatalog | None = None) -> list[str]:
             read_only=True,
             concurrency_safe=True,
             timeout_s=5,
+            retry=ToolRetryPolicy(max_attempts=2),
             factory=lambda: get_current_time.model_copy(deep=True),
         ),
         ToolDescriptor(
@@ -57,6 +60,7 @@ def register_builtin_tools(catalog: ToolCatalog | None = None) -> list[str]:
             concurrency_safe=True,
             timeout_s=25,
             max_concurrency=4,
+            retry=ToolRetryPolicy(max_attempts=3, base_delay_s=0.5),
             factory=lambda: web_search.model_copy(deep=True),
         ),
     ]

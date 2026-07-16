@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import AsyncExitStack
 from enum import Enum
 from typing import Any, Literal
 
@@ -15,6 +17,13 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from utils.logger import get_logger
+from core.tool_safety import (
+    ToolAuditEvent,
+    ToolAuditLog,
+    ToolAuthorizationManager,
+    global_tool_audit_log,
+    global_tool_authorizations,
+)
 
 
 logger = get_logger("nlp_agent.tool_runtime")
@@ -39,6 +48,45 @@ class ToolRisk(str, Enum):
     HIGH = "high"
 
 
+class ToolLockScope(str, Enum):
+    NONE = "none"
+    SESSION = "session"
+    GLOBAL = "global"
+
+
+class ToolRetryPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    max_attempts: int = Field(default=1, ge=1, le=5)
+    retryable_kinds: frozenset[str] = Field(
+        default_factory=lambda: frozenset({"timeout", "network", "rate_limit"})
+    )
+    base_delay_s: float = Field(default=0.25, ge=0, le=30)
+    max_delay_s: float = Field(default=4.0, ge=0, le=120)
+    jitter_ratio: float = Field(default=0.20, ge=0, le=1)
+
+    @field_validator("retryable_kinds")
+    @classmethod
+    def validate_retryable_kinds(cls, values: frozenset[str]) -> frozenset[str]:
+        supported = {"timeout", "network", "rate_limit"}
+        unknown = values.difference(supported)
+        if unknown:
+            raise ValueError(f"unsupported retry kinds: {', '.join(sorted(unknown))}")
+        return values
+
+    @model_validator(mode="after")
+    def validate_delays(self) -> "ToolRetryPolicy":
+        if self.max_delay_s < self.base_delay_s:
+            raise ValueError("max_delay_s must be greater than or equal to base_delay_s")
+        return self
+
+    def delay_for(self, failed_attempt: int) -> float:
+        delay = self.base_delay_s * (2 ** max(0, failed_attempt - 1))
+        if delay and self.jitter_ratio:
+            delay *= random.uniform(1 - self.jitter_ratio, 1 + self.jitter_ratio)
+        return min(self.max_delay_s, max(0, delay))
+
+
 class ToolDescriptor(BaseModel):
     """Pydantic-v2 validated metadata plus a factory for one executable tool."""
 
@@ -52,10 +100,13 @@ class ToolDescriptor(BaseModel):
     capabilities: frozenset[str] = Field(default_factory=frozenset)
     risk: ToolRisk = ToolRisk.LOW
     read_only: bool = False
+    idempotent: bool = False
     concurrency_safe: bool = False
     exclusive: bool = False
+    lock_scope: ToolLockScope = ToolLockScope.NONE
     timeout_s: float = Field(default=30.0, gt=0, le=1800)
     max_concurrency: int = Field(default=0, ge=0, le=100)
+    retry: ToolRetryPolicy = Field(default_factory=ToolRetryPolicy)
     enabled: bool = True
     factory: Callable[[], BaseTool] = Field(exclude=True, repr=False)
 
@@ -81,8 +132,14 @@ class ToolDescriptor(BaseModel):
     def validate_concurrency_contract(self) -> "ToolDescriptor":
         if self.exclusive and self.concurrency_safe:
             raise ValueError("exclusive tools cannot be concurrency_safe")
+        if self.exclusive and self.lock_scope == ToolLockScope.NONE:
+            object.__setattr__(self, "lock_scope", ToolLockScope.GLOBAL)
+        if self.lock_scope != ToolLockScope.NONE and self.concurrency_safe:
+            raise ValueError("locked tools cannot be concurrency_safe")
         if not self.read_only and self.concurrency_safe:
             raise ValueError("only read-only tools may be marked concurrency_safe")
+        if self.retry.max_attempts > 1 and not (self.read_only or self.idempotent):
+            raise ValueError("retries require a read-only or explicitly idempotent tool")
         return self
 
     def instantiate(self) -> BaseTool:
@@ -104,6 +161,7 @@ class ToolGrantRequest(BaseModel):
     allowed_capabilities: frozenset[str] = Field(default_factory=frozenset)
     denied_tools: frozenset[str] = Field(default_factory=frozenset)
     denied_capabilities: frozenset[str] = Field(default_factory=frozenset)
+    allow_high_risk: bool = False
 
 
 class ToolGrantSnapshot(BaseModel):
@@ -126,6 +184,8 @@ class ToolExecutionError(BaseModel):
         "validation",
         "timeout",
         "execution",
+        "network",
+        "rate_limit",
         "tool_error",
     ]
     message: str
@@ -138,6 +198,7 @@ class ToolExecutionResult(BaseModel):
     output: Any = None
     error: ToolExecutionError | None = None
     duration_ms: int = Field(default=0, ge=0)
+    attempts: int = Field(default=1, ge=0)
 
     @model_validator(mode="after")
     def validate_status(self) -> "ToolExecutionResult":
@@ -219,8 +280,15 @@ class ToolCatalog:
 class ToolPolicyResolver:
     """Resolve explicit tool/capability requests into an immutable grant."""
 
-    def __init__(self, catalog: ToolCatalog, *, policy_version: str = "1") -> None:
+    def __init__(
+        self,
+        catalog: ToolCatalog,
+        authorization: ToolAuthorizationManager,
+        *,
+        policy_version: str = "2",
+    ) -> None:
         self.catalog = catalog
+        self.authorization = authorization
         self.policy_version = policy_version
 
     def resolve(self, request: ToolGrantRequest) -> ToolGrantSnapshot:
@@ -242,6 +310,11 @@ class ToolPolicyResolver:
                 continue
             if descriptor.capabilities.intersection(request.denied_capabilities):
                 continue
+            if descriptor.risk == ToolRisk.HIGH and not (
+                request.allow_high_risk
+                and self.authorization.is_granted(request.session_id, descriptor.name)
+            ):
+                continue
             granted.append(descriptor)
 
         granted_capabilities = sorted(
@@ -261,66 +334,157 @@ class ToolPolicyResolver:
 class ToolExecutor:
     """Pydantic-v2 validation, timeouts, error normalization, and telemetry."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        authorization: ToolAuthorizationManager = global_tool_authorizations,
+        audit_log: ToolAuditLog = global_tool_audit_log,
+    ) -> None:
+        self.authorization = authorization
+        self.audit_log = audit_log
         self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self._global_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def execute(
         self,
         descriptor: ToolDescriptor,
         tool: BaseTool,
         arguments: Mapping[str, Any] | None,
+        grant: ToolGrantSnapshot,
         config: RunnableConfig | None = None,
     ) -> ToolExecutionResult:
         started = time.monotonic()
+        argument_keys = tuple(sorted(str(key) for key in (arguments or {})))
+        if descriptor.risk == ToolRisk.HIGH and not self.authorization.is_granted(
+            grant.session_id, descriptor.name
+        ):
+            result = self._failure(
+                descriptor.name,
+                started,
+                "permission_denied",
+                "high-risk tool requires an active session grant",
+                attempts=0,
+            )
+            await self._audit(
+                descriptor,
+                grant,
+                phase="denied",
+                outcome="denied",
+                error_kind="permission_denied",
+                attempt=0,
+                argument_keys=argument_keys,
+            )
+            return result
         try:
             params = self._validate_arguments(tool, dict(arguments or {}))
         except Exception as error:
-            return self._failure(descriptor.name, started, "validation", str(error))
+            result = self._failure(
+                descriptor.name, started, "validation", str(error), attempts=0
+            )
+            await self._audit(
+                descriptor,
+                grant,
+                phase="completed",
+                outcome="error",
+                error_kind="validation",
+                attempt=0,
+                argument_keys=argument_keys,
+            )
+            return result
 
         async def invoke() -> Any:
             return await tool.ainvoke(params, config=config)
 
-        semaphore = self._semaphore_for(descriptor)
-        try:
-            if semaphore is None:
-                output = await asyncio.wait_for(invoke(), timeout=descriptor.timeout_s)
-            else:
-                async with semaphore:
-                    output = await asyncio.wait_for(invoke(), timeout=descriptor.timeout_s)
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            return self._failure(
-                descriptor.name,
-                started,
-                "timeout",
-                f"tool timed out after {descriptor.timeout_s:g} seconds",
-                retryable=descriptor.read_only,
-            )
-        except Exception as error:
-            return self._failure(
-                descriptor.name,
-                started,
-                "execution",
-                f"{type(error).__name__}: {error}",
-                retryable=False,
-            )
+        async with AsyncExitStack() as stack:
+            semaphore = self._semaphore_for(descriptor)
+            if semaphore is not None:
+                await stack.enter_async_context(semaphore)
+            lock = self._exclusive_lock(descriptor, grant.session_id)
+            if lock is not None:
+                await stack.enter_async_context(lock)
 
-        tool_error = self._detect_tool_error(output)
-        if tool_error is not None:
-            return self._failure(
-                descriptor.name,
-                started,
-                "tool_error",
-                tool_error,
-                retryable=False,
-            )
-        return ToolExecutionResult(
-            tool_name=descriptor.name,
-            ok=True,
-            output=output,
-            duration_ms=int((time.monotonic() - started) * 1000),
+            final: ToolExecutionResult | None = None
+            for attempt in range(1, descriptor.retry.max_attempts + 1):
+                await self._audit(
+                    descriptor,
+                    grant,
+                    phase="attempt",
+                    outcome="started",
+                    attempt=attempt,
+                    argument_keys=argument_keys,
+                )
+                try:
+                    output = await asyncio.wait_for(invoke(), timeout=descriptor.timeout_s)
+                    tool_error = self._detect_tool_error(output)
+                    if tool_error is None:
+                        final = ToolExecutionResult(
+                            tool_name=descriptor.name,
+                            ok=True,
+                            output=output,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            attempts=attempt,
+                        )
+                    else:
+                        final = self._failure(
+                            descriptor.name,
+                            started,
+                            "tool_error",
+                            tool_error,
+                            attempts=attempt,
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except asyncio.TimeoutError:
+                    can_retry = descriptor.read_only or descriptor.idempotent
+                    final = self._failure(
+                        descriptor.name,
+                        started,
+                        "timeout",
+                        f"tool timed out after {descriptor.timeout_s:g} seconds",
+                        retryable=can_retry and "timeout" in descriptor.retry.retryable_kinds,
+                        attempts=attempt,
+                    )
+                except Exception as error:
+                    kind, retryable = self._classify_exception(error)
+                    retryable = bool(
+                        retryable
+                        and (descriptor.read_only or descriptor.idempotent)
+                        and kind in descriptor.retry.retryable_kinds
+                    )
+                    final = self._failure(
+                        descriptor.name,
+                        started,
+                        kind,
+                        f"{type(error).__name__}: {error}",
+                        retryable=retryable,
+                        attempts=attempt,
+                    )
+
+                if final.ok or not self._should_retry(descriptor, final, attempt):
+                    break
+                await self._audit(
+                    descriptor,
+                    grant,
+                    phase="retry",
+                    outcome="error",
+                    error_kind=final.error.kind if final.error else "execution",
+                    attempt=attempt,
+                    argument_keys=argument_keys,
+                )
+                await asyncio.sleep(descriptor.retry.delay_for(attempt))
+
+        assert final is not None
+        await self._audit(
+            descriptor,
+            grant,
+            phase="completed",
+            outcome="success" if final.ok else "error",
+            error_kind=final.error.kind if final.error else "",
+            attempt=final.attempts,
+            duration_ms=final.duration_ms,
+            argument_keys=argument_keys,
         )
+        return final
 
     @staticmethod
     def _validate_arguments(tool: BaseTool, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -354,6 +518,76 @@ class ToolExecutor:
             descriptor.name, asyncio.Semaphore(descriptor.max_concurrency)
         )
 
+    def _exclusive_lock(
+        self, descriptor: ToolDescriptor, session_id: str
+    ) -> asyncio.Lock | None:
+        if descriptor.lock_scope == ToolLockScope.GLOBAL:
+            return self._global_locks.setdefault(descriptor.name, asyncio.Lock())
+        if descriptor.lock_scope == ToolLockScope.SESSION:
+            return self._session_locks.setdefault(
+                (session_id, descriptor.name), asyncio.Lock()
+            )
+        return None
+
+    @staticmethod
+    def _classify_exception(error: Exception) -> tuple[str, bool]:
+        text = f"{type(error).__name__}: {error}".lower()
+        status = getattr(error, "status_code", None)
+        if status == 429 or "rate limit" in text or "ratelimit" in text:
+            return "rate_limit", True
+        if isinstance(error, ConnectionError) or any(
+            marker in text
+            for marker in ("connection", "network", "temporarily unavailable", "dns")
+        ):
+            return "network", True
+        return "execution", False
+
+    @staticmethod
+    def _should_retry(
+        descriptor: ToolDescriptor,
+        result: ToolExecutionResult,
+        attempt: int,
+    ) -> bool:
+        return bool(
+            not result.ok
+            and result.error
+            and result.error.retryable
+            and result.error.kind in descriptor.retry.retryable_kinds
+            and attempt < descriptor.retry.max_attempts
+            and (descriptor.read_only or descriptor.idempotent)
+        )
+
+    async def _audit(
+        self,
+        descriptor: ToolDescriptor,
+        grant: ToolGrantSnapshot,
+        *,
+        phase: str,
+        outcome: str,
+        attempt: int,
+        error_kind: str = "",
+        duration_ms: int = 0,
+        argument_keys: tuple[str, ...] = (),
+    ) -> None:
+        try:
+            await self.audit_log.emit(
+                ToolAuditEvent(
+                    session_id=grant.session_id,
+                    role=grant.role.value,
+                    profile=grant.profile,
+                    tool_name=descriptor.name,
+                    provider=descriptor.provider,
+                    phase=phase,
+                    attempt=attempt,
+                    outcome=outcome,
+                    error_kind=error_kind,
+                    duration_ms=duration_ms,
+                    argument_keys=argument_keys,
+                )
+            )
+        except Exception as error:
+            logger.warning("Tool audit write failed", error=str(error))
+
     @staticmethod
     def _failure(
         tool_name: str,
@@ -362,12 +596,14 @@ class ToolExecutor:
         message: str,
         *,
         retryable: bool = False,
+        attempts: int = 1,
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
             tool_name=tool_name,
             ok=False,
             error=ToolExecutionError(kind=kind, message=message, retryable=retryable),
             duration_ms=int((time.monotonic() - started) * 1000),
+            attempts=attempts,
         )
 
 
@@ -413,8 +649,11 @@ class ToolSet:
                     kind="permission_denied",
                     message=f"tool {name!r} is not granted in this runtime",
                 ),
+                attempts=0,
             )
-        return await self.executor.execute(descriptor, tool, arguments, config)
+        return await self.executor.execute(
+            descriptor, tool, arguments, self.snapshot, config
+        )
 
     async def execute_many(
         self,
@@ -447,11 +686,40 @@ class ToolSet:
 
 
 class ToolRuntime:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        authorization: ToolAuthorizationManager = global_tool_authorizations,
+        audit_log: ToolAuditLog = global_tool_audit_log,
+    ) -> None:
         self.catalog = ToolCatalog()
-        self.policy = ToolPolicyResolver(self.catalog)
-        self.executor = ToolExecutor()
+        self.authorization = authorization
+        self.audit_log = audit_log
+        self.policy = ToolPolicyResolver(self.catalog, authorization)
+        self.executor = ToolExecutor(authorization, audit_log)
         self._mcp_runtime: Any | None = None
+
+    def grant_high_risk(
+        self,
+        *,
+        session_id: str,
+        tool_name: str,
+        granted_by: str,
+        reason: str = "",
+        ttl_s: float = 300,
+    ):
+        descriptor = self.catalog.get(tool_name)
+        if descriptor is None:
+            raise ValueError(f"unknown tool: {tool_name}")
+        if descriptor.risk != ToolRisk.HIGH:
+            raise ValueError(f"tool {tool_name!r} is not high-risk")
+        return self.authorization.grant(
+            session_id=session_id,
+            tool_name=tool_name,
+            granted_by=granted_by,
+            reason=reason,
+            ttl_s=ttl_s,
+        )
 
     def build_toolset(self, request: ToolGrantRequest) -> ToolSet:
         snapshot = self.policy.resolve(request)
@@ -479,6 +747,18 @@ class ToolRuntime:
             raise ValueError(
                 "persisted tool grant violates current role scopes: "
                 + ", ".join(invalid_scope)
+            )
+        expired_high_risk = [
+            descriptor.name
+            for descriptor in descriptors
+            if descriptor is not None
+            and descriptor.risk == ToolRisk.HIGH
+            and not self.authorization.is_granted(snapshot.session_id, descriptor.name)
+        ]
+        if expired_high_risk:
+            raise PermissionError(
+                "persisted high-risk grants expired or were revoked: "
+                + ", ".join(expired_high_risk)
             )
         return ToolSet(snapshot, [item for item in descriptors if item is not None], self.executor)
 

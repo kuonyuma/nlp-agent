@@ -58,6 +58,13 @@ class MCPServerConfig(StrictConfigModel):
     headers: dict[str, str] = Field(default_factory=dict)
     allow_private_network: bool = False
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
+    read_only_tools: set[str] = Field(default_factory=set)
+    idempotent_tools: set[str] = Field(default_factory=set)
+    high_risk_tools: set[str] = Field(default_factory=set)
+    session_exclusive_tools: set[str] = Field(default_factory=set)
+    global_exclusive_tools: set[str] = Field(default_factory=set)
+    retry_attempts: int = Field(default=2, ge=1, le=5)
+    max_concurrency: int = Field(default=1, ge=1, le=100)
     timeout_s: float = Field(default=30.0, gt=0, le=1800)
     scopes: set[ToolScope] = Field(default_factory=lambda: {ToolScope.WORKER})
 
