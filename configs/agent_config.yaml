@@ -17,6 +17,15 @@ providers:
     context_window_tokens: 200000
     output_reserve_tokens: 20000
 
+# Local memory stays under one root (.data/memory) and is internally scoped by
+# workspace/user/session. Durable Markdown is injected directly; no vector RAG.
+memory:
+  enabled: true
+  max_injection_tokens: 6000
+  max_topics: 12
+  recent_archive_tokens: 2000
+  curate_after_archives: 8
+
 # 工具注册、权限与扩展均在此处集中配置。未声明的工具不会被隐式授权。
 tools:
   policies:

@@ -74,7 +74,8 @@ class ContextManager:
                 input_limit=budget.input_limit,
             )
             if len(store.commits) > commit_count:
-                actions.append(f"collapse:{len(store.commits) - commit_count}")
+                new_commits = store.commits[commit_count:]
+                actions.append(f"collapse:{len(new_commits)}")
                 state = state.model_copy(
                     update={
                         "collapse_commits": [
@@ -90,6 +91,15 @@ class ContextManager:
                     }
                 )
                 self.repository.save(context, state)
+                from server.memory.runtime import global_memory_runtime
+
+                for item in new_commits:
+                    global_memory_runtime.archive_summary(
+                        context,
+                        source_id=f"collapse:{item.collapse_id}",
+                        summary=item.summary_content,
+                        source_message_ids=(item.first_msg_uuid, item.last_msg_uuid),
+                    )
 
             compact = await autocompact_if_needed(
                 view,
@@ -105,6 +115,15 @@ class ContextManager:
                 ]
                 view = compact.messages
                 actions.append("auto_compact")
+                if compact.summary:
+                    from server.memory.runtime import global_memory_runtime
+
+                    global_memory_runtime.archive_summary(
+                        context,
+                        source_id=f"auto_compact:{removed[0] if removed else context.session_id}",
+                        summary=compact.summary,
+                        source_message_ids=tuple(removed),
+                    )
 
             if rough_estimation_for_messages(view) > budget.input_limit:
                 view = trim_legal_history(view, budget.input_limit)

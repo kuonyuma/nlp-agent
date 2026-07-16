@@ -4,11 +4,12 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from core.session_context import SessionContext
 from core.skill_loader import skill_loader
 from core.tool_registry import physical_tool_manager
 from server.agent.llm_factory import get_planner_llm
 from server.agent.state import AgentState
-from server.memory import get_memory_system_message
+from server.memory import global_memory_runtime
 from server.tools.task_stop_tool import task_stop_tool
 from server.tools.worker_tool import send_message, spawn_worker
 from utils.logger import get_logger
@@ -98,11 +99,14 @@ def _get_llm_with_tools(config: RunnableConfig) -> BaseChatModel:
 
 async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
     system_message = _get_system_message()
-    memory_message = get_memory_system_message()
-    messages = [system_message, memory_message, *state.get("messages", [])]
+    session = SessionContext.from_config(config, require=True)
+    memory_message = global_memory_runtime.context_message(session)
+    messages = [system_message]
+    if memory_message is not None:
+        messages.append(memory_message)
+    messages.extend(state.get("messages", []))
 
     from configs.settings import settings
-    from core.session_context import SessionContext
     from server.agent.compression.context_manager import global_context_manager
     from utils.tokens import build_context_budget
 
@@ -115,7 +119,7 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         tools=toolset.tools,
     )
     transform = await global_context_manager.prepare(
-        SessionContext.from_config(config, require=True),
+        session,
         messages,
         budget,
     )
