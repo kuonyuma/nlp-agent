@@ -79,6 +79,9 @@ from core.skill_loader import skill_loader
 from server.agent.llm_factory import get_worker_llm, get_tool_llm
 from core.tool_registry import physical_tool_manager
 from core.tool_runtime import ToolGrantSnapshot, ToolSet
+from core.session_context import SessionContext
+from server.agent.compression.context_manager import global_context_manager
+from utils.tokens import build_context_budget
 from server.agent.node.session_storage import (
     write_agent_metadata,
     record_sidechain_transcript,
@@ -143,6 +146,19 @@ async def _execute_sandbox_loop(
     start_time = time.time()
     total_tokens_used = 0
     tool_uses_count = 0
+    from configs.settings import settings
+
+    context_window, output_reserve = settings.get_context_limits(model_name or None)
+    context_budget = build_context_budget(
+        context_window=context_window,
+        output_reserve=output_reserve,
+        tools=toolset.tools,
+    )
+    session_context = SessionContext(
+        session_id=session_id,
+        channel="worker",
+        agent_id=worker_id,
+    )
 
     def result(
         *,
@@ -198,7 +214,12 @@ async def _execute_sandbox_loop(
                         command_kind=command.kind,
                     )
 
-            response = await llm.ainvoke(messages)
+            context_view = await global_context_manager.prepare(
+                session_context,
+                messages,
+                context_budget,
+            )
+            response = await llm.ainvoke(context_view.messages)
             messages.append(response)
             if getattr(response, "usage_metadata", None):
                 total_tokens_used += response.usage_metadata.get("total_tokens", 0)

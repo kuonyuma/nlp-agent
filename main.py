@@ -88,7 +88,7 @@ async def main() -> None:
 
     app, connection = await build_agent()
     active_session = {"id": get_active_session_id() or create_new_session()}
-    init_snip_tool(app, lambda: active_session["id"])
+    init_snip_tool(app)
 
     async def invoke(messages, session_id: str, background: bool, turn_id: str) -> None:
         """The only Coordinator invocation path used by this process."""

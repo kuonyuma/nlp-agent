@@ -2,6 +2,7 @@
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
+from langchain_core.runnables import RunnableConfig
 
 from core.skill_loader import skill_loader
 from core.tool_registry import physical_tool_manager
@@ -19,7 +20,6 @@ _CACHED_LLM_WITH_TOOLS = None
 _CACHED_TOOLSET_KEY = None
 _CACHED_SNIP_TOOL = None
 _SNIP_APP_REF = None
-_SNIP_SESSION_GETTER = None
 
 
 def _get_system_message() -> SystemMessage:
@@ -58,18 +58,16 @@ Worker 工具调用会先返回 started，最终结构化结果随后以 [INTERN
     return _CACHED_SYSTEM_MESSAGE
 
 
-def init_snip_tool(app, session_id_getter) -> None:
+def init_snip_tool(app) -> None:
     """绑定依赖当前 LangGraph 实例的 SnipTool。"""
 
-    global _SNIP_APP_REF, _SNIP_SESSION_GETTER, _CACHED_SNIP_TOOL, _CACHED_LLM_WITH_TOOLS, _CACHED_TOOLSET_KEY
+    global _SNIP_APP_REF, _CACHED_SNIP_TOOL, _CACHED_LLM_WITH_TOOLS, _CACHED_TOOLSET_KEY
     _SNIP_APP_REF = app
-    _SNIP_SESSION_GETTER = session_id_getter
-
     from server.tools.snip_tool import make_snip_tool
 
-    _CACHED_SNIP_TOOL = make_snip_tool(app, session_id_getter)
+    _CACHED_SNIP_TOOL = make_snip_tool(app)
     physical_tool_manager.register_orchestration_tool(
-        _CACHED_SNIP_TOOL, capability="context.manage"
+        _CACHED_SNIP_TOOL, capability="context.manage", replace=True
     )
     _CACHED_LLM_WITH_TOOLS = None
     _CACHED_TOOLSET_KEY = None
@@ -93,32 +91,39 @@ def _get_llm_with_tools() -> BaseChatModel:
     return _CACHED_LLM_WITH_TOOLS
 
 
-async def coordinator_node(state: AgentState) -> dict:
+async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
     system_message = _get_system_message()
     memory_message = get_memory_system_message()
     messages = [system_message, memory_message, *state.get("messages", [])]
 
-    from server.agent.compression.auto_compact import autocompact_if_needed
-    from server.agent.compression.context_collapse import (
-        apply_collapses_if_needed,
-        global_collapse_store,
-    )
+    from configs.settings import settings
+    from core.session_context import SessionContext
+    from server.agent.compression.context_manager import global_context_manager
+    from utils.tokens import build_context_budget
 
     state_modifiers = []
-    if global_collapse_store.enabled:
-        messages = await apply_collapses_if_needed(messages, global_collapse_store)
-
-    compact_result = await autocompact_if_needed(messages)
-    if compact_result.was_compacted:
+    toolset = get_coordinator_toolset()
+    context_window, output_reserve = settings.get_context_limits()
+    budget = build_context_budget(
+        context_window=context_window,
+        output_reserve=output_reserve,
+        tools=toolset.tools,
+    )
+    transform = await global_context_manager.prepare(
+        SessionContext.from_config(config, require=True),
+        messages,
+        budget,
+    )
+    if transform.removed_message_ids:
         from langchain_core.messages import RemoveMessage
 
-        for message in messages:
-            if message not in compact_result.messages and message.id:
-                state_modifiers.append(RemoveMessage(id=message.id))
-        for message in compact_result.messages:
+        state_modifiers.extend(
+            RemoveMessage(id=message_id) for message_id in transform.removed_message_ids
+        )
+        for message in transform.messages:
             if message not in messages:
                 state_modifiers.append(message)
-        messages = compact_result.messages
+    messages = transform.messages
 
     response = await _get_llm_with_tools().ainvoke(messages)
     return {"messages": [*state_modifiers, response]}

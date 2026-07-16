@@ -17,10 +17,11 @@ from utils.logger import get_logger
 logger = get_logger("shiliu.context_collapse")
 
 EFFECTIVE_WINDOW = 180_000     # 200K - 20K (预留给输出)
-COMMIT_THRESHOLD = 162_000     # 90%
-AUTOCOMPACT_THRESHOLD = 167_000 # 93%
-BLOCKING_THRESHOLD = 171_000   # 95%
-
+# Compatibility constants for direct callers/tests; ContextManager derives
+# runtime thresholds from the selected model's input budget.
+COMMIT_THRESHOLD = int(EFFECTIVE_WINDOW * 0.90)
+AUTOCOMPACT_THRESHOLD = int(EFFECTIVE_WINDOW * 0.93)
+BLOCKING_THRESHOLD = int(EFFECTIVE_WINDOW * 0.95)
 KEEP_RECENT = 15
 
 @dataclass
@@ -64,10 +65,12 @@ class CollapseStore:
             )
             self.add_commit(c)
 
-global_collapse_store = CollapseStore()
-
-
-async def apply_collapses_if_needed(messages: List[BaseMessage], store: CollapseStore = global_collapse_store) -> List[BaseMessage]:
+async def apply_collapses_if_needed(
+    messages: List[BaseMessage],
+    store: CollapseStore,
+    *,
+    input_limit: int = EFFECTIVE_WINDOW,
+) -> List[BaseMessage]:
     """
     读时投影的主入口。如果需要，会执行 Stage, Commit, 甚至 Blocking 排空。
     最终返回 project_view（不修改原始 messages）。
@@ -77,17 +80,20 @@ async def apply_collapses_if_needed(messages: List[BaseMessage], store: Collapse
 
     token_count = rough_estimation_for_messages(messages)
     
-    if token_count < COMMIT_THRESHOLD:
+    commit_threshold = int(input_limit * 0.90)
+    blocking_threshold = int(input_limit * 0.95)
+
+    if token_count < commit_threshold:
         # Stage 阶段: 寻找新的可折叠区段
         _stage_spans(messages, store)
         return _project_view(messages, store)
         
-    if token_count >= BLOCKING_THRESHOLD:
+    if token_count >= blocking_threshold:
         # Blocking 阶段: 紧急排空所有 staged，不管 risk
         await _commit_staged(messages, store, limit=None)
         return _project_view(messages, store)
         
-    if token_count >= COMMIT_THRESHOLD:
+    if token_count >= commit_threshold:
         # Commit 阶段: 每次最多生成 2 个区段的摘要，避免单次耗时过长
         await _commit_staged(messages, store, limit=2)
         return _project_view(messages, store)
@@ -166,8 +172,6 @@ async def _commit_staged(messages: List[BaseMessage], store: CollapseStore, limi
 
         store.add_commit(commit)
 
-        await _persist_collapse_commit(commit)
-        
         logger.info(
             "Context Collapse 提交完成",
             collapse_id=commit.collapse_id,
@@ -282,24 +286,3 @@ def _extract_messages_by_range(messages: List[BaseMessage], start_uuid: str, end
         if m.id == end_uuid:
             break
     return span_msgs
-
-
-async def _persist_collapse_commit(commit: CollapseCommit):
-    """通知 session_storage 写入 JSONL"""
-    try:
-        from server.agent.session_storage import global_session_storage, get_active_session_id
-        session_id = get_active_session_id()
-        if session_id:
-            entry = {
-                "type": "marble-origami-commit",
-                "session_id": session_id,
-                "collapse_id": commit.collapse_id,
-                "summary_uuid": commit.summary_uuid,
-                "summary_content": commit.summary_content,
-                "first_msg_uuid": commit.first_msg_uuid,
-                "last_msg_uuid": commit.last_msg_uuid,
-            }
-            # 利用现有 append_entry 方法写入 JSONL
-            await global_session_storage.append_entry(entry)
-    except Exception as e:
-        logger.warning(f"写入 Commit 失败: {e}")

@@ -10,6 +10,7 @@ SnipTool 校验参数合法性并返回操作结果。
 """
 import json
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 from schemas.snip import SnipToolInputSpec, SnipToolOutputSpec
 from utils.logger import get_logger
 
@@ -34,23 +35,25 @@ DESCRIPTION = """
 """
 
 
-def make_snip_tool(app, session_id_getter):
+def make_snip_tool(app):
     """
     工厂函数：创建绑定了 app 实例的 SnipTool。
 
     Args:
         app: 已编译的 LangGraph app，用于调用 aget_state() 校验参数。
-        session_id_getter: 无参可调用对象，返回当前的 session_id 字符串。
-
     Returns:
         LangChain tool 实例。
     """
     from server.agent.compression.snip_compact import snip_by_id_range
 
     @tool("SnipTool", args_schema=SnipToolInputSpec, description=DESCRIPTION)
-    async def snip_tool(to_id: str, from_id: str = None) -> str:
+    async def snip_tool(
+        to_id: str,
+        config: RunnableConfig,
+        from_id: str = None,
+    ) -> str:
         """按消息 ID 范围执行 Snip 压缩。"""
-        session_id = session_id_getter()
+        session_id = config.get("configurable", {}).get("thread_id", "")
         if not session_id:
             return SnipToolOutputSpec(
                 success=False,

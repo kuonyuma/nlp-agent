@@ -1,82 +1,58 @@
+"""Compatibility adapters for transcript and model-facing context trimming."""
+
+from __future__ import annotations
+
 from typing import List
-from langchain_core.messages import BaseMessage, SystemMessage
+
+from langchain_core.messages import BaseMessage
+
+from configs.settings import settings
+from server.agent.compression.context_manager import trim_legal_history
 from server.agent.session_storage import TranscriptMessage
 from utils.tokens import token_count_with_estimation
-from utils.logger import get_logger
 
-logger = get_logger("shiliu.session_compression")
 
-MAX_CONTEXT_TOKENS = 200_000
+MAX_CONTEXT_TOKENS = 200_000  # Compatibility; runtime code uses _input_limit().
 
-def compress_messages(messages: List[TranscriptMessage]) -> List[TranscriptMessage]:
-    """
-    使用混合计费策略计算 Token，并在超过 MAX_CONTEXT_TOKENS (200K) 时，
-    从前往后丢弃最旧的非 system 消息，直至满足大小限制。
-    实时重新评估以避免累积误差。
-    """
-    current_tokens = token_count_with_estimation(messages)
-    if current_tokens <= MAX_CONTEXT_TOKENS:
+
+def _input_limit() -> int:
+    context_window, output_reserve = settings.get_context_limits()
+    return max(1, context_window - output_reserve - 2_000)
+
+
+def compress_messages(
+    messages: List[TranscriptMessage],
+    max_tokens: int | None = None,
+) -> List[TranscriptMessage]:
+    """Keep recent complete user turns for transcript replay under the model budget."""
+    limit = max_tokens or _input_limit()
+    if token_count_with_estimation(messages) <= limit:
         return messages
-
-    system_msgs = [m for m in messages if m.role == "system" or m.type == "system"]
-    non_sys_msgs = [m for m in messages if m.role != "system" and m.type != "system"]
-
-    tokens_to_drop = current_tokens - MAX_CONTEXT_TOKENS
-    dropped_count = 0
-
-    while non_sys_msgs and tokens_to_drop > 0:
-        non_sys_msgs.pop(0)
-        dropped_count += 1
-        
-        # 实时重新评估剩余总量
-        remaining = system_msgs + non_sys_msgs
-        current_tokens = token_count_with_estimation(remaining, original_messages=messages)
-        if current_tokens <= MAX_CONTEXT_TOKENS:
+    system = [item for item in messages if item.role == "system" or item.type == "system"]
+    conversation = [item for item in messages if item not in system]
+    turns: list[list[TranscriptMessage]] = []
+    current: list[TranscriptMessage] = []
+    for message in conversation:
+        if message.role == "user" and current:
+            turns.append(current)
+            current = []
+        current.append(message)
+    if current:
+        turns.append(current)
+    used = token_count_with_estimation(system)
+    kept: list[list[TranscriptMessage]] = []
+    for turn in reversed(turns):
+        cost = token_count_with_estimation(turn)
+        if kept and used + cost > limit:
             break
-        tokens_to_drop = current_tokens - MAX_CONTEXT_TOKENS
+        kept.append(turn)
+        used += cost
+    kept.reverse()
+    return system + [message for turn in kept for message in turn]
 
-    kept_uuids = {m.uuid for m in system_msgs + non_sys_msgs}
-    return [m for m in messages if m.uuid in kept_uuids]
 
-def trim_context(messages: List[BaseMessage]) -> List[BaseMessage]:
-    """
-    对实时对话中的 LangChain BaseMessage 列表进行上下文窗口裁剪。
-    使用混合计费策略，超过 MAX_CONTEXT_TOKENS 时从前往后丢弃最旧的非 system 消息。
-    """
-    if not messages:
-        return messages
-
-    current_tokens = token_count_with_estimation(messages)
-    if current_tokens <= MAX_CONTEXT_TOKENS:
-        return messages
-
-    system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
-    non_sys_msgs = [m for m in messages if not isinstance(m, SystemMessage)]
-
-    tokens_to_drop = current_tokens - MAX_CONTEXT_TOKENS
-    dropped_count = 0
-
-    while non_sys_msgs and tokens_to_drop > 0:
-        non_sys_msgs.pop(0)
-        dropped_count += 1
-        
-        remaining = system_msgs + non_sys_msgs
-        current_tokens = token_count_with_estimation(remaining, original_messages=messages)
-        if current_tokens <= MAX_CONTEXT_TOKENS:
-            break
-        tokens_to_drop = current_tokens - MAX_CONTEXT_TOKENS
-
-    kept_uuids = {m.id for m in system_msgs + non_sys_msgs}
-    result = [m for m in messages if m.id in kept_uuids]
-
-    if dropped_count > 0:
-        logger.info(
-            "上下文窗口压缩完成",
-            extra={
-                "original_count": len(messages),
-                "dropped_count": dropped_count,
-                "kept_count": len(result),
-                "estimated_tokens": token_count_with_estimation(result),
-            }
-        )
-    return result
+def trim_context(
+    messages: List[BaseMessage],
+    max_tokens: int | None = None,
+) -> List[BaseMessage]:
+    return trim_legal_history(messages, max_tokens or _input_limit())

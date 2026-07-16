@@ -90,12 +90,15 @@ class PhysicalToolManager:
         *,
         capability: str = "runtime.control",
         risk: ToolRisk = ToolRisk.MEDIUM,
+        replace: bool = False,
     ) -> None:
         existing = self.runtime.catalog.get(tool.name)
         if existing is not None:
             if existing.source != ToolSource.ORCHESTRATION:
                 raise ValueError(f"orchestration tool collision: {tool.name}")
-            return
+            if not replace:
+                return
+            self.runtime.catalog.unregister(tool.name)
         self.register_tool(
             tool,
             source=ToolSource.ORCHESTRATION,
