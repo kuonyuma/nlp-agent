@@ -59,6 +59,9 @@ Side effects:
 """
 import os
 import json
+import re
+import threading
+from pathlib import Path
 from typing import List, Dict, Any
 from utils.logger import get_logger
 from langchain_core.messages import AIMessage, ToolMessage
@@ -66,7 +69,12 @@ from langchain_core.messages import BaseMessage, messages_to_dict, messages_from
 
 logger = get_logger("shiliu.agent.storage")
 
-DATA_DIR = os.path.join(os.getcwd(), ".data", "sessions")
+from core.session_context import SessionContext
+
+
+DATA_DIR = str(Path(__file__).resolve().parents[3] / ".data" / "sessions")
+_WORKER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_FILE_LOCKS: dict[str, threading.Lock] = {}
 
 
 def get_worker_dir(session_id: str, worker_id: str) -> str:
@@ -79,6 +87,9 @@ def get_worker_dir(session_id: str, worker_id: str) -> str:
     Returns:
         worker_dir: 该 Worker 的专属目录路径，格式为 `DATA_DIR/<session_id>/subagents/<worker_id>/`
     """
+    SessionContext(session_id=session_id)
+    if not _WORKER_ID.fullmatch(worker_id):
+        raise ValueError("invalid worker_id")
     path = os.path.join(DATA_DIR, session_id, "subagents", worker_id)
     os.makedirs(path, exist_ok=True)
     return path
@@ -97,8 +108,11 @@ def write_agent_metadata(session_id: str, worker_id: str, metadata: Dict[str, An
     """
     path = get_worker_dir(session_id, worker_id)
     file_path = os.path.join(path, "metadata.json")
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    temporary = f"{file_path}.tmp"
+    with _FILE_LOCKS.setdefault(file_path, threading.Lock()):
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        os.replace(temporary, file_path)
 
 
 def read_agent_metadata(session_id: str, worker_id: str) -> Dict[str, Any]:
@@ -138,9 +152,10 @@ def record_sidechain_transcript(session_id: str, worker_id: str, messages: List[
     # 将 LangChain 的 Message 对象转化为标准 JSON 字典
     msg_dicts = messages_to_dict(messages)
 
-    with open(file_path, "a", encoding="utf-8") as f:
-        for msg_dict in msg_dicts:
-            f.write(json.dumps(msg_dict, ensure_ascii=False) + "\n")
+    with _FILE_LOCKS.setdefault(file_path, threading.Lock()):
+        with open(file_path, "a", encoding="utf-8") as f:
+            for msg_dict in msg_dicts:
+                f.write(json.dumps(msg_dict, ensure_ascii=False) + "\n")
 
 
 def _filter_unresolved_tool_uses(messages: List[BaseMessage]) -> List[BaseMessage]:
