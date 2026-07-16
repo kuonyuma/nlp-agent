@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from core.coordinator_runtime import CoordinatorRuntime
+from core.session_context import SessionContext
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
 from schemas.models import WorkerExecutionResultSpec, WorkerTimingSpec
@@ -69,8 +70,8 @@ async def test_wait_barrier_resumes_at_configured_threshold(mode, quorum, comple
     bus = WorkerEventBus()
     calls = []
 
-    async def invoke(messages, session_id, background, turn_id):
-        calls.append((messages, session_id, background, turn_id))
+    async def invoke(messages, context, background, turn_id):
+        calls.append((messages, context, background, turn_id))
 
     runtime = CoordinatorRuntime(bus, invoke)
     futures = [register_worker(w, "turn-1", mode=mode, quorum=quorum) for w in ["w1", "w2", "w3"]]
@@ -88,6 +89,7 @@ async def test_wait_barrier_resumes_at_configured_threshold(mode, quorum, comple
     assert payload["barrier"]["mode"] == mode
     assert payload["barrier"]["timed_out"] is False
     assert len(payload["events"]) == len(completed_workers)
+    assert calls[-1][1].session_id == "session-a"
     assert calls[-1][3] == "turn-1"
     for future in futures:
         future.cancel()
@@ -148,4 +150,27 @@ async def test_detached_result_is_serialized_through_runtime():
     await asyncio.sleep(0.02)
     assert calls[-1][0] is True
     assert calls[-1][1] == "turn-detached"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_resume_preserves_full_session_identity():
+    bus = WorkerEventBus()
+    contexts = []
+
+    async def invoke(_messages, context, _background, _turn_id):
+        contexts.append(context)
+
+    runtime = CoordinatorRuntime(bus, invoke)
+    scoped = SessionContext(
+        session_id="session-a",
+        user_id="alice",
+        workspace_id="nlp",
+        channel="web",
+    )
+    await runtime.submit_user_turn(scoped, HumanMessage(content="question", id="turn-scoped"))
+    await bus.publish(event("detached", "turn-scoped"))
+    await asyncio.sleep(0.02)
+
+    assert contexts[-1] == scoped
     await runtime.close()
