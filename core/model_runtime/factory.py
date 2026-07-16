@@ -1,0 +1,133 @@
+"""Build resilient model routes from explicit typed configuration."""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from dotenv import dotenv_values
+
+from configs.settings import BASE_DIR, settings
+from core.model_runtime.adapters.deepseek import DeepSeekAdapter
+from core.model_runtime.adapters.openai_compatible import OpenAICompatibleAdapter
+from core.model_runtime.contracts import ModelPresetConfig, ModelRuntimeConfig
+from core.model_runtime.registry import ProviderRegistry, global_provider_registry
+from core.model_runtime.runtime import ModelCandidate, ResilientChatModel
+
+
+def _register_builtins(registry: ProviderRegistry) -> None:
+    if "deepseek" not in registry.names:
+        registry.register("deepseek", DeepSeekAdapter)
+    if "openai_compatible" not in registry.names:
+        registry.register("openai_compatible", OpenAICompatibleAdapter)
+
+
+class ModelFactory:
+    def __init__(self, config: ModelRuntimeConfig, registry: ProviderRegistry | None = None) -> None:
+        self.config = config
+        self.registry = registry or global_provider_registry
+        _register_builtins(self.registry)
+        self._cache: dict[tuple[str, ...], ResilientChatModel] = {}
+        self._dotenv = dotenv_values(BASE_DIR / ".env")
+
+    @classmethod
+    def from_settings(cls) -> "ModelFactory":
+        raw = settings._config
+        return cls(ModelRuntimeConfig.model_validate({
+            "providers": raw.get("providers", {}),
+            "models": raw.get("models", {}),
+            "model_presets": raw.get("model_presets", {}),
+            "model_routes": raw.get("model_routes", {}),
+        }))
+
+    def _api_key(self, env_name: str) -> str:
+        return str(os.environ.get(env_name) or getattr(settings, env_name, "") or self._dotenv.get(env_name) or "")
+
+    def _candidate(self, preset_name: str, preset: ModelPresetConfig) -> ModelCandidate:
+        definition = self.config.models[preset.model]
+        if preset.thinking.enabled and not definition.capabilities.thinking:
+            raise ValueError(f"Model {preset.model!r} does not support thinking")
+        if preset.generation.max_output_tokens > definition.max_output_tokens:
+            raise ValueError(f"Preset {preset_name!r} exceeds model output limit")
+        provider = self.config.providers[definition.provider]
+        api_key = self._api_key(provider.api_key_env)
+        if not api_key:
+            raise ValueError(
+                f"Missing API key {provider.api_key_env} for provider {definition.provider!r}"
+            )
+        model = self.registry.build(
+            provider.adapter,
+            provider_name=definition.provider,
+            provider=provider,
+            model_name=preset.model,
+            model=definition,
+            preset_name=preset_name,
+            preset=preset,
+            api_key=api_key,
+        )
+        return ModelCandidate(
+            preset_name=preset_name,
+            provider_name=definition.provider,
+            model_name=preset.model,
+            definition=definition,
+            preset=preset,
+            model=model,
+        )
+
+    def build_route(self, route_name: str) -> ResilientChatModel:
+        entries = self.config.route_presets(route_name)
+        key = ("route", route_name, *(name for name, _ in entries))
+        if key not in self._cache:
+            self._cache[key] = ResilientChatModel([
+                self._candidate(name, preset) for name, preset in entries
+            ])
+        return self._cache[key]
+
+    def build_preset(self, preset_name: str) -> ResilientChatModel:
+        key = ("preset", preset_name)
+        if key not in self._cache:
+            preset = self.config.preset(preset_name)
+            self._cache[key] = ResilientChatModel([self._candidate(preset_name, preset)])
+        return self._cache[key]
+
+    def build_override(self, requested: str, *, base_route: str = "worker") -> ResilientChatModel:
+        if requested in self.config.model_presets:
+            return self.build_preset(requested)
+        if requested not in self.config.models:
+            raise KeyError(
+                f"Unknown model preset/model {requested!r}; presets={sorted(self.config.model_presets)}"
+            )
+        base_name, base = self.config.route_presets(base_route)[0]
+        override = base.model_copy(update={"model": requested})
+        key = ("override", base_name, requested)
+        if key not in self._cache:
+            self._cache[key] = ResilientChatModel([
+                self._candidate(f"{base_name}@{requested}", override)
+            ])
+        return self._cache[key]
+
+    def route_primary_details(self, route_name: str) -> dict[str, Any]:
+        preset_name, preset = self.config.route_presets(route_name)[0]
+        model = self.config.models[preset.model]
+        provider = self.config.providers[model.provider]
+        return {
+            "preset": preset_name,
+            "model_name": preset.model,
+            "model_id": model.model_id,
+            "provider": model.provider,
+            "base_url": provider.base_url,
+            "context_window_tokens": model.context_window_tokens,
+            "output_reserve_tokens": preset.generation.max_output_tokens,
+            "thinking_enabled": preset.thinking.enabled,
+            "reasoning_effort": preset.thinking.effort.value,
+        }
+
+
+_global_model_factory: ModelFactory | None = None
+
+
+def get_global_model_factory() -> ModelFactory:
+    global _global_model_factory
+    if _global_model_factory is None:
+        _global_model_factory = ModelFactory.from_settings()
+    return _global_model_factory
