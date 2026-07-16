@@ -13,6 +13,8 @@ import json
 import time
 import asyncio
 import threading
+import uuid
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 from utils.logger import get_logger
 from pydantic import BaseModel, Field
@@ -22,32 +24,44 @@ from utils.tokens import token_count_with_estimation, rough_estimation_for_messa
 
 logger = get_logger("shiliu.session_storage")
 
-CHAT_HISTORY_DIR = os.path.join(".data", "chat_history")
+from core.session_context import SessionContext
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CHAT_HISTORY_DIR = str(_PROJECT_ROOT / ".data" / "chat_history")
 os.makedirs(CHAT_HISTORY_DIR, exist_ok=True)
 
 SESSIONS_INDEX_PATH = os.path.join(CHAT_HISTORY_DIR, ".sessions.json")
+_INDEX_LOCK = threading.RLock()
 
 
 def get_session_transcript_path(session_id: str) -> str:
     """获取主会话 transcript.jsonl 的绝对路径。"""
+    SessionContext(session_id=session_id)
     return os.path.join(CHAT_HISTORY_DIR, f"{session_id}.jsonl")
 
 
 def _load_sessions_index() -> dict:
     """读取会话索引文件。"""
-    if not os.path.exists(SESSIONS_INDEX_PATH):
-        return {"active_session": None, "sessions": {}}
-    try:
-        with open(SESSIONS_INDEX_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"active_session": None, "sessions": {}}
+    with _INDEX_LOCK:
+        if not os.path.exists(SESSIONS_INDEX_PATH):
+            return {"active_session": None, "sessions": {}}
+        try:
+            with open(SESSIONS_INDEX_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"active_session": None, "sessions": {}}
 
 
 def _save_sessions_index(index: dict):
     """写入会话索引文件。"""
-    with open(SESSIONS_INDEX_PATH, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
+    with _INDEX_LOCK:
+        temporary = f"{SESSIONS_INDEX_PATH}.{uuid.uuid4().hex}.tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, SESSIONS_INDEX_PATH)
 
 
 def get_active_session_id() -> str:
@@ -61,7 +75,7 @@ def get_active_session_id() -> str:
 
 def create_new_session() -> str:
     """创建新会话，写入索引，返回 session_id。"""
-    session_id = f"session_{int(time.time())}"
+    session_id = SessionContext.create().session_id
     index = _load_sessions_index()
     index["active_session"] = session_id
     index["sessions"][session_id] = {
@@ -79,7 +93,7 @@ def switch_to_new_session() -> str:
     old_id = index.get("active_session")
     if old_id and old_id in index.get("sessions", {}):
         index["sessions"][old_id]["last_active"] = now
-    new_id = f"session_{int(now)}"
+    new_id = SessionContext.create().session_id
     index["active_session"] = new_id
     index["sessions"][new_id] = {
         "created_at": now,
@@ -159,7 +173,8 @@ class SessionStorageManager:
         # session_id -> List[TranscriptMessage]
         self._write_queues: Dict[str, List[TranscriptMessage]] = {}
         # 记录已写入内存队列 of UUID（含已落盘），防重去重
-        self._written_uuids: Set[str] = set()
+        self._written_uuids: Set[tuple[str, str]] = set()
+        self._loaded_sessions: Set[str] = set()
         self._drain_task: Optional[asyncio.Task] = None
         self._is_draining = False
         self._file_lock = threading.Lock()
@@ -274,12 +289,9 @@ class SessionStorageManager:
             usage=usage
         )
 
-    async def append_entry(self, entry: dict):
+    async def append_entry(self, entry: dict, *, session_id: str):
         """写入任意 JSONL 记录（例如 context collapse commit）。"""
-        session_id = entry.get("session_id") or get_active_session_id()
-        if not session_id:
-            return
-            
+        SessionContext(session_id=session_id)
         file_path = get_session_transcript_path(session_id)
         # 添加换行符
         content = json.dumps(entry, ensure_ascii=False) + "\n"
@@ -293,6 +305,8 @@ class SessionStorageManager:
         if not messages:
             return
 
+        self._load_written_ids(session_id)
+
         parent_uuid = None
         new_entries = []
 
@@ -301,10 +315,11 @@ class SessionStorageManager:
             if msg_uuid is None:
                 continue
             
-            if msg_uuid not in self._written_uuids:
+            message_key = (session_id, msg_uuid)
+            if message_key not in self._written_uuids:
                 entry = self.to_transcript(msg, session_id, parent_uuid)
                 new_entries.append(entry)
-                self._written_uuids.add(msg_uuid)
+                self._written_uuids.add(message_key)
             
             # 更新 parent_uuid，准备用于下一条
             parent_uuid = msg_uuid
@@ -314,6 +329,26 @@ class SessionStorageManager:
                 self._write_queues[session_id] = []
             self._write_queues[session_id].extend(new_entries)
             self.ensure_drain_task()
+
+    def _load_written_ids(self, session_id: str) -> None:
+        """Load persisted IDs once so process restarts do not duplicate JSONL rows."""
+        if session_id in self._loaded_sessions:
+            return
+        self._loaded_sessions.add(session_id)
+        path = get_session_transcript_path(session_id)
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                for line in file:
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    message_id = payload.get("uuid")
+                    if message_id:
+                        self._written_uuids.add((session_id, str(message_id)))
+        except Exception as error:
+            logger.warning("加载已写入消息 ID 失败", session_id=session_id, error=str(error))
 
 global_session_storage = SessionStorageManager()
 
@@ -365,12 +400,20 @@ async def load_transcript_file(session_id: str) -> List[BaseMessage]:
         logger.error(f"读取 {file_path} 失败: {e}")
         return []
 
-    # 加载 commit log
-    try:
-        from server.agent.compression.context_collapse import global_collapse_store
-        global_collapse_store.load_commits(collapse_commits)
-    except Exception as e:
-        logger.warning(f"加载 Collapse Commit Log 失败: {e}")
+    # Legacy transcript commits are migrated into the per-session context state.
+    if collapse_commits:
+        try:
+            from core.session_context import local_context_repository
+
+            context = SessionContext(session_id=session_id)
+            state = local_context_repository.load(context)
+            if not state.collapse_commits:
+                local_context_repository.save(
+                    context,
+                    state.model_copy(update={"collapse_commits": collapse_commits}),
+                )
+        except Exception as e:
+            logger.warning(f"迁移 Collapse Commit Log 失败: {e}")
 
     if not leaf_uuid:
         return []

@@ -34,6 +34,16 @@ class Settings(BaseSettings):
         config["api_key"] = getattr(self, env_name, "")
         return config
 
+    def get_context_limits(self, provider_name: str | None = None) -> tuple[int, int]:
+        name = provider_name or self._config.get("defaults", {}).get(
+            "coordinator", "deepseek-chat"
+        )
+        provider = self._config.get("providers", {}).get(name, {})
+        return (
+            int(provider.get("context_window_tokens", 200_000)),
+            int(provider.get("output_reserve_tokens", 20_000)),
+        )
+
     def _resolve_worker_model(
         self,
         agent_name: str | None = None,
@@ -75,4 +85,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-

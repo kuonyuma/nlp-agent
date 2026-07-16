@@ -25,10 +25,15 @@ class AutoCompactResult:
     messages: List[BaseMessage]
     error: str = ""
 
-_consecutive_failures = 0
+_consecutive_failures: dict[str, int] = {}
 
 
-async def autocompact_if_needed(messages: List[BaseMessage]) -> AutoCompactResult:
+async def autocompact_if_needed(
+    messages: List[BaseMessage],
+    *,
+    threshold: int = AUTOCOMPACT_THRESHOLD,
+    session_id: str = "default",
+) -> AutoCompactResult:
     """ 自动压缩函数，检查当前消息列表的 token 数量，如果超过阈值则执行全量压缩。
 
     Args:
@@ -37,17 +42,16 @@ async def autocompact_if_needed(messages: List[BaseMessage]) -> AutoCompactResul
     Returns:
         AutoCompactResult 对象，包含是否进行了压缩、最终的消息列表，以及可能的错误信息。
     """
-    global _consecutive_failures
-    
     token_count = rough_estimation_for_messages(messages)
-    if token_count < AUTOCOMPACT_THRESHOLD:
+    if token_count < threshold:
         return AutoCompactResult(was_compacted=False, messages=messages)
-        
-    if _consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-        logger.warning(f"Auto-Compact 处于熔断状态（连续失败 {_consecutive_failures} 次），跳过压缩。")
+
+    failures = _consecutive_failures.get(session_id, 0)
+    if failures >= MAX_CONSECUTIVE_FAILURES:
+        logger.warning(f"Auto-Compact 处于熔断状态（连续失败 {failures} 次），跳过压缩。")
         return AutoCompactResult(was_compacted=False, messages=messages, error="Circuit broken")
         
-    logger.info(f"触发 Layer 5: Auto-Compact 全量压缩 (当前 Tokens: {token_count} >= {AUTOCOMPACT_THRESHOLD})")
+    logger.info(f"触发 Layer 5: Auto-Compact 全量压缩 (当前 Tokens: {token_count} >= {threshold})")
     
     try:
         KEEP_RECENT = 10
@@ -81,13 +85,13 @@ async def autocompact_if_needed(messages: List[BaseMessage]) -> AutoCompactResul
             
         new_messages.extend(recent_kept)
         
-        _consecutive_failures = 0
+        _consecutive_failures[session_id] = 0
         logger.info("Auto-Compact 成功，上下文已大幅压缩并恢复核心状态。")
 
         return AutoCompactResult(was_compacted=True, messages=new_messages)
         
     except Exception as e:
-        _consecutive_failures += 1
+        _consecutive_failures[session_id] = failures + 1
         logger.exception("Auto-Compact 失败")
         return AutoCompactResult(was_compacted=False, messages=messages, error=str(e))
 

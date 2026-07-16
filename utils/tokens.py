@@ -1,93 +1,141 @@
+"""Deterministic model-input token estimation and budget calculation."""
+
+from __future__ import annotations
+
 import json
+import math
 import re
-from typing import List, Dict, Any, Union
+from collections.abc import Iterable, Mapping
+from typing import Any
 
-# CJK 字符范围：中文、日文汉字、韩文汉字 & 假名/谚文
-_CJK_RE = re.compile(r'[一-鿿㐀-䶿豈-﫿぀-ゟ゠-ヿ가-힯]')
+from pydantic import BaseModel, ConfigDict, Field
 
-def _count_cjk_chars(s: str) -> int:
-    return len(_CJK_RE.findall(s))
 
-def get_token_count_from_usage(usage: Dict[str, Any]) -> int:
-    """从 API 返回的 usage_metadata 中提取精确 token 总数（优先取 total_tokens，其次累加各分项）。"""
-    if "total_tokens" in usage:
-        return usage["total_tokens"]
+_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
 
-    input_t = usage.get("input_tokens", 0)
-    output_t = usage.get("output_tokens", 0)
-    cache_creation_t = usage.get("cache_creation_input_tokens", 0)
-    cache_read_t = usage.get("cache_read_input_tokens", 0)
 
-    return input_t + output_t + cache_creation_t + cache_read_t
+class ContextBudget(BaseModel):
+    model_config = ConfigDict(frozen=True)
 
-def rough_token_count_estimation(content: Union[str, Dict, List, None]) -> int:
-    """
-    粗略估算 token 数，针对中英文混合文本分别处理：
-    - CJK 字符：BPE 分词下每个字 ≈ 1.5 token（DeepSeek/Claude 均适用）
-    - 非 CJK（英文/数字/标点）：≈ 4 chars/token
-    - JSON 结构体：≈ 2 chars/token（括号和引号密度高）
-    """
-    if not content:
+    context_window: int = Field(gt=0)
+    output_reserve: int = Field(default=16_000, ge=0)
+    safety_margin: int = Field(default=2_000, ge=0)
+    tool_schema_tokens: int = Field(default=0, ge=0)
+
+    @property
+    def input_limit(self) -> int:
+        return max(
+            1,
+            self.context_window
+            - self.output_reserve
+            - self.safety_margin
+            - self.tool_schema_tokens,
+        )
+
+    def threshold(self, ratio: float) -> int:
+        return max(1, int(self.input_limit * ratio))
+
+
+def get_token_count_from_usage(usage: Mapping[str, Any]) -> int:
+    """Return input tokens when available; total_tokens is only a last fallback."""
+    for key in ("input_tokens", "prompt_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+    value = usage.get("total_tokens", 0)
+    return max(0, int(value)) if isinstance(value, (int, float)) else 0
+
+
+def _stable_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json", exclude_none=True)
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except Exception:
+        return str(value)
+
+
+def rough_token_count_estimation(content: Any) -> int:
+    """Conservative mixed-language estimate, including JSON punctuation overhead."""
+    text = _stable_text(content)
+    if not text:
         return 0
+    cjk = len(_CJK_RE.findall(text))
+    non_cjk = len(text) - cjk
+    # Most modern tokenizers are close to one token per CJK character and
+    # 3.5-4 Latin characters per token. A 10% margin avoids late compaction.
+    return max(1, math.ceil((cjk * 1.05 + non_cjk / 3.6) * 1.10))
 
-    if isinstance(content, (dict, list)):
-        content_str = json.dumps(content, ensure_ascii=False)
-        return len(content_str) // 2
-    else:
-        content_str = str(content)
-        cjk_count = _count_cjk_chars(content_str)
-        non_cjk_count = len(content_str) - cjk_count
-        return int(cjk_count * 0.67 + non_cjk_count * 0.25)
 
-def rough_estimation_for_messages(messages: List[Any]) -> int:
-    """对消息列表进行粗略 token 估算。遍历每条消息的 content、toolCalls/tool_calls、toolResult 字段并累加。"""
+def _message_payload(message: Any) -> dict[str, Any]:
+    if isinstance(message, Mapping):
+        return dict(message)
+    payload: dict[str, Any] = {
+        "role": getattr(message, "type", message.__class__.__name__),
+        "content": getattr(message, "content", ""),
+    }
+    for name in (
+        "tool_calls",
+        "toolCalls",
+        "toolResult",
+        "tool_call_id",
+        "name",
+        "artifact",
+        "additional_kwargs",
+    ):
+        value = getattr(message, name, None)
+        if value:
+            payload[name] = value
+    return payload
+
+
+def estimate_message_tokens(message: Any) -> int:
+    # Per-message/role framing overhead is provider-dependent; 6 is a safe
+    # cross-provider approximation and prevents many tiny messages being free.
+    return 6 + rough_token_count_estimation(_message_payload(message))
+
+
+def rough_estimation_for_messages(messages: Iterable[Any]) -> int:
+    return sum(estimate_message_tokens(message) for message in messages)
+
+
+def token_count_with_estimation(
+    messages: list[Any], original_messages: list[Any] | None = None
+) -> int:
+    """Estimate the current view itself; never reuse stale request usage totals."""
+    del original_messages
+    return rough_estimation_for_messages(messages)
+
+
+def estimate_tool_schema_tokens(tools: Iterable[Any]) -> int:
     total = 0
-    for msg in messages:
-        if hasattr(msg, "content"):
-            total += rough_token_count_estimation(msg.content)
-            
-        if hasattr(msg, "toolCalls") and msg.toolCalls:
-            total += rough_token_count_estimation(msg.toolCalls)
-            
-        if hasattr(msg, "toolResult") and msg.toolResult:
-            total += rough_token_count_estimation(msg.toolResult)
-            
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-            total += rough_token_count_estimation(msg.tool_calls)
-            
+    for tool in tools:
+        schema = getattr(tool, "args_schema", None)
+        if isinstance(schema, type) and issubclass(schema, BaseModel):
+            schema = schema.model_json_schema()
+        payload = {
+            "name": getattr(tool, "name", ""),
+            "description": getattr(tool, "description", ""),
+            "parameters": schema or {},
+        }
+        total += rough_token_count_estimation(payload) + 8
     return total
 
-def token_count_with_estimation(messages: List[Any], original_messages: List[Any] = None) -> int:
-    """混合计费策略：从后向前找到最后一条带 usage/usage_metadata 的消息作为精确锚点，锚点之后的消息用粗略估算补齐。若无锚点则全量估算。"""
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
 
-        usage = getattr(msg, "usage", None) or getattr(msg, "usage_metadata", None)
-        
-        if usage and isinstance(usage, dict):
-            exact_tokens = get_token_count_from_usage(usage)
-            
-            # 若提供了 original_messages，需要比对锚点之前的消息，扣除已被丢弃消息的估算 token 数
-            if original_messages:
-                msg_id = getattr(msg, "id", None) or getattr(msg, "uuid", None)
-                orig_idx = -1
-                for idx, orig_msg in enumerate(original_messages):
-                    orig_id = getattr(orig_msg, "id", None) or getattr(orig_msg, "uuid", None)
-                    if orig_id == msg_id:
-                        orig_idx = idx
-                        break
-                if orig_idx != -1:
-                    current_ids = {getattr(m, "id", None) or getattr(m, "uuid", None) for m in messages[:i]}
-                    missing_msgs = []
-                    for orig_msg in original_messages[:orig_idx]:
-                        orig_id = getattr(orig_msg, "id", None) or getattr(orig_msg, "uuid", None)
-                        if orig_id not in current_ids:
-                            missing_msgs.append(orig_msg)
-                    if missing_msgs:
-                        exact_tokens -= rough_estimation_for_messages(missing_msgs)
-            
-            subsequent_msgs = messages[i+1:]
-            estimated_tokens = rough_estimation_for_messages(subsequent_msgs)
-            return max(0, exact_tokens) + estimated_tokens
-
-    return rough_estimation_for_messages(messages)
+def build_context_budget(
+    *,
+    context_window: int,
+    output_reserve: int,
+    tools: Iterable[Any] = (),
+    safety_margin: int = 2_000,
+) -> ContextBudget:
+    return ContextBudget(
+        context_window=context_window,
+        output_reserve=output_reserve,
+        safety_margin=safety_margin,
+        tool_schema_tokens=estimate_tool_schema_tokens(tools),
+    )
