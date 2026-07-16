@@ -65,6 +65,7 @@ async def _input(prompt: str) -> str:
 
 async def main() -> None:
     from core.coordinator_runtime import CoordinatorRuntime
+    from core.session_context import SessionContext
     from core.tool_registry import physical_tool_manager
     from core.worker_events import global_worker_event_bus
     from server.agent.grapy import build_agent
@@ -79,8 +80,7 @@ async def main() -> None:
         switch_to_new_session,
         load_session,
     )
-    from server.memory.extractor import extract_memories
-    from server.memory.injection import get_memory_context_message
+    from server.memory.runtime import global_memory_runtime
     from server.agent.compression.snip_compact import derive_short_id
 
     if not check_config():
@@ -90,10 +90,24 @@ async def main() -> None:
     active_session = {"id": get_active_session_id() or create_new_session()}
     init_snip_tool(app)
 
-    async def invoke(messages, session_id: str, background: bool, turn_id: str) -> None:
+    async def invoke(
+        messages,
+        context: SessionContext,
+        background: bool,
+        turn_id: str,
+    ) -> None:
         """The only Coordinator invocation path used by this process."""
+        session_id = context.session_id
         active_session["id"] = session_id
-        config = {"configurable": {"thread_id": session_id, "turn_id": turn_id}}
+        config = {
+            "configurable": {
+                "thread_id": session_id,
+                "turn_id": turn_id,
+                "user_id": context.user_id,
+                "workspace_id": context.workspace_id,
+                "channel": context.channel,
+            }
+        }
         printed = False
         prefix = "\nAgent: " if not background else "\nAgent (worker update): "
         async for event in app.astream_events({"messages": messages}, config=config, version="v2"):
@@ -112,8 +126,6 @@ async def main() -> None:
         await _apply_pending_snips(app, session_id)
 
     runtime = CoordinatorRuntime(global_worker_event_bus, invoke)
-    memory_tasks: set[asyncio.Task] = set()
-
     print("Enter a question. Commands: /new, /sessions, /load <id>, /exit")
     try:
         while True:
@@ -143,32 +155,18 @@ async def main() -> None:
 
             session_id = active_session["id"]
             config = {"configurable": {"thread_id": session_id}}
-            state = await app.aget_state(config)
-            previous_messages = state.values.get("messages", [])
-            previous_count = len(previous_messages)
-            memory_context = await get_memory_context_message(
-                [*previous_messages, HumanMessage(content=query)]
-            )
-            content = query
-            if memory_context:
-                content = f"{memory_context.content}\n\nCurrent user request: {query}"
-
             message_id = str(uuid.uuid4())
             message = HumanMessage(
-                content=f"{content} [id:{derive_short_id(message_id)}]", id=message_id
+                content=f"{query} [id:{derive_short_id(message_id)}]", id=message_id
             )
-            await runtime.submit_user_turn(session_id, message)
+            await runtime.submit_user_turn(SessionContext(session_id=session_id), message)
 
             final_state = await app.aget_state(config)
             await record_transcript(session_id, final_state.values.get("messages", []))
-            task = asyncio.create_task(extract_memories(app, session_id, previous_count))
-            memory_tasks.add(task)
-            task.add_done_callback(memory_tasks.discard)
     finally:
         _cleanup_workers()
         await runtime.close()
-        if memory_tasks:
-            await asyncio.gather(*memory_tasks, return_exceptions=True)
+        await global_memory_runtime.close()
         await global_session_storage.flush()
         await physical_tool_manager.close()
         save_session_on_exit()

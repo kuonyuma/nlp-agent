@@ -24,6 +24,7 @@ class AutoCompactResult:
     was_compacted: bool
     messages: List[BaseMessage]
     error: str = ""
+    summary: str = ""
 
 _consecutive_failures: dict[str, int] = {}
 
@@ -88,7 +89,11 @@ async def autocompact_if_needed(
         _consecutive_failures[session_id] = 0
         logger.info("Auto-Compact 成功，上下文已大幅压缩并恢复核心状态。")
 
-        return AutoCompactResult(was_compacted=True, messages=new_messages)
+        return AutoCompactResult(
+            was_compacted=True,
+            messages=new_messages,
+            summary=summary_text,
+        )
         
     except Exception as e:
         _consecutive_failures[session_id] = failures + 1

@@ -44,6 +44,10 @@ class Settings(BaseSettings):
             int(provider.get("output_reserve_tokens", 20_000)),
         )
 
+    @property
+    def memory_runtime(self) -> dict:
+        return dict(self._config.get("memory", {}))
+
     def _resolve_worker_model(
         self,
         agent_name: str | None = None,

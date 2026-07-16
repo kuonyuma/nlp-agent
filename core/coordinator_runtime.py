@@ -10,12 +10,15 @@ from typing import Awaitable, Callable
 
 from langchain_core.messages import BaseMessage, SystemMessage
 
+from core.session_context import SessionContext
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
 from core.worker_protocol import WorkerWaitPlan
 
 
-InvokeCoordinator = Callable[[list[BaseMessage], str, bool, str], Awaitable[None]]
+InvokeCoordinator = Callable[
+    [list[BaseMessage], SessionContext, bool, str], Awaitable[None]
+]
 
 
 @dataclass(slots=True)
@@ -24,6 +27,7 @@ class SessionRuntime:
     foreground_active: bool = False
     active_turn_id: str = ""
     resume_task: asyncio.Task[None] | None = None
+    context: SessionContext | None = None
 
 
 class CoordinatorRuntime:
@@ -37,13 +41,22 @@ class CoordinatorRuntime:
     def _session(self, session_id: str) -> SessionRuntime:
         return self._sessions.setdefault(session_id, SessionRuntime())
 
-    async def submit_user_turn(self, session_id: str, message: BaseMessage) -> None:
+    async def submit_user_turn(
+        self,
+        context: SessionContext | str,
+        message: BaseMessage,
+    ) -> None:
+        context = (
+            context if isinstance(context, SessionContext) else SessionContext(session_id=context)
+        )
+        session_id = context.session_id
         runtime = self._session(session_id)
         async with runtime.lock:
+            runtime.context = context
             runtime.foreground_active = True
             runtime.active_turn_id = message.id or str(uuid.uuid4())
             try:
-                await self._invoke([message], session_id, False, runtime.active_turn_id)
+                await self._invoke([message], context, False, runtime.active_turn_id)
                 await self._process_wait_plans(
                     session_id, runtime.active_turn_id, background=False
                 )
@@ -79,7 +92,7 @@ class CoordinatorRuntime:
             global_task_manager.mark_wait_consumed(plan.worker_ids)
             await self._invoke(
                 [self._worker_results_message(events, plan=plan, timed_out=timed_out)],
-                session_id,
+                self._session(session_id).context or SessionContext(session_id=session_id),
                 background,
                 parent_turn_id,
             )
@@ -132,7 +145,7 @@ class CoordinatorRuntime:
             )
             await self._invoke(
                 [self._worker_results_message(events)],
-                session_id,
+                runtime.context or SessionContext(session_id=session_id),
                 True,
                 parent_turn_id,
             )
