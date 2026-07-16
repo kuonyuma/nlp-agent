@@ -12,6 +12,8 @@ from core.tool_runtime import (
     ToolDescriptor,
     ToolGrantRequest,
     ToolGrantSnapshot,
+    ToolLockScope,
+    ToolRetryPolicy,
     ToolRisk,
     ToolScope,
     ToolSet,
@@ -60,9 +62,13 @@ class PhysicalToolManager:
         capabilities: Iterable[str],
         risk: ToolRisk = ToolRisk.LOW,
         read_only: bool = False,
+        idempotent: bool = False,
         concurrency_safe: bool = False,
         exclusive: bool = False,
+        lock_scope: ToolLockScope = ToolLockScope.NONE,
         timeout_s: float = 30.0,
+        max_concurrency: int = 0,
+        retry: ToolRetryPolicy | None = None,
     ) -> None:
         descriptor = ToolDescriptor(
             name=tool.name,
@@ -73,9 +79,13 @@ class PhysicalToolManager:
             capabilities=frozenset(capabilities),
             risk=risk,
             read_only=read_only,
+            idempotent=idempotent,
             concurrency_safe=concurrency_safe,
             exclusive=exclusive,
+            lock_scope=lock_scope,
             timeout_s=timeout_s,
+            max_concurrency=max_concurrency,
+            retry=retry or ToolRetryPolicy(),
             factory=(
                 (lambda tool=tool: tool)
                 if source == ToolSource.ORCHESTRATION
@@ -126,6 +136,7 @@ class PhysicalToolManager:
         orchestration_tools: Iterable[BaseTool],
         *,
         session_id: str = "",
+        allow_high_risk: bool = False,
     ) -> ToolSet:
         for tool in orchestration_tools:
             capability = "worker.manage" if tool.name in {"spawn_worker", "send_message", "TaskStop"} else "runtime.control"
@@ -139,6 +150,7 @@ class PhysicalToolManager:
                 allowed_capabilities=frozenset(policy.allowed_capabilities),
                 denied_tools=frozenset(policy.denied_tools),
                 denied_capabilities=frozenset(policy.denied_capabilities),
+                allow_high_risk=allow_high_risk,
             )
         )
 
@@ -150,6 +162,7 @@ class PhysicalToolManager:
         denied_names: Iterable[str] = (),
         session_id: str = "",
         profile: str = "",
+        allow_high_risk: bool = False,
     ) -> ToolSet:
         policy = self.config.tools.policies.worker
         return self.runtime.build_toolset(
@@ -163,6 +176,7 @@ class PhysicalToolManager:
                 ),
                 denied_tools=frozenset({*policy.denied_tools, *denied_names}),
                 denied_capabilities=frozenset(policy.denied_capabilities),
+                allow_high_risk=allow_high_risk,
             )
         )
 
@@ -183,6 +197,30 @@ class PhysicalToolManager:
 
     def has_tool(self, name: str) -> bool:
         return self.runtime.catalog.get(name) is not None
+
+    def grant_high_risk_tool(
+        self,
+        *,
+        session_id: str,
+        tool_name: str,
+        granted_by: str,
+        reason: str = "",
+        ttl_s: float = 300,
+    ):
+        """WebUI/API boundary for a short-lived explicit high-risk grant."""
+        return self.runtime.grant_high_risk(
+            session_id=session_id,
+            tool_name=tool_name,
+            granted_by=granted_by,
+            reason=reason,
+            ttl_s=ttl_s,
+        )
+
+    def revoke_high_risk_tool(self, session_id: str, tool_name: str) -> bool:
+        return self.runtime.authorization.revoke(session_id, tool_name)
+
+    def recent_tool_audit(self, *, session_id: str, limit: int = 100):
+        return self.runtime.audit_log.recent(session_id=session_id, limit=limit)
 
 
 physical_tool_manager = PhysicalToolManager()

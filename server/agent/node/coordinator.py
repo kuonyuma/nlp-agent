@@ -73,16 +73,21 @@ def init_snip_tool(app) -> None:
     _CACHED_TOOLSET_KEY = None
 
 
-def get_coordinator_toolset():
+def get_coordinator_toolset(config: RunnableConfig | None = None):
     tools = [spawn_worker, send_message, task_stop_tool]
     if _CACHED_SNIP_TOOL is not None:
         tools.append(_CACHED_SNIP_TOOL)
-    return physical_tool_manager.get_coordinator_toolset(tools)
+    session_id = (config or {}).get("configurable", {}).get("thread_id", "")
+    return physical_tool_manager.get_coordinator_toolset(
+        tools,
+        session_id=session_id,
+        allow_high_risk=True,
+    )
 
 
-def _get_llm_with_tools() -> BaseChatModel:
+def _get_llm_with_tools(config: RunnableConfig) -> BaseChatModel:
     global _CACHED_LLM_WITH_TOOLS, _CACHED_SNIP_TOOL, _CACHED_TOOLSET_KEY
-    toolset = get_coordinator_toolset()
+    toolset = get_coordinator_toolset(config)
     cache_key = (physical_tool_manager.catalog_revision, toolset.names)
     if _CACHED_LLM_WITH_TOOLS is not None and _CACHED_TOOLSET_KEY == cache_key:
         return _CACHED_LLM_WITH_TOOLS
@@ -102,7 +107,7 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
     from utils.tokens import build_context_budget
 
     state_modifiers = []
-    toolset = get_coordinator_toolset()
+    toolset = get_coordinator_toolset(config)
     context_window, output_reserve = settings.get_context_limits()
     budget = build_context_budget(
         context_window=context_window,
@@ -125,5 +130,5 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
                 state_modifiers.append(message)
     messages = transform.messages
 
-    response = await _get_llm_with_tools().ainvoke(messages)
+    response = await _get_llm_with_tools(config).ainvoke(messages)
     return {"messages": [*state_modifiers, response]}
