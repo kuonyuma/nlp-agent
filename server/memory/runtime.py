@@ -102,7 +102,20 @@ class MemoryRuntime:
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             try:
-                applied = await self.curator.curate(context, self.manager(context))
+                from core.observability.context import current_telemetry_context
+                from core.observability.models import SpanKind
+                from core.observability.runtime import global_telemetry
+
+                telemetry = current_telemetry_context()
+                if telemetry is None:
+                    applied = await self.curator.curate(context, self.manager(context))
+                else:
+                    async with global_telemetry.span(
+                        SpanKind.MEMORY, "memory.curate", context=telemetry,
+                        attributes={"memory_scope": key},
+                    ) as span:
+                        applied = await self.curator.curate(context, self.manager(context))
+                        span.annotate(applied=applied)
                 logger.info("Memory curation completed", scope=key, applied=applied)
             except asyncio.CancelledError:
                 raise

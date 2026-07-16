@@ -11,6 +11,9 @@ from typing import Awaitable, Callable
 from langchain_core.messages import BaseMessage, SystemMessage
 
 from core.session_context import SessionContext
+from core.observability.context import TelemetryContext, bind_telemetry_context
+from core.observability.models import SpanKind, SpanStatus
+from core.observability.runtime import global_telemetry
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
 from core.worker_protocol import WorkerWaitPlan
@@ -28,6 +31,7 @@ class SessionRuntime:
     active_turn_id: str = ""
     resume_task: asyncio.Task[None] | None = None
     context: SessionContext | None = None
+    telemetry_context: TelemetryContext | None = None
 
 
 class CoordinatorRuntime:
@@ -55,11 +59,30 @@ class CoordinatorRuntime:
             runtime.context = context
             runtime.foreground_active = True
             runtime.active_turn_id = message.id or str(uuid.uuid4())
+            telemetry = TelemetryContext.create(
+                session_id=session_id,
+                turn_id=runtime.active_turn_id,
+                workspace_id=context.workspace_id,
+                user_id=context.user_id,
+                channel=context.channel,
+            )
+            runtime.telemetry_context = telemetry
+            global_telemetry.start_trace(telemetry, source="user")
             try:
-                await self._invoke([message], context, False, runtime.active_turn_id)
-                await self._process_wait_plans(
-                    session_id, runtime.active_turn_id, background=False
-                )
+                with bind_telemetry_context(telemetry):
+                    async with global_telemetry.span(
+                        SpanKind.COORDINATOR, "coordinator.turn", context=telemetry
+                    ):
+                        await self._invoke([message], context, False, runtime.active_turn_id)
+                        await self._process_wait_plans(
+                            session_id, runtime.active_turn_id, background=False
+                        )
+            except BaseException as error:
+                status = SpanStatus.CANCELLED if isinstance(error, asyncio.CancelledError) else SpanStatus.ERROR
+                global_telemetry.complete_trace(telemetry, status=status, error=error)
+                raise
+            else:
+                global_telemetry.complete_trace(telemetry)
             finally:
                 runtime.foreground_active = False
                 if self._event_bus.has_pending(session_id):
@@ -98,6 +121,31 @@ class CoordinatorRuntime:
             )
 
     async def _collect_barrier_events(
+        self, plan: WorkerWaitPlan
+    ) -> tuple[list[WorkerCompletedEvent], bool]:
+        from core.observability.context import current_telemetry_context
+
+        telemetry = current_telemetry_context()
+        if telemetry is None:
+            return await self._collect_barrier_events_unobserved(plan)
+        async with global_telemetry.span(
+            SpanKind.WORKER,
+            "worker.barrier_wait",
+            context=telemetry,
+            attributes={
+                "mode": plan.mode,
+                "quorum": plan.quorum,
+                "worker_count": len(plan.worker_ids),
+                "timeout_s": plan.timeout_s,
+            },
+        ) as span:
+            events, timed_out = await self._collect_barrier_events_unobserved(plan)
+            span.annotate(completed_workers=len(events), timed_out=timed_out)
+            if timed_out:
+                span.set_status(SpanStatus.TIMEOUT, error_kind="barrier_timeout")
+            return events, timed_out
+
+    async def _collect_barrier_events_unobserved(
         self, plan: WorkerWaitPlan
     ) -> tuple[list[WorkerCompletedEvent], bool]:
         collected: list[WorkerCompletedEvent] = []
@@ -143,13 +191,33 @@ class CoordinatorRuntime:
                 (event.parent_turn_id for event in events if event.parent_turn_id),
                 str(uuid.uuid4()),
             )
-            await self._invoke(
-                [self._worker_results_message(events)],
-                runtime.context or SessionContext(session_id=session_id),
-                True,
-                parent_turn_id,
+            session_context = runtime.context or SessionContext(session_id=session_id)
+            telemetry = TelemetryContext.create(
+                session_id=session_id, turn_id=parent_turn_id,
+                workspace_id=session_context.workspace_id, user_id=session_context.user_id,
+                channel=session_context.channel,
             )
-            await self._process_wait_plans(session_id, parent_turn_id, background=True)
+            runtime.telemetry_context = telemetry
+            global_telemetry.start_trace(
+                telemetry, source="worker_resume",
+                attributes={"worker_events": len(events)},
+            )
+            try:
+                with bind_telemetry_context(telemetry):
+                    async with global_telemetry.span(
+                        SpanKind.COORDINATOR, "coordinator.worker_resume", context=telemetry
+                    ):
+                        await self._invoke(
+                            [self._worker_results_message(events)], session_context,
+                            True, parent_turn_id,
+                        )
+                        await self._process_wait_plans(session_id, parent_turn_id, background=True)
+            except BaseException as error:
+                status = SpanStatus.CANCELLED if isinstance(error, asyncio.CancelledError) else SpanStatus.ERROR
+                global_telemetry.complete_trace(telemetry, status=status, error=error)
+                raise
+            else:
+                global_telemetry.complete_trace(telemetry)
 
     @staticmethod
     def _worker_results_message(
