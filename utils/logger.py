@@ -4,6 +4,22 @@ import os
 import structlog
 import sys
 
+
+def _add_telemetry_context(_, __, event_dict):
+    """Attach trace correlation IDs when the current task is instrumented."""
+    try:
+        from core.observability.context import current_telemetry_context
+
+        context = current_telemetry_context()
+        if context is not None:
+            for key in ("request_id", "trace_id", "span_id", "session_id", "turn_id", "worker_id"):
+                value = getattr(context, key, None)
+                if value is not None:
+                    event_dict.setdefault(key, value)
+    except Exception:
+        pass
+    return event_dict
+
 # 确保日志目录存在
 os.makedirs("logs", exist_ok=True)
 
@@ -13,6 +29,7 @@ def setup_logging():
     '''
     # 1. 定义共用的处理器
     shared_processors = [
+        _add_telemetry_context,
         structlog.stdlib.add_log_level,                 # 添加日志级别 (info, error)
         structlog.stdlib.add_logger_name,               # 添加 Logger 名称
         structlog.processors.TimeStamper(fmt="iso"),    # ISO 8601 格式时间戳
