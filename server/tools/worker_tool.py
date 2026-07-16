@@ -62,6 +62,7 @@ Side effects:
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from core.task_manager import global_task_manager
@@ -80,6 +81,9 @@ from server.agent.llm_factory import get_worker_llm, get_tool_llm
 from core.tool_registry import physical_tool_manager
 from core.tool_runtime import ToolGrantSnapshot, ToolSet
 from core.session_context import SessionContext
+from core.observability.context import current_telemetry_context
+from core.observability.models import SpanKind, SpanStatus, TokenUsage
+from core.observability.runtime import global_telemetry
 from server.agent.compression.context_manager import global_context_manager
 from utils.tokens import build_context_budget
 from server.agent.node.session_storage import (
@@ -99,6 +103,20 @@ from schemas.models import (
 )
 
 logger = get_logger("shiliu.tools.worker")
+
+
+@asynccontextmanager
+async def _observed_worker_span(kind: SpanKind, name: str, *, worker_id: str,
+                                attempt: int = 1, **attributes):
+    context = current_telemetry_context()
+    if context is None:
+        yield None
+        return
+    async with global_telemetry.span(
+        kind, name, context=context, worker_id=worker_id,
+        attempt=attempt, attributes=attributes,
+    ) as span:
+        yield span
 
 
 class SpawnWorkerInput(BaseModel):
@@ -214,12 +232,38 @@ async def _execute_sandbox_loop(
                         command_kind=command.kind,
                     )
 
-            context_view = await global_context_manager.prepare(
-                session_context,
-                messages,
-                context_budget,
-            )
-            response = await llm.ainvoke(context_view.messages)
+            async with _observed_worker_span(
+                SpanKind.COMPRESSION, "worker.context.prepare",
+                worker_id=worker_id, attempt=attempt,
+            ) as compression_span:
+                context_view = await global_context_manager.prepare(
+                    session_context, messages, context_budget,
+                )
+                if compression_span is not None:
+                    compression_span.annotate(
+                        tokens_before=context_view.tokens_before,
+                        tokens_after=context_view.tokens_after,
+                        tokens_saved=max(0, context_view.tokens_before - context_view.tokens_after),
+                        actions=context_view.actions,
+                    )
+            async with _observed_worker_span(
+                SpanKind.MODEL, "worker.model", worker_id=worker_id,
+                attempt=attempt, model=model_name or "default",
+            ) as model_span:
+                response = await llm.ainvoke(context_view.messages)
+                if model_span is not None:
+                    usage_metadata = getattr(response, "usage_metadata", None)
+                    if usage_metadata:
+                        model_span.set_usage(usage_metadata)
+                    else:
+                        from utils.tokens import rough_estimation_for_messages, rough_token_count_estimation
+
+                        input_tokens = rough_estimation_for_messages(context_view.messages)
+                        output_tokens = rough_token_count_estimation(response.content)
+                        model_span.set_usage(TokenUsage(
+                            input_tokens=input_tokens, output_tokens=output_tokens,
+                            total_tokens=input_tokens + output_tokens, source="estimated",
+                        ))
             messages.append(response)
             if getattr(response, "usage_metadata", None):
                 total_tokens_used += response.usage_metadata.get("total_tokens", 0)
@@ -408,21 +452,38 @@ async def _background_task_wrapper(
     task = global_task_manager.get_active_task(worker_id)
     execution: WorkerExecutionResultSpec | None = None
     try:
-        await global_task_manager.acquire_execution_slot(worker_id)
+        async with _observed_worker_span(
+            SpanKind.WORKER, "worker.queue_wait", worker_id=worker_id,
+        ):
+            await global_task_manager.acquire_execution_slot(worker_id)
         task = global_task_manager.get_active_task(worker_id)
         if task is None:
             raise asyncio.CancelledError
 
         async def execute(attempt: int) -> WorkerExecutionResultSpec:
-            return await _execute_sandbox_loop(
-                worker_id,
-                session_id,
-                initial_messages,
-                toolset,
-                model_name,
-                budget=task.budget,
-                attempt=attempt,
-            )
+            async with _observed_worker_span(
+                SpanKind.WORKER, "worker.attempt", worker_id=worker_id,
+                attempt=attempt, model=model_name or "default",
+            ) as worker_span:
+                result = await _execute_sandbox_loop(
+                    worker_id, session_id, initial_messages, toolset, model_name,
+                    budget=task.budget, attempt=attempt,
+                )
+                if worker_span is not None:
+                    worker_span.annotate(
+                        termination_reason=result.termination_reason,
+                        tool_uses=result.usage.tool_uses,
+                    )
+                    if result.status != "completed":
+                        status = SpanStatus.CANCELLED if result.status == "cancelled" else (
+                            SpanStatus.TIMEOUT if result.termination_reason == "timeout" else SpanStatus.ERROR
+                        )
+                        worker_span.set_status(
+                            status,
+                            error_kind=result.error.category if result.error else result.termination_reason,
+                            error_message=result.error.message if result.error else result.summary,
+                        )
+                return result
 
         execution = await _execute_with_retries(worker_id, execute)
     except asyncio.CancelledError:

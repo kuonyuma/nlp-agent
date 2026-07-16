@@ -570,9 +570,16 @@ class ToolExecutor:
         argument_keys: tuple[str, ...] = (),
     ) -> None:
         try:
+            from core.observability.context import current_telemetry_context
+
+            telemetry = current_telemetry_context()
             await self.audit_log.emit(
                 ToolAuditEvent(
                     session_id=grant.session_id,
+                    trace_id=telemetry.trace_id if telemetry else "",
+                    span_id=telemetry.span_id if telemetry else "",
+                    turn_id=telemetry.turn_id if telemetry else "",
+                    worker_id=telemetry.worker_id if telemetry and telemetry.worker_id else "",
                     role=grant.role.value,
                     profile=grant.profile,
                     tool_name=descriptor.name,
@@ -639,10 +646,15 @@ class ToolSet:
         arguments: Mapping[str, Any] | None,
         config: RunnableConfig | None = None,
     ) -> ToolExecutionResult:
+        from core.observability.context import current_telemetry_context
+        from core.observability.models import SpanKind, SpanStatus
+        from core.observability.runtime import global_telemetry
+
         descriptor = self._descriptor_by_name.get(name)
         tool = self._tools.get(name)
+        context = current_telemetry_context()
         if descriptor is None or tool is None:
-            return ToolExecutionResult(
+            result = ToolExecutionResult(
                 tool_name=name,
                 ok=False,
                 error=ToolExecutionError(
@@ -651,9 +663,47 @@ class ToolSet:
                 ),
                 attempts=0,
             )
-        return await self.executor.execute(
-            descriptor, tool, arguments, self.snapshot, config
-        )
+            if context is None:
+                return result
+            async with global_telemetry.span(
+                SpanKind.TOOL, f"tool.{name}", context=context,
+                attributes={"tool_name": name, "argument_keys": sorted((arguments or {}).keys())},
+            ) as span:
+                span.set_status(
+                    SpanStatus.DENIED, error_kind="permission_denied",
+                    error_message=result.error.message if result.error else None,
+                )
+                return result
+        if context is None:
+            return await self.executor.execute(
+                descriptor, tool, arguments, self.snapshot, config
+            )
+        async with global_telemetry.span(
+            SpanKind.TOOL,
+            f"tool.{name}",
+            context=context,
+            attributes={
+                "tool_name": name,
+                "argument_keys": sorted((arguments or {}).keys()),
+                "source": descriptor.source.value,
+                "risk": descriptor.risk.value,
+            },
+        ) as span:
+            result = await self.executor.execute(
+                descriptor, tool, arguments, self.snapshot, config
+            )
+            span.annotate(attempts=result.attempts, runtime_duration_ms=result.duration_ms)
+            if not result.ok:
+                kind = result.error.kind if result.error else "tool_error"
+                status = SpanStatus.TIMEOUT if kind == "timeout" else (
+                    SpanStatus.DENIED if kind == "permission_denied" else SpanStatus.ERROR
+                )
+                span.set_status(
+                    status,
+                    error_kind=kind,
+                    error_message=result.error.message if result.error else None,
+                )
+            return result
 
     async def execute_many(
         self,

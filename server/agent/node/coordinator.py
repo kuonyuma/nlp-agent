@@ -1,10 +1,15 @@
 """Coordinator 节点：负责任务拆解、Worker 编排和结果综合。"""
 
+from contextlib import asynccontextmanager
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from core.session_context import SessionContext
+from core.observability.context import TelemetryContext, current_telemetry_context
+from core.observability.models import SpanKind, TokenUsage
+from core.observability.runtime import global_telemetry
 from core.skill_loader import skill_loader
 from core.tool_registry import physical_tool_manager
 from server.agent.llm_factory import get_planner_llm
@@ -21,6 +26,16 @@ _CACHED_LLM_WITH_TOOLS = None
 _CACHED_TOOLSET_KEY = None
 _CACHED_SNIP_TOOL = None
 _SNIP_APP_REF = None
+
+
+@asynccontextmanager
+async def _observed_span(kind: SpanKind, name: str, config: RunnableConfig, **attributes):
+    context = TelemetryContext.from_config(config) or current_telemetry_context()
+    if context is None:
+        yield None
+        return
+    async with global_telemetry.span(kind, name, context=context, attributes=attributes) as span:
+        yield span
 
 
 def _get_system_message() -> SystemMessage:
@@ -100,7 +115,10 @@ def _get_llm_with_tools(config: RunnableConfig) -> BaseChatModel:
 async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
     system_message = _get_system_message()
     session = SessionContext.from_config(config, require=True)
-    memory_message = global_memory_runtime.context_message(session)
+    async with _observed_span(SpanKind.MEMORY, "memory.inject", config) as memory_span:
+        memory_message = global_memory_runtime.context_message(session)
+        if memory_span is not None:
+            memory_span.annotate(injected=memory_message is not None)
     messages = [system_message]
     if memory_message is not None:
         messages.append(memory_message)
@@ -118,11 +136,16 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         output_reserve=output_reserve,
         tools=toolset.tools,
     )
-    transform = await global_context_manager.prepare(
-        session,
-        messages,
-        budget,
-    )
+    async with _observed_span(SpanKind.COMPRESSION, "context.prepare", config) as compression_span:
+        transform = await global_context_manager.prepare(session, messages, budget)
+        if compression_span is not None:
+            compression_span.annotate(
+                tokens_before=transform.tokens_before,
+                tokens_after=transform.tokens_after,
+                tokens_saved=max(0, transform.tokens_before - transform.tokens_after),
+                actions=transform.actions,
+                removed_messages=len(transform.removed_message_ids),
+            )
     if transform.removed_message_ids:
         from langchain_core.messages import RemoveMessage
 
@@ -134,5 +157,23 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
                 state_modifiers.append(message)
     messages = transform.messages
 
-    response = await _get_llm_with_tools(config).ainvoke(messages)
+    model_config = settings.planner_llm
+    async with _observed_span(
+        SpanKind.MODEL, "coordinator.model", config,
+        provider=model_config.get("base_url", ""), model=model_config.get("model_id", ""),
+    ) as model_span:
+        response = await _get_llm_with_tools(config).ainvoke(messages)
+        if model_span is not None:
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                model_span.set_usage(usage)
+            else:
+                from utils.tokens import rough_estimation_for_messages, rough_token_count_estimation
+
+                input_tokens = rough_estimation_for_messages(messages)
+                output_tokens = rough_token_count_estimation(response.content)
+                model_span.set_usage(TokenUsage(
+                    input_tokens=input_tokens, output_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens, source="estimated",
+                ))
     return {"messages": [*state_modifiers, response]}

@@ -90,6 +90,10 @@ class ToolAuditEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: float = Field(default_factory=time.time)
     session_id: str = ""
+    trace_id: str = ""
+    span_id: str = ""
+    turn_id: str = ""
+    worker_id: str = ""
     role: str = ""
     profile: str = ""
     tool_name: str

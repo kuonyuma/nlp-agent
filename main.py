@@ -68,6 +68,8 @@ async def main() -> None:
     from core.session_context import SessionContext
     from core.tool_registry import physical_tool_manager
     from core.worker_events import global_worker_event_bus
+    from core.observability.context import current_telemetry_context
+    from core.observability.runtime import global_telemetry
     from server.agent.grapy import build_agent
     from server.agent.node.coordinator import init_snip_tool
     from server.agent.session_storage import (
@@ -106,6 +108,11 @@ async def main() -> None:
                 "user_id": context.user_id,
                 "workspace_id": context.workspace_id,
                 "channel": context.channel,
+                **(
+                    current_telemetry_context().configurable()
+                    if current_telemetry_context() is not None
+                    else {}
+                ),
             }
         }
         printed = False
@@ -118,6 +125,7 @@ async def main() -> None:
             chunk = event["data"].get("chunk")
             if isinstance(chunk, AIMessageChunk) and chunk.content:
                 if not printed:
+                    global_telemetry.mark_ttft()
                     print(prefix, end="", flush=True)
                     printed = True
                 print(chunk.content, end="", flush=True)
@@ -167,6 +175,7 @@ async def main() -> None:
         _cleanup_workers()
         await runtime.close()
         await global_memory_runtime.close()
+        await global_telemetry.close()
         await global_session_storage.flush()
         await physical_tool_manager.close()
         save_session_on_exit()
