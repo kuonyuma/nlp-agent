@@ -37,10 +37,14 @@ def usage_from_metadata(metadata: dict[str, Any] | None) -> TokenUsage:
     input_tokens = int(data.get("input_tokens", data.get("prompt_tokens", 0)) or 0)
     output_tokens = int(data.get("output_tokens", data.get("completion_tokens", 0)) or 0)
     cached_tokens = int(data.get("cached_tokens", data.get("input_token_details", {}).get("cache_read", 0)) or 0)
+    cache_miss_tokens = int(data.get("prompt_cache_miss_tokens", data.get("input_token_details", {}).get("cache_miss", 0)) or 0)
+    reasoning_tokens = int(data.get("reasoning_tokens", data.get("output_token_details", {}).get("reasoning", 0)) or 0)
     total = int(data.get("total_tokens", input_tokens + output_tokens) or 0)
     return TokenUsage(
         input_tokens=max(0, input_tokens), output_tokens=max(0, output_tokens),
         cached_tokens=max(0, cached_tokens), total_tokens=max(0, total),
+        cache_miss_tokens=max(0, cache_miss_tokens),
+        reasoning_tokens=max(0, reasoning_tokens),
         source="provider" if data else "none",
     )
 
@@ -164,6 +168,8 @@ class TelemetryRuntime:
                 input_tokens=previous.input_tokens + span.usage.input_tokens,
                 output_tokens=previous.output_tokens + span.usage.output_tokens,
                 cached_tokens=previous.cached_tokens + span.usage.cached_tokens,
+                cache_miss_tokens=previous.cache_miss_tokens + span.usage.cache_miss_tokens,
+                reasoning_tokens=previous.reasoning_tokens + span.usage.reasoning_tokens,
                 total_tokens=previous.total_tokens + span.usage.total_tokens,
                 source=source,
             )
