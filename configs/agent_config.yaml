@@ -7,11 +7,15 @@ providers:
     model_id: deepseek-chat
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
+    context_window_tokens: 200000
+    output_reserve_tokens: 20000
 
   deepseek-reasoner:
     model_id: deepseek-reasoner
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
+    context_window_tokens: 200000
+    output_reserve_tokens: 20000
 
 # 工具注册、权限与扩展均在此处集中配置。未声明的工具不会被隐式授权。
 tools:
