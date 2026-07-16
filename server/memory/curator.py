@@ -5,12 +5,13 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.session_context import SessionContext
-from server.agent.llm_factory import get_tool_llm
+from server.agent.llm_factory import get_utility_llm
 from server.memory.manager import MemoryManager
 from server.memory.types import MemoryCurationResult, MemoryScopeKind
 from utils.logger import get_logger
 
 
+get_tool_llm = get_utility_llm  # Backward-compatible injection seam for hosts/tests.
 logger = get_logger("nlp_agent.memory.curator")
 
 

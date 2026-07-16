@@ -1,21 +1,80 @@
 defaults:
-  coordinator: deepseek-chat
-  worker: deepseek-chat
+  coordinator: coordinator-pro
+  worker: worker-flash
 
 providers:
-  deepseek-chat:
-    model_id: deepseek-chat
+  deepseek:
+    adapter: deepseek
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
-    context_window_tokens: 200000
-    output_reserve_tokens: 20000
+    default_headers: {}
 
-  deepseek-reasoner:
-    model_id: deepseek-reasoner
-    base_url: https://api.deepseek.com
-    api_key_env: DEEPSEEK_API_KEY
-    context_window_tokens: 200000
-    output_reserve_tokens: 20000
+models:
+  deepseek-v4-flash:
+    provider: deepseek
+    model_id: deepseek-v4-flash
+    context_window_tokens: 1000000
+    max_output_tokens: 384000
+    capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: true, json_mode: true}
+
+  deepseek-v4-pro:
+    provider: deepseek
+    model_id: deepseek-v4-pro
+    context_window_tokens: 1000000
+    max_output_tokens: 384000
+    capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: true, json_mode: true}
+
+model_presets:
+  coordinator-pro:
+    model: deepseek-v4-pro
+    thinking: {enabled: true, effort: max}
+    generation: {max_output_tokens: 32000}
+    timeouts: {connect_s: 10, first_token_s: 180, stream_idle_s: 90, total_s: 600}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  coordinator-fast:
+    model: deepseek-v4-flash
+    thinking: {enabled: true, effort: high}
+    generation: {max_output_tokens: 24000}
+    timeouts: {connect_s: 10, first_token_s: 120, stream_idle_s: 60, total_s: 360}
+    retry: {max_attempts: 2, base_delay_s: 1, max_delay_s: 8, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  worker-flash:
+    model: deepseek-v4-flash
+    thinking: {enabled: true, effort: high}
+    generation: {max_output_tokens: 24000}
+    timeouts: {connect_s: 10, first_token_s: 120, stream_idle_s: 60, total_s: 360}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  worker-pro:
+    model: deepseek-v4-pro
+    thinking: {enabled: true, effort: high}
+    generation: {max_output_tokens: 32000}
+    timeouts: {connect_s: 10, first_token_s: 180, stream_idle_s: 90, total_s: 600}
+    retry: {max_attempts: 2, base_delay_s: 1, max_delay_s: 8, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  utility-flash:
+    model: deepseek-v4-flash
+    thinking: {enabled: false, effort: none}
+    generation: {max_output_tokens: 12000, temperature: 0.1}
+    timeouts: {connect_s: 10, first_token_s: 90, stream_idle_s: 45, total_s: 240}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+model_routes:
+  coordinator:
+    primary: coordinator-pro
+    fallbacks: [coordinator-fast]
+  worker:
+    primary: worker-flash
+    fallbacks: [worker-pro]
+  utility:
+    primary: utility-flash
+    fallbacks: []
 
 # Local memory stays under one root (.data/memory) and is internally scoped by
 # workspace/user/session. Durable Markdown is injected directly; no vector RAG.
@@ -74,4 +133,4 @@ worker_profiles: {}
 # 可按智能体名称覆盖 Worker 模型。
 # agents:
 #   code-reviewer:
-#     model: deepseek-reasoner
+#     model: worker-pro
