@@ -99,7 +99,7 @@ class GatewayHealth(BaseModel):
     active_turns: int
     subscribers: int
     database: str
-    pending_outbox: int
+    durable_events: int
 
 
 class GatewayNotStartedError(RuntimeError):

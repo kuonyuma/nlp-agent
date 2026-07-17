@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -67,19 +67,13 @@ class GatewayRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_gateway_events_session
                     ON gateway_events(session_id, created_at);
-                CREATE TABLE IF NOT EXISTS gateway_outbox (
-                    event_id TEXT PRIMARY KEY,
-                    created_at TEXT NOT NULL,
-                    delivered_at TEXT,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(event_id) REFERENCES gateway_events(event_id) ON DELETE CASCADE
-                );
                 CREATE TABLE IF NOT EXISTS gateway_user_settings (
                     user_id TEXT PRIMARY KEY,
                     revision INTEGER NOT NULL DEFAULT 0,
                     settings_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+                DROP TABLE IF EXISTS gateway_outbox;
                 """
             )
 
@@ -221,18 +215,7 @@ class GatewayRepository:
                     json.dumps(event.payload, ensure_ascii=False, default=str),
                 ),
             )
-            self._conn.execute(
-                "INSERT INTO gateway_outbox(event_id,created_at) VALUES (?,?)",
-                (event.event_id, event.created_at.isoformat()),
-            )
             return event
-
-    def mark_delivered(self, event_id: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE gateway_outbox SET delivered_at=?,attempts=attempts+1 WHERE event_id=?",
-                (_now(), event_id),
-            )
 
     def events_after(
         self, turn_id: str, *, after_sequence: int = 0, limit: int = 500
@@ -303,14 +286,67 @@ class GatewayRepository:
             )
         return {"revision": revision, "settings": merged, "updated_at": updated_at}
 
-    def pending_outbox(self, limit: int = 1000) -> list[GatewayEvent]:
-        with self._lock:
-            rows = self._conn.execute(
-                """SELECT e.* FROM gateway_outbox o JOIN gateway_events e USING(event_id)
-                   WHERE o.delivered_at IS NULL ORDER BY o.created_at LIMIT ?""",
-                (min(max(1, limit), 5000),),
+    def prune_events(
+        self,
+        *,
+        retention_days: int,
+        max_events_per_session: int,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Compact terminal-turn streams without touching active turn events."""
+        cutoff = (
+            (now or datetime.now(timezone.utc)) - timedelta(days=max(1, retention_days))
+        ).isoformat()
+        terminal_statuses = (
+            TurnStatus.COMPLETED.value,
+            TurnStatus.FAILED.value,
+            TurnStatus.CANCELLED.value,
+            TurnStatus.INTERRUPTED.value,
+        )
+        retained_types = (
+            GatewayEventType.MESSAGE_COMPLETED.value,
+            GatewayEventType.TURN_COMPLETED.value,
+            GatewayEventType.TURN_FAILED.value,
+            GatewayEventType.TURN_CANCELLED.value,
+        )
+        with self._lock, self._conn:
+            compacted = self._conn.execute(
+                """DELETE FROM gateway_events
+                   WHERE created_at < ?
+                     AND event_type NOT IN (?,?,?,?)
+                     AND turn_id IN (
+                       SELECT turn_id FROM gateway_turns WHERE status IN (?,?,?,?)
+                     )""",
+                (cutoff, *retained_types, *terminal_statuses),
+            ).rowcount
+            session_rows = self._conn.execute(
+                "SELECT DISTINCT session_id FROM gateway_events"
             ).fetchall()
-        return [self._event(row) for row in rows]
+            capped = 0
+            for row in session_rows:
+                capped += self._conn.execute(
+                    """DELETE FROM gateway_events WHERE event_id IN (
+                         SELECT e.event_id
+                         FROM gateway_events e
+                         JOIN gateway_turns t ON t.turn_id=e.turn_id
+                         WHERE e.session_id=? AND t.status IN (?,?,?,?)
+                         ORDER BY e.created_at DESC, e.sequence DESC, e.event_id DESC
+                         LIMIT -1 OFFSET ?
+                       )""",
+                    (
+                        row["session_id"],
+                        *terminal_statuses,
+                        max(1, max_events_per_session),
+                    ),
+                ).rowcount
+            remaining = int(
+                self._conn.execute("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
+            )
+        return {
+            "compacted": max(0, compacted),
+            "capped": max(0, capped),
+            "remaining": remaining,
+        }
 
     def recover_interrupted(self) -> list[TurnRecord]:
         with self._lock, self._conn:
@@ -336,10 +372,13 @@ class GatewayRepository:
 
     def health(self) -> dict[str, Any]:
         with self._lock:
-            pending = self._conn.execute(
-                "SELECT COUNT(*) FROM gateway_outbox WHERE delivered_at IS NULL"
-            ).fetchone()[0]
-        return {"database": str(self.path), "pending_outbox": int(pending)}
+            events = self._conn.execute("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
+        return {"database": str(self.path), "durable_events": int(events)}
+
+    def flush(self) -> None:
+        with self._lock:
+            self._conn.commit()
+            self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     def close(self) -> None:
         with self._lock:
