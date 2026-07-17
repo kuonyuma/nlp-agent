@@ -11,6 +11,19 @@ gateway:
   stream_queue_size: 500
   shutdown_grace_s: 30
 
+# FastAPI is a same-origin network adapter. It owns HTTP/WebSocket concerns,
+# while BackendGateway remains the only owner of Agent runtime state.
+web:
+  host: 127.0.0.1
+  port: 8765
+  cookie_name: nlp_session
+  cookie_ttl_s: 86400
+  cookie_secure: false
+  allowed_hosts: [127.0.0.1, localhost, testserver]
+  allowed_origins: [http://127.0.0.1:8765, http://localhost:8765]
+  max_ws_message_bytes: 1048576
+  static_dir: ""
+
 providers:
   deepseek:
     adapter: deepseek

@@ -112,7 +112,13 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] not in {"chat", "--chat", "-c"}:
-        print("Only chat mode is supported.")
+    command = sys.argv[1] if len(sys.argv) > 1 else "chat"
+    if command in {"serve", "web"}:
+        from server.web.__main__ import run
+
+        run()
+    elif command in {"chat", "--chat", "-c"}:
+        asyncio.run(main())
+    else:
+        print("Usage: python main.py [chat|serve]")
         raise SystemExit(2)
-    asyncio.run(main())
