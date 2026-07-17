@@ -123,6 +123,7 @@ class TelemetryRuntime:
         self.flush_interval_s = flush_interval_s
         self._queue: asyncio.Queue[TelemetryEnvelope] | None = None
         self._writer: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self.dropped_events = 0
         self._trace_starts: dict[str, tuple[TraceRecord, float]] = {}
@@ -134,6 +135,22 @@ class TelemetryRuntime:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        if self._loop is not None and self._loop is not loop:
+            # Embedded hosts and test lifespans may replace the event loop. Move
+            # any rows left behind by the old writer synchronously before a new
+            # loop-owned queue is created, otherwise Queue.join() can wait forever.
+            pending: list[TelemetryEnvelope] = []
+            if self._queue is not None:
+                while True:
+                    try:
+                        pending.append(self._queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
+            if pending:
+                self.repository.write_batch(pending)
+            self._queue = None
+            self._writer = None
+        self._loop = loop
         if self._queue is None:
             self._queue = asyncio.Queue(maxsize=self.queue_size)
         if self._writer is None or self._writer.done():
@@ -247,23 +264,34 @@ class TelemetryRuntime:
 
     async def _writer_loop(self) -> None:
         assert self._queue is not None
+        queue = self._queue
         while True:
-            first = await self._queue.get()
-            batch = [first]
-            deadline = asyncio.get_running_loop().time() + self.flush_interval_s
-            while len(batch) < self.batch_size:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                try:
-                    batch.append(await asyncio.wait_for(self._queue.get(), remaining))
-                except asyncio.TimeoutError:
-                    break
-            await asyncio.to_thread(self.repository.write_batch, batch)
-            for _ in batch:
-                self._queue.task_done()
+            batch: list[TelemetryEnvelope] = []
+            try:
+                first = await queue.get()
+                batch.append(first)
+                deadline = asyncio.get_running_loop().time() + self.flush_interval_s
+                while len(batch) < self.batch_size:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        batch.append(await asyncio.wait_for(queue.get(), remaining))
+                    except asyncio.TimeoutError:
+                        break
+                await asyncio.to_thread(self.repository.write_batch, batch)
+            except asyncio.CancelledError:
+                # A host loop can stop without calling close(). Persist the
+                # already-dequeued batch so loop replacement cannot lose it.
+                if batch:
+                    self.repository.write_batch(batch)
+                raise
+            finally:
+                for _ in batch:
+                    queue.task_done()
 
     async def flush(self) -> None:
+        self._ensure_started()
         if self._queue is not None:
             await self._queue.join()
 
@@ -273,6 +301,7 @@ class TelemetryRuntime:
             self._writer.cancel()
             await asyncio.gather(self._writer, return_exceptions=True)
             self._writer = None
+        self._loop = None
         self.repository.close()
 
     def health(self) -> dict[str, Any]:

@@ -39,6 +39,18 @@ Copy-Item .env-example .env
 uv run python main.py chat
 ```
 
+## FastAPI Web backend
+
+```powershell
+uv run python main.py serve
+```
+
+This starts one FastAPI process on `127.0.0.1:8765`. Its lifespan owns exactly
+one `BackendGateway`; HTTP is the control plane and `/ws/v1` is the multiplexed
+realtime plane. See [`docs/web-api.md`](docs/web-api.md) for authentication,
+routes, event contracts, reconnect recovery, and the nanobot WebUI adaptation
+map.
+
 在 `.env` 中至少配置 `DEEPSEEK_API_KEY`。可在
 `configs/agent_config.yaml` 中修改 Coordinator、Worker 模型和按智能体名称的覆盖规则。
 

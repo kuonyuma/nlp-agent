@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import defaultdict
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from gateway.contracts import (
     TurnStatus,
 )
 from gateway.engine import AgentEngine, LangGraphAgentEngine
-from gateway.events import GatewayEventBroker
+from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
 from server.agent.session_service import LocalSessionService, local_session_service
 
@@ -53,6 +54,7 @@ class BackendGateway:
         self.sessions = sessions
         self.events = GatewayEventBroker()
         self._turn_tasks: dict[str, asyncio.Task[None]] = {}
+        self._session_turn_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
         self._accepting = False
@@ -96,6 +98,12 @@ class BackendGateway:
         self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest
     ) -> TurnAccepted:
         self._require_started()
+        async with self._session_turn_locks[request.session_id]:
+            return await self._submit_turn_locked(principal, request)
+
+    async def _submit_turn_locked(
+        self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest
+    ) -> TurnAccepted:
         context = await self.sessions.resolve(principal, request.session_id)
         await self.sessions.touch(principal, request.session_id)
         turn_id = str(uuid.uuid4())
@@ -208,7 +216,7 @@ class BackendGateway:
             turn_id,
             context.session_id,
             GatewayEventType.TURN_COMPLETED,
-            {"status": TurnStatus.COMPLETED.value},
+            {"status": TurnStatus.COMPLETED.value, "content": final_text},
         )
 
     async def inject_message(
@@ -279,6 +287,65 @@ class BackendGateway:
             limit=limit,
         )
 
+    async def list_turns(
+        self,
+        principal: AuthenticatedPrincipal,
+        session_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[TurnRecord]:
+        await self.sessions.resolve(principal, session_id)
+        return await asyncio.to_thread(
+            self.repository.list_turns,
+            session_id,
+            limit=limit,
+        )
+
+    async def subscribe_session_events(
+        self,
+        principal: AuthenticatedPrincipal,
+        session_id: str,
+        *,
+        max_queue: int = 500,
+    ) -> GatewayEventSubscription:
+        self._require_started()
+        await self.sessions.resolve(principal, session_id)
+        return self.events.open_subscription(
+            session_id=session_id,
+            maxsize=max_queue,
+        )
+
+    async def latest_event_sequence(
+        self,
+        principal: AuthenticatedPrincipal,
+        turn_id: str,
+    ) -> int:
+        await self.get_turn(principal, turn_id)
+        return await asyncio.to_thread(
+            self.repository.latest_event_sequence,
+            turn_id,
+        )
+
+    async def get_user_settings(
+        self,
+        principal: AuthenticatedPrincipal,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.repository.get_user_settings,
+            principal.user_id,
+        )
+
+    async def update_user_settings(
+        self,
+        principal: AuthenticatedPrincipal,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.repository.update_user_settings,
+            principal.user_id,
+            changes,
+        )
+
     async def stream_events(
         self,
         principal: AuthenticatedPrincipal,
@@ -345,6 +412,7 @@ class BackendGateway:
         await self.engine.delete_session(context)
         await self.sessions.delete(principal, session_id)
         await asyncio.to_thread(self.repository.delete_session, session_id)
+        self._session_turn_locks.pop(session_id, None)
         from core.observability.runtime import global_telemetry
 
         await global_telemetry.flush()
@@ -429,4 +497,5 @@ class BackendGateway:
             await self.engine.close()
             self.repository.close()
             self._turn_tasks.clear()
+            self._session_turn_locks.clear()
             self._started = False

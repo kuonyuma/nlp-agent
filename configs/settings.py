@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     TAVILY_API_KEY: str = ""
     NLP_AGENT_WORKER_MODEL: str = ""
+    NLP_AGENT_WEB_SECRET: str = ""
 
     _config: dict = {}
 
@@ -76,6 +77,13 @@ class Settings(BaseSettings):
     @property
     def gateway_runtime(self) -> dict:
         return dict(self._config.get("gateway", {}))
+
+    @property
+    def web_runtime(self) -> dict:
+        config = dict(self._config.get("web", {}))
+        if self.NLP_AGENT_WEB_SECRET:
+            config["auth_secret"] = self.NLP_AGENT_WEB_SECRET
+        return config
 
     def _resolve_worker_model(
         self,

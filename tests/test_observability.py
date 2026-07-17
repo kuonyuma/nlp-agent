@@ -92,3 +92,16 @@ async def test_observability_queries_are_scoped_to_principal(tmp_path):
     with pytest.raises(AccessDeniedError):
         await service.trace(bob, context.trace_id)
     await runtime.close()
+
+
+def test_runtime_moves_pending_events_to_a_replacement_event_loop(tmp_path):
+    runtime = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=60)
+
+    async def emit_without_flush():
+        runtime.event("loop.one")
+
+    asyncio.run(emit_without_flush())
+    asyncio.run(runtime.flush())
+
+    assert runtime.repository.health()["events"] == 1
+    asyncio.run(runtime.close())

@@ -15,6 +15,35 @@ class _Subscription:
     session_id: str | None
 
 
+class GatewayEventSubscription:
+    """An authenticated live subscription whose ownership stays in the Gateway."""
+
+    def __init__(
+        self,
+        broker: "GatewayEventBroker",
+        subscription_id: int,
+        queue: asyncio.Queue[GatewayEvent],
+    ) -> None:
+        self._broker = broker
+        self._subscription_id = subscription_id
+        self._queue = queue
+        self._closed = False
+
+    def __aiter__(self) -> "GatewayEventSubscription":
+        return self
+
+    async def __anext__(self) -> GatewayEvent:
+        if self._closed:
+            raise StopAsyncIteration
+        return await self._queue.get()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._broker.unsubscribe(self._subscription_id)
+
+
 class GatewayEventBroker:
     def __init__(self) -> None:
         self._subscriptions: dict[int, _Subscription] = {}
@@ -38,6 +67,20 @@ class GatewayEventBroker:
     def unsubscribe(self, subscription_id: int) -> None:
         self._subscriptions.pop(subscription_id, None)
 
+    def open_subscription(
+        self,
+        *,
+        turn_id: str | None = None,
+        session_id: str | None = None,
+        maxsize: int = 500,
+    ) -> GatewayEventSubscription:
+        subscription_id, queue = self.subscribe(
+            turn_id=turn_id,
+            session_id=session_id,
+            maxsize=maxsize,
+        )
+        return GatewayEventSubscription(self, subscription_id, queue)
+
     def publish(self, event: GatewayEvent) -> int:
         dropped = 0
         for subscription in tuple(self._subscriptions.values()):
@@ -48,6 +91,13 @@ class GatewayEventBroker:
             try:
                 subscription.queue.put_nowait(event)
             except asyncio.QueueFull:
+                # Keep the newest event (especially terminal state). Consumers
+                # detect the sequence gap and recover the dropped rows from SQLite.
+                try:
+                    subscription.queue.get_nowait()
+                    subscription.queue.put_nowait(event)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
                 dropped += 1
         return dropped
 
