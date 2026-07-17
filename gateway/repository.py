@@ -74,6 +74,12 @@ class GatewayRepository:
                     attempts INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(event_id) REFERENCES gateway_events(event_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS gateway_user_settings (
+                    user_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    settings_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -238,6 +244,64 @@ class GatewayRepository:
                 (turn_id, max(0, after_sequence), min(max(1, limit), 2000)),
             ).fetchall()
         return [self._event(row) for row in rows]
+
+    def list_turns(self, session_id: str, *, limit: int = 100) -> list[TurnRecord]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM gateway_turns WHERE session_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (session_id, min(max(1, limit), 500)),
+            ).fetchall()
+        return [self._turn(row) for row in rows]
+
+    def latest_event_sequence(self, turn_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM gateway_events WHERE turn_id=?",
+                (turn_id,),
+            ).fetchone()
+        return int(row[0])
+
+    def get_user_settings(self, user_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT revision,settings_json,updated_at FROM gateway_user_settings "
+                "WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return {"revision": 0, "settings": {}, "updated_at": None}
+        return {
+            "revision": int(row["revision"]),
+            "settings": json.loads(row["settings_json"] or "{}"),
+            "updated_at": row["updated_at"],
+        }
+
+    def update_user_settings(
+        self,
+        user_id: str,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._lock, self._conn:
+            current = self.get_user_settings(user_id)
+            merged = {**current["settings"], **changes}
+            revision = int(current["revision"]) + 1
+            updated_at = _now()
+            self._conn.execute(
+                """INSERT INTO gateway_user_settings(user_id,revision,settings_json,updated_at)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     revision=excluded.revision,
+                     settings_json=excluded.settings_json,
+                     updated_at=excluded.updated_at""",
+                (
+                    user_id,
+                    revision,
+                    json.dumps(merged, ensure_ascii=False, separators=(",", ":")),
+                    updated_at,
+                ),
+            )
+        return {"revision": revision, "settings": merged, "updated_at": updated_at}
 
     def pending_outbox(self, limit: int = 1000) -> list[GatewayEvent]:
         with self._lock:

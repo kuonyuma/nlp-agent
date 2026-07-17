@@ -166,3 +166,33 @@ async def test_gateway_denies_cross_user_turn_access(tmp_path, principal):
     with pytest.raises(AccessDeniedError):
         await gateway.get_turn(bob, accepted.turn_id)
     await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_serializes_concurrent_turn_submission_per_session(tmp_path, principal):
+    engine = FakeEngine()
+    engine.block = asyncio.Event()
+    sessions = FakeSessions()
+    gateway = BackendGateway(
+        engine=engine,
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=sessions,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    results = await asyncio.gather(
+        gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(session_id=session.session_id, content="first"),
+        ),
+        gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(session_id=session.session_id, content="second"),
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    assert sum(isinstance(result, TurnConflictError) for result in results) == 1
+    await gateway.close()
