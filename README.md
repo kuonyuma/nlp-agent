@@ -11,6 +11,16 @@
 - Context Trim、Snip、Micro-Compact、Context Collapse、Auto-Compact
 - Markdown Skill 加载和最小权限工具分配
 - 文件读取、时间和网页搜索通用工具
+- 单实例 Backend Gateway Core，统一管理 Agent、Turn、Worker 和关闭生命周期
+- SQLite Turn/Event/Outbox、幂等提交、断线事件重放与流式订阅
+- Session/Memory/Trace/Worker 控制的认证主体与所有权隔离
+
+## Backend Gateway
+
+CLI 已经通过 `BackendGateway` 进入 Agent，未来 FastAPI 也应只适配该入口，
+不要在 Web 进程中另外构建 LangGraph 或 Worker Runtime。当前本地运行时要求
+单 Gateway 进程；详细生命周期、流式恢复和安全边界见
+[`docs/backend-gateway.md`](docs/backend-gateway.md)。
 
 已经移除：
 
@@ -39,4 +49,3 @@ uv run python -m compileall .
 uv run pytest
 uv run python main.py chat
 ```
-

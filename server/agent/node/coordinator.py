@@ -2,10 +2,18 @@
 
 from contextlib import asynccontextmanager
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from core.session_context import SessionContext
+from core.agent_runtime import (
+    AgentRunSnapshot,
+    configured_budget,
+    exhaustion_fallback,
+    exhaustion_prompt,
+    global_agent_injections,
+    usage_total,
+)
 from core.observability.context import TelemetryContext, current_telemetry_context
 from core.observability.models import SpanKind
 from core.observability.runtime import global_telemetry
@@ -114,6 +122,20 @@ def _get_llm_with_tools(config: RunnableConfig):
 async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
     system_message = _get_system_message()
     session = SessionContext.from_config(config, require=True)
+    runtime_budget = configured_budget("coordinator")
+    turn_id = str(config.get("configurable", {}).get("turn_id", ""))
+    if state.get("runtime_turn_id") != turn_id or not state.get("runtime_started_at"):
+        runtime = AgentRunSnapshot(turn_id=turn_id)
+    else:
+        runtime = AgentRunSnapshot(
+            turn_id=turn_id,
+            started_at=float(state.get("runtime_started_at", 0) or 0),
+            iterations=int(state.get("runtime_iterations", 0)),
+            tokens=int(state.get("runtime_tokens", 0)),
+            tool_calls=int(state.get("runtime_tool_calls", 0)),
+            injections=int(state.get("runtime_injections", 0)),
+            stop_reason=state.get("runtime_stop_reason"),
+        )
     async with _observed_span(SpanKind.MEMORY, "memory.inject", config) as memory_span:
         memory_message = global_memory_runtime.context_message(session)
         if memory_span is not None:
@@ -123,10 +145,28 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         messages.append(memory_message)
     messages.extend(state.get("messages", []))
 
+    remaining_injections = max(0, runtime_budget.max_injections - runtime.injections)
+    injected = await global_agent_injections.drain(
+        session.session_id,
+        limit=runtime_budget.injection_batch_size,
+        remaining_total=remaining_injections,
+    )
+    if injected:
+        messages.extend(injected)
+        runtime.injections += len(injected)
+        global_telemetry.event(
+            "agent.message.injected",
+            payload={
+                "role": "coordinator",
+                "count": len(injected),
+                "total": runtime.injections,
+            },
+        )
+
     from server.agent.compression.context_manager import global_context_manager
     from utils.tokens import build_context_budget
 
-    state_modifiers = []
+    state_modifiers = list(injected)
     toolset = get_coordinator_toolset(config)
     active_model = _get_llm_with_tools(config)
     context_window = active_model.context_window_tokens
@@ -156,6 +196,133 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
             if message not in messages:
                 state_modifiers.append(message)
     messages = transform.messages
+    stop_reason = runtime.limit_reached(runtime_budget)
+    if stop_reason is not None:
+        runtime.stop_reason = stop_reason
+        runtime.finalizing = True
+        global_telemetry.event(
+            "agent.run.finalizing",
+            payload={"role": "coordinator", "reason": stop_reason.value},
+        )
+        try:
+            response = await get_planner_llm().ainvoke(
+                [*messages, SystemMessage(content=exhaustion_prompt(stop_reason))],
+                config=config,
+            )
+            runtime.tokens += usage_total(response)
+            if not str(getattr(response, "content", "") or "").strip():
+                response = AIMessage(content=exhaustion_fallback(stop_reason))
+        except Exception as error:
+            logger.warning(
+                "Coordinator finalization failed",
+                reason=stop_reason.value,
+                error=str(error),
+            )
+            response = AIMessage(content=exhaustion_fallback(stop_reason))
+        return {
+            "messages": [*state_modifiers, response],
+            "runtime_turn_id": turn_id,
+            "runtime_started_at": runtime.started_at,
+            "runtime_iterations": runtime.iterations,
+            "runtime_tokens": runtime.tokens,
+            "runtime_tool_calls": runtime.tool_calls,
+            "runtime_injections": runtime.injections,
+            "runtime_continue": False,
+            "runtime_stop_reason": stop_reason.value,
+        }
 
-    response = await active_model.ainvoke(messages, config=config)
-    return {"messages": [*state_modifiers, response]}
+    runtime.iterations += 1
+    global_telemetry.event(
+        "agent.iteration.started",
+        payload={"role": "coordinator", "iteration": runtime.iterations},
+    )
+    try:
+        response = await active_model.ainvoke(messages, config=config)
+    except Exception as error:
+        logger.exception("Coordinator model runtime exhausted", error=str(error))
+        global_telemetry.event(
+            "agent.run.completed",
+            level="error",
+            payload={
+                "role": "coordinator",
+                "stop_reason": "model_error",
+                "iterations": runtime.iterations,
+            },
+        )
+        response = AIMessage(content=(
+            "模型请求在超时重试和故障转移后仍未恢复，本轮已安全停止。"
+            "会话状态与已经完成的工具结果均已保留，可以继续重试。"
+        ))
+        return {
+            "messages": [*state_modifiers, response],
+            "runtime_turn_id": turn_id,
+            "runtime_started_at": runtime.started_at,
+            "runtime_iterations": runtime.iterations,
+            "runtime_tokens": runtime.tokens,
+            "runtime_tool_calls": runtime.tool_calls,
+            "runtime_injections": runtime.injections,
+            "runtime_continue": False,
+            "runtime_stop_reason": "model_error",
+        }
+    runtime.tokens += usage_total(response)
+
+    result_messages = [*state_modifiers, response]
+    should_continue = False
+    if not getattr(response, "tool_calls", None):
+        content = str(getattr(response, "content", "") or "").strip()
+        finish_reason = str(
+            getattr(response, "response_metadata", {}).get("finish_reason", "")
+        ).lower()
+        if not content:
+            result_messages.append(SystemMessage(content=(
+                "[RUNTIME_RETRY] The previous response was empty. "
+                "Return a non-empty final answer or make the necessary tool call."
+            )))
+            should_continue = True
+            global_telemetry.event(
+                "agent.response.recovering",
+                level="warning",
+                payload={"role": "coordinator", "reason": "empty_response"},
+            )
+        elif finish_reason in {"length", "max_tokens"}:
+            result_messages.append(SystemMessage(content=(
+                "[RUNTIME_CONTINUE] Continue exactly where the truncated response ended. "
+                "Do not repeat completed content."
+            )))
+            should_continue = True
+            global_telemetry.event(
+                "agent.response.recovering",
+                payload={"role": "coordinator", "reason": "length"},
+            )
+        else:
+            remaining_injections = max(0, runtime_budget.max_injections - runtime.injections)
+            follow_ups = await global_agent_injections.drain(
+                session.session_id,
+                limit=runtime_budget.injection_batch_size,
+                remaining_total=remaining_injections,
+            )
+            if follow_ups:
+                result_messages.extend(follow_ups)
+                runtime.injections += len(follow_ups)
+                should_continue = True
+                global_telemetry.event(
+                    "agent.message.injected",
+                    payload={
+                        "role": "coordinator",
+                        "count": len(follow_ups),
+                        "total": runtime.injections,
+                        "phase": "after_final_response",
+                    },
+                )
+
+    return {
+        "messages": result_messages,
+        "runtime_turn_id": turn_id,
+        "runtime_started_at": runtime.started_at,
+        "runtime_iterations": runtime.iterations,
+        "runtime_tokens": runtime.tokens,
+        "runtime_tool_calls": runtime.tool_calls,
+        "runtime_injections": runtime.injections,
+        "runtime_continue": should_continue,
+        "runtime_stop_reason": None,
+    }

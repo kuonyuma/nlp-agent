@@ -79,6 +79,7 @@ class WorkerEventBus:
         self._queues: dict[str, asyncio.Queue[WorkerCompletedEvent]] = defaultdict(
             lambda: asyncio.Queue(maxsize=self._max_events_per_session)
         )
+        self._overflow: dict[str, deque[WorkerCompletedEvent]] = defaultdict(deque)
         self._subscribers: dict[str, tuple[str | None, SessionNotifier]] = {}
         self._seen_ids: dict[str, set[str]] = defaultdict(set)
         self._seen_order: dict[str, deque[str]] = defaultdict(deque)
@@ -102,7 +103,9 @@ class WorkerEventBus:
             await asyncio.wait_for(queue.put(event), timeout=self._publish_timeout_s)
         except asyncio.TimeoutError:
             self.metrics.publish_timeouts += 1
-            raise RuntimeError(f"Worker event queue is full for session {event.session_id}")
+            # Never drop a terminal Worker result. The overflow remains ordered
+            # behind the already queued events and is drained by the same session consumer.
+            self._overflow[event.session_id].append(event)
         self._remember(event.session_id, event.event_id)
         self.metrics.published += 1
         self.metrics.queue_depth_peak = max(self.metrics.queue_depth_peak, queue.qsize())
@@ -112,6 +115,7 @@ class WorkerEventBus:
     async def get(self, session_id: str, timeout_s: float | None = None) -> WorkerCompletedEvent:
         queue = self._queues[session_id]
         event = await queue.get() if timeout_s is None else await asyncio.wait_for(queue.get(), timeout_s)
+        self._refill(session_id)
         self.metrics.consumed += 1
         return event
 
@@ -123,11 +127,14 @@ class WorkerEventBus:
                 events.append(queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
+        overflow = self._overflow[session_id]
+        while len(events) < limit and overflow:
+            events.append(overflow.popleft())
         self.metrics.consumed += len(events)
         return events
 
     def has_pending(self, session_id: str) -> bool:
-        return not self._queues[session_id].empty()
+        return not self._queues[session_id].empty() or bool(self._overflow[session_id])
 
     def metrics_snapshot(self) -> dict[str, int]:
         return {
@@ -145,6 +152,12 @@ class WorkerEventBus:
         order.append(event_id)
         while len(order) > self._dedupe_window:
             seen.discard(order.popleft())
+
+    def _refill(self, session_id: str) -> None:
+        queue = self._queues[session_id]
+        overflow = self._overflow[session_id]
+        while overflow and not queue.full():
+            queue.put_nowait(overflow.popleft())
 
     def _notify_subscribers(self, session_id: str) -> None:
         for subscribed_session, notifier in list(self._subscribers.values()):

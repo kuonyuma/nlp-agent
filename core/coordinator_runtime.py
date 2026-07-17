@@ -17,6 +17,7 @@ from core.observability.runtime import global_telemetry
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
 from core.worker_protocol import WorkerWaitPlan
+from core.agent_runtime import global_agent_injections
 
 
 InvokeCoordinator = Callable[
@@ -45,6 +46,28 @@ class CoordinatorRuntime:
     def _session(self, session_id: str) -> SessionRuntime:
         return self._sessions.setdefault(session_id, SessionRuntime())
 
+    def active_turn_id(self, session_id: str) -> str | None:
+        runtime = self._sessions.get(session_id)
+        if runtime is None or not runtime.foreground_active:
+            return None
+        return runtime.active_turn_id or None
+
+    async def inject_user_message(
+        self, context: SessionContext, message: BaseMessage
+    ) -> str | None:
+        runtime = self._sessions.get(context.session_id)
+        if runtime is None or not runtime.foreground_active:
+            return None
+        if runtime.context is not None and runtime.context != context:
+            return None
+        await global_agent_injections.publish(context.session_id, message)
+        global_telemetry.event(
+            "agent.message.queued",
+            payload={"role": "coordinator", "session_id": context.session_id},
+            context=runtime.telemetry_context,
+        )
+        return runtime.active_turn_id
+
     async def submit_user_turn(
         self,
         context: SessionContext | str,
@@ -55,6 +78,14 @@ class CoordinatorRuntime:
         )
         session_id = context.session_id
         runtime = self._session(session_id)
+        if runtime.foreground_active:
+            await global_agent_injections.publish(session_id, message)
+            global_telemetry.event(
+                "agent.message.queued",
+                payload={"role": "coordinator", "session_id": session_id},
+                context=runtime.telemetry_context,
+            )
+            return
         async with runtime.lock:
             runtime.context = context
             runtime.foreground_active = True
@@ -68,12 +99,26 @@ class CoordinatorRuntime:
             )
             runtime.telemetry_context = telemetry
             global_telemetry.start_trace(telemetry, source="user")
+            global_telemetry.event(
+                "agent.run.started",
+                payload={"role": "coordinator", "background": False},
+                context=telemetry,
+            )
             try:
                 with bind_telemetry_context(telemetry):
                     async with global_telemetry.span(
                         SpanKind.COORDINATOR, "coordinator.turn", context=telemetry
                     ):
                         await self._invoke([message], context, False, runtime.active_turn_id)
+                        # Close the small race between the graph's final safe-point
+                        # drain and releasing the session lock.
+                        injection_cycles = 0
+                        while global_agent_injections.pending(session_id) and injection_cycles < 5:
+                            pending_before = global_agent_injections.pending(session_id)
+                            await self._invoke([], context, False, runtime.active_turn_id)
+                            injection_cycles += 1
+                            if global_agent_injections.pending(session_id) >= pending_before:
+                                break
                         await self._process_wait_plans(
                             session_id, runtime.active_turn_id, background=False
                         )
@@ -82,6 +127,11 @@ class CoordinatorRuntime:
                 global_telemetry.complete_trace(telemetry, status=status, error=error)
                 raise
             else:
+                global_telemetry.event(
+                    "agent.run.completed",
+                    payload={"role": "coordinator", "status": "completed"},
+                    context=telemetry,
+                )
                 global_telemetry.complete_trace(telemetry)
             finally:
                 runtime.foreground_active = False
@@ -276,6 +326,7 @@ class CoordinatorRuntime:
 
         for session_id in tuple(self._sessions):
             global_tool_authorizations.revoke_session(session_id)
+            await global_agent_injections.clear(session_id)
 
     async def release_session(self, session_id: str) -> None:
         """Release one WebUI session runtime without affecting other sessions."""
@@ -284,6 +335,7 @@ class CoordinatorRuntime:
         from core.tool_safety import global_tool_authorizations
 
         global_tool_authorizations.revoke_session(session_id)
+        await global_agent_injections.clear(session_id)
         if runtime and runtime.resume_task and not runtime.resume_task.done():
             runtime.resume_task.cancel()
             await asyncio.gather(runtime.resume_task, return_exceptions=True)

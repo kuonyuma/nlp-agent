@@ -9,6 +9,7 @@ import os
 import re
 import time
 import uuid
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,30 @@ class LocalContextStateRepository:
         except OSError:
             pass
         return True
+
+    def delete_session(self, context: SessionContext) -> int:
+        """Delete Coordinator and Worker context state for one owned session."""
+        removed = 0
+        for directory in self.root.iterdir():
+            if not directory.is_dir():
+                continue
+            try:
+                encoded = directory.name + "=" * (-len(directory.name) % 4)
+                parts = base64.urlsafe_b64decode(encoded).decode().split("\0")
+            except Exception:
+                continue
+            if len(parts) != 5:
+                continue
+            workspace_id, user_id, _channel, session_id, _agent_id = parts
+            if (
+                workspace_id == context.workspace_id
+                and user_id == context.user_id
+                and session_id == context.session_id
+            ):
+                shutil.rmtree(directory, ignore_errors=True)
+                self._locks.pop(directory.name, None)
+                removed += 1
+        return removed
 
 
 local_context_repository = LocalContextStateRepository()

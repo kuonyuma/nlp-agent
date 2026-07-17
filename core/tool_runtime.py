@@ -208,19 +208,26 @@ class ToolExecutionResult(BaseModel):
             raise ValueError("failed result must contain an error")
         return self
 
-    def to_model_content(self) -> str:
+    def to_model_content(self, *, max_chars: int | None = None) -> str:
         if self.ok:
             if isinstance(self.output, str):
-                return self.output
-            return json.dumps(self.output, ensure_ascii=False, default=str)
-        return json.dumps(
-            {
-                "ok": False,
-                "tool": self.tool_name,
-                "error": self.error.model_dump() if self.error else None,
-            },
-            ensure_ascii=False,
-        )
+                content = self.output
+            else:
+                content = json.dumps(self.output, ensure_ascii=False, default=str)
+        else:
+            content = json.dumps(
+                {
+                    "ok": False,
+                    "tool": self.tool_name,
+                    "error": self.error.model_dump() if self.error else None,
+                },
+                ensure_ascii=False,
+            )
+        if max_chars is None:
+            return content
+        from core.agent_runtime import compact_model_content
+
+        return compact_model_content(content, max_chars)
 
 
 class ToolCatalog:

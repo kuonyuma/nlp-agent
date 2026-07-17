@@ -96,6 +96,18 @@ async def validate_mcp_url(url: str, *, allow_private_network: bool = False) -> 
         )
 
 
+def _redirect_guard(allow_private_network: bool):
+    async def guard(response: httpx.Response) -> None:
+        location = response.headers.get("location")
+        if response.is_redirect and location:
+            target = response.url.join(location)
+            await validate_mcp_url(
+                str(target), allow_private_network=allow_private_network
+            )
+
+    return guard
+
+
 @dataclass
 class _Connection:
     config: MCPServerConfig
@@ -176,6 +188,9 @@ class MCPRuntime:
                     follow_redirects=True,
                     timeout=kwargs.get("timeout"),
                     auth=kwargs.get("auth"),
+                    event_hooks={
+                        "response": [_redirect_guard(config.allow_private_network)]
+                    },
                 )
 
             read, write = await stack.enter_async_context(
@@ -183,7 +198,13 @@ class MCPRuntime:
             )
         else:
             client = await stack.enter_async_context(
-                httpx.AsyncClient(headers=config.headers or None, follow_redirects=True)
+                httpx.AsyncClient(
+                    headers=config.headers or None,
+                    follow_redirects=True,
+                    event_hooks={
+                        "response": [_redirect_guard(config.allow_private_network)]
+                    },
+                )
             )
             read, write, _ = await stack.enter_async_context(
                 streamable_http_client(config.url, http_client=client)

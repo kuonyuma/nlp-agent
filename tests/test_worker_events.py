@@ -45,6 +45,6 @@ async def test_event_bus_deduplicates_and_notifies_multiple_subscribers():
 async def test_event_bus_applies_bounded_queue_backpressure():
     bus = WorkerEventBus(max_events_per_session=1, publish_timeout_s=0.01)
     await bus.publish(make_event("first"))
-    with pytest.raises(RuntimeError, match="queue is full"):
-        await bus.publish(make_event("second"))
+    assert await bus.publish(make_event("second")) is True
     assert bus.metrics_snapshot()["publish_timeouts"] == 1
+    assert [event.event_id for event in bus.drain("session-a")] == ["first", "second"]

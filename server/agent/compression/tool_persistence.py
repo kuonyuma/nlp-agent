@@ -11,11 +11,21 @@ DEFAULT_MAX_RESULT_SIZE_CHARS = 50_000
 logger = get_logger("shiliu.tool_persistence")
 
 
-def persist_tool_messages(messages: list[Any], config: Dict[str, Any]) -> list[Any]:
+def persist_tool_messages(
+    messages: list[Any],
+    config: Dict[str, Any],
+    *,
+    max_result_chars: int | None = None,
+) -> list[Any]:
     """Persist oversized ToolMessages and return the context-safe replacements."""
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
     history_dir = os.path.join(".data", "chat_history", session_id, "tool-results")
     os.makedirs(history_dir, exist_ok=True)
+    configured_limit = config.get("configurable", {}).get("max_tool_result_chars")
+    if max_result_chars is None:
+        max_result_chars = (
+            int(configured_limit) if configured_limit else DEFAULT_MAX_RESULT_SIZE_CHARS
+        )
     processed_messages = []
     for msg in messages:
         if not isinstance(msg, ToolMessage):
@@ -34,7 +44,7 @@ def persist_tool_messages(messages: list[Any], config: Dict[str, Any]) -> list[A
             return str(content)
 
         content_str = extract_text(msg.content)
-        if len(content_str) <= DEFAULT_MAX_RESULT_SIZE_CHARS:
+        if len(content_str) <= max_result_chars:
             processed_messages.append(msg)
             continue
         file_path = os.path.join(history_dir, f"{msg.tool_call_id}.txt")

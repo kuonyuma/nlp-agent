@@ -1,0 +1,214 @@
+"""Single-owner LangGraph engine hosted by the Backend Gateway process."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import Protocol
+
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+
+from core.coordinator_runtime import CoordinatorRuntime
+from core.session_context import SessionContext
+from core.task_manager import global_task_manager
+from core.worker_events import global_worker_event_bus
+from gateway.contracts import GatewayEventType
+
+
+EngineEventSink = Callable[
+    [str, str, GatewayEventType, dict], Awaitable[None]
+]
+
+
+class AgentEngine(Protocol):
+    async def start(self, event_sink: EngineEventSink) -> None: ...
+    async def run_turn(self, context: SessionContext, turn_id: str, content: str) -> str: ...
+    async def inject(self, context: SessionContext, content: str) -> str | None: ...
+    async def cancel_turn(self, context: SessionContext, turn_id: str) -> None: ...
+    async def delete_session(self, context: SessionContext) -> None: ...
+    async def close(self) -> None: ...
+
+
+class LangGraphAgentEngine:
+    """Own exactly one graph/checkpointer/runtime instance for the process."""
+
+    def __init__(self) -> None:
+        self._app = None
+        self._connection = None
+        self._runtime: CoordinatorRuntime | None = None
+        self._event_sink: EngineEventSink | None = None
+        self._started = False
+
+    async def start(self, event_sink: EngineEventSink) -> None:
+        if self._started:
+            return
+        from server.agent.grapy import build_agent
+        from server.agent.node.coordinator import init_snip_tool
+
+        self._event_sink = event_sink
+        self._app, self._connection = await build_agent()
+        init_snip_tool(self._app)
+        self._runtime = CoordinatorRuntime(global_worker_event_bus, self._invoke)
+        self._started = True
+
+    async def _emit(
+        self,
+        turn_id: str,
+        session_id: str,
+        event_type: GatewayEventType,
+        payload: dict | None = None,
+    ) -> None:
+        if self._event_sink is not None:
+            await self._event_sink(turn_id, session_id, event_type, payload or {})
+
+    async def _invoke(
+        self,
+        messages,
+        context: SessionContext,
+        background: bool,
+        turn_id: str,
+    ) -> None:
+        if self._app is None:
+            raise RuntimeError("Agent engine is not started")
+        config = {
+            "recursion_limit": 64,
+            "configurable": {
+                "thread_id": context.session_id,
+                "turn_id": turn_id,
+                "user_id": context.user_id,
+                "workspace_id": context.workspace_id,
+                "channel": context.channel,
+            },
+        }
+        if background:
+            await self._emit(
+                turn_id,
+                context.session_id,
+                GatewayEventType.WORKER_UPDATE,
+                {"phase": "coordinator_resume"},
+            )
+        active_tool_node = False
+        async for event in self._app.astream_events(
+            {"messages": messages}, config=config, version="v2"
+        ):
+            metadata = event.get("metadata", {})
+            node = metadata.get("langgraph_node")
+            event_name = event.get("event")
+            if event_name == "on_chat_model_stream" and node == "coordinator":
+                chunk = event.get("data", {}).get("chunk")
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                if chunk.content:
+                    await self._emit(
+                        turn_id,
+                        context.session_id,
+                        GatewayEventType.MESSAGE_DELTA,
+                        {"delta": chunk.content, "background": background},
+                    )
+                reasoning = chunk.additional_kwargs.get("reasoning_content")
+                if reasoning:
+                    await self._emit(
+                        turn_id,
+                        context.session_id,
+                        GatewayEventType.MESSAGE_DELTA,
+                        {"delta": reasoning, "channel": "reasoning", "background": background},
+                    )
+            elif event_name == "on_chain_start" and node == "tools" and not active_tool_node:
+                active_tool_node = True
+                await self._emit(
+                    turn_id,
+                    context.session_id,
+                    GatewayEventType.TOOL_STARTED,
+                    {"node": "tools"},
+                )
+            elif event_name == "on_chain_end" and node == "tools" and active_tool_node:
+                active_tool_node = False
+                await self._emit(
+                    turn_id,
+                    context.session_id,
+                    GatewayEventType.TOOL_COMPLETED,
+                    {"node": "tools"},
+                )
+        await self._apply_pending_snips(context.session_id)
+
+    async def run_turn(self, context: SessionContext, turn_id: str, content: str) -> str:
+        if self._runtime is None or self._app is None:
+            raise RuntimeError("Agent engine is not started")
+        message = HumanMessage(content=content, id=turn_id)
+        await self._runtime.submit_user_turn(context, message)
+        config = {"configurable": {"thread_id": context.session_id}}
+        state = await self._app.aget_state(config)
+        state_messages = state.values.get("messages", [])
+        from server.agent.session_storage import record_transcript
+
+        await record_transcript(context.session_id, state_messages)
+        for item in reversed(state_messages):
+            if isinstance(item, AIMessage) and item.content:
+                return str(item.content)
+        return ""
+
+    async def inject(self, context: SessionContext, content: str) -> str | None:
+        if self._runtime is None:
+            raise RuntimeError("Agent engine is not started")
+        return await self._runtime.inject_user_message(
+            context,
+            HumanMessage(content=content, id=str(uuid.uuid4())),
+        )
+
+    async def cancel_turn(self, context: SessionContext, turn_id: str) -> None:
+        global_task_manager.cancel_turn(context.session_id, turn_id, reason="gateway_cancelled")
+
+    async def delete_session(self, context: SessionContext) -> None:
+        if self._runtime is not None:
+            await self._runtime.release_session(context.session_id)
+        if self._app is not None:
+            checkpointer = getattr(self._app, "checkpointer", None)
+            if checkpointer is not None and hasattr(checkpointer, "adelete_thread"):
+                await checkpointer.adelete_thread(context.session_id)
+
+    async def _apply_pending_snips(self, session_id: str) -> None:
+        if self._app is None:
+            return
+        from server.agent.compression.snip_compact import snip_by_id_range
+
+        config = {"configurable": {"thread_id": session_id}}
+        state = await self._app.aget_state(config)
+        messages = state.values.get("messages", [])
+        for message in reversed(messages):
+            if not getattr(message, "tool_calls", None):
+                continue
+            if message.additional_kwargs.get("_snip_applied"):
+                continue
+            for tool_call in message.tool_calls:
+                if tool_call.get("name") != "SnipTool":
+                    continue
+                args = tool_call.get("args", {})
+                if args.get("to_id"):
+                    result = snip_by_id_range(
+                        messages, to_id=args["to_id"], from_id=args.get("from_id")
+                    )
+                    if result.tokens_freed:
+                        await self._app.aupdate_state(config, {"messages": result.messages})
+                message.additional_kwargs["_snip_applied"] = True
+                return
+
+    async def close(self) -> None:
+        if not self._started:
+            return
+        if self._runtime is not None:
+            await self._runtime.close()
+        from core.observability.runtime import global_telemetry
+        from core.tool_registry import physical_tool_manager
+        from server.agent.session_storage import global_session_storage
+        from server.memory.runtime import global_memory_runtime
+
+        await global_session_storage.close()
+        await global_memory_runtime.close()
+        await physical_tool_manager.close()
+        await global_telemetry.close()
+        if self._connection is not None:
+            await self._connection.close()
+        self._runtime = None
+        self._app = None
+        self._connection = None
+        self._started = False
