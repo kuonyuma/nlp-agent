@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     def get_agent_runtime(self, role: str) -> dict:
         return dict(self._config.get("agent_runtime", {}).get(role, {}))
 
+    @property
+    def gateway_runtime(self) -> dict:
+        return dict(self._config.get("gateway", {}))
+
     def _resolve_worker_model(
         self,
         agent_name: str | None = None,

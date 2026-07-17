@@ -1,13 +1,8 @@
-"""Runtime construction helpers for embedded hosts.
+"""Composition boundary for embedding the single-owner Backend Gateway."""
 
-Hosts must submit both user turns and Worker completion events through
-``CoordinatorRuntime``.  This module intentionally does not run a second
-queue consumer or call ``app.ainvoke`` directly.
-"""
-
-from core.coordinator_runtime import CoordinatorRuntime, InvokeCoordinator
-from core.worker_events import global_worker_event_bus
+from gateway.core import BackendGateway
 
 
-def create_coordinator_runtime(invoke: InvokeCoordinator) -> CoordinatorRuntime:
-    return CoordinatorRuntime(global_worker_event_bus, invoke)
+def create_backend_gateway() -> BackendGateway:
+    """Create an unstarted Gateway; the host must call start/close in its lifespan."""
+    return BackendGateway()

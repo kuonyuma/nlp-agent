@@ -287,6 +287,16 @@ class TaskManager:
         }
         return self.cancel_workers(worker_ids, reason)
 
+    def cancel_turn(
+        self, session_id: str, parent_turn_id: str, reason: str = "turn_cancelled"
+    ) -> list[str]:
+        worker_ids = {
+            task.task_id
+            for task in self.active_tasks.values()
+            if task.session_id == session_id and task.parent_turn_id == parent_turn_id
+        }
+        return self.cancel_workers(worker_ids, reason)
+
     def build_wait_plan(self, session_id: str, parent_turn_id: str) -> WorkerWaitPlan | None:
         tasks = [
             task

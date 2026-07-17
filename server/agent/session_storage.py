@@ -219,6 +219,14 @@ class SessionStorageManager:
         finally:
             self._is_draining = False
 
+    async def close(self) -> None:
+        """Flush pending transcript rows and stop the background writer."""
+        await self.flush()
+        if self._drain_task is not None and not self._drain_task.done():
+            self._drain_task.cancel()
+            await asyncio.gather(self._drain_task, return_exceptions=True)
+        self._drain_task = None
+
     def _append_to_file(self, file_path: str, content: str):
         with self._file_lock:
             with open(file_path, "a", encoding="utf-8") as f:

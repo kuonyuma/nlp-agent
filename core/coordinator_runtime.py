@@ -46,6 +46,28 @@ class CoordinatorRuntime:
     def _session(self, session_id: str) -> SessionRuntime:
         return self._sessions.setdefault(session_id, SessionRuntime())
 
+    def active_turn_id(self, session_id: str) -> str | None:
+        runtime = self._sessions.get(session_id)
+        if runtime is None or not runtime.foreground_active:
+            return None
+        return runtime.active_turn_id or None
+
+    async def inject_user_message(
+        self, context: SessionContext, message: BaseMessage
+    ) -> str | None:
+        runtime = self._sessions.get(context.session_id)
+        if runtime is None or not runtime.foreground_active:
+            return None
+        if runtime.context is not None and runtime.context != context:
+            return None
+        await global_agent_injections.publish(context.session_id, message)
+        global_telemetry.event(
+            "agent.message.queued",
+            payload={"role": "coordinator", "session_id": context.session_id},
+            context=runtime.telemetry_context,
+        )
+        return runtime.active_turn_id
+
     async def submit_user_turn(
         self,
         context: SessionContext | str,
