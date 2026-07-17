@@ -39,3 +39,6 @@ HTTP adapters must construct `AuthenticatedPrincipal` from authenticated server
 credentials. User and workspace identifiers must never be trusted from request
 JSON. Session, Turn, Memory, Worker control, and Trace access are checked against
 that principal before data is returned or mutated.
+
+The concrete FastAPI lifecycle, same-origin authentication, HTTP routes, and
+WebSocket protocol are documented in [`web-api.md`](web-api.md).
