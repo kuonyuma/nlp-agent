@@ -10,6 +10,9 @@ gateway:
   single_process: true
   stream_queue_size: 500
   shutdown_grace_s: 30
+  event_retention_days: 7
+  max_events_per_session: 50000
+  retention_cleanup_interval_s: 3600
 
 # FastAPI is a same-origin network adapter. It owns HTTP/WebSocket concerns,
 # while BackendGateway remains the only owner of Agent runtime state.
@@ -22,6 +25,12 @@ web:
   allowed_hosts: [127.0.0.1, localhost, testserver]
   allowed_origins: [http://127.0.0.1:8765, http://localhost:8765]
   max_ws_message_bytes: 1048576
+  ws_send_queue_size: 256
+  ws_send_timeout_s: 10
+  ws_ping_interval_s: 20
+  ws_ping_timeout_s: 20
+  ws_max_connections: 200
+  ws_max_connections_per_user: 10
   static_dir: ""
 
 providers:
