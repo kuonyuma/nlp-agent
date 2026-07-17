@@ -148,3 +148,28 @@ async def test_sandbox_classifies_attempt_timeout_as_recoverable(monkeypatch):
     assert result.status == "timed_out"
     assert result.error.category == "timeout"
     assert result.error.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_sandbox_finalizes_usefully_after_turn_budget(monkeypatch):
+    class FinalizingLLM:
+        async def ainvoke(self, messages):
+            if any("RUNTIME_FINALIZATION" in str(item.content) for item in messages):
+                return AIMessage(content="partial work summarized")
+            return AIMessage(content="", tool_calls=[{
+                "name": "missing_tool", "args": {}, "id": "call-1"
+            }])
+
+    monkeypatch.setattr(worker_tool, "get_tool_llm", lambda: FinalizingLLM())
+    monkeypatch.setattr(worker_tool, "record_sidechain_transcript", lambda *_args: None)
+    result = await _execute_sandbox_loop(
+        "finalize-worker",
+        "s1",
+        [],
+        [],
+        budget=WorkerResourceBudget(max_turns=1),
+    )
+
+    assert result.status == "failed"
+    assert result.termination_reason == "max_turns"
+    assert result.output == "partial work summarized"

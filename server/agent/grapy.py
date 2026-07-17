@@ -34,7 +34,6 @@ import os
 import aiosqlite
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.prebuilt import tools_condition
 
 from server.agent.state import AgentState
 from server.tools.task_stop_tool import task_stop_tool
@@ -43,6 +42,15 @@ from server.agent.node.coordinator import coordinator_node, get_coordinator_tool
 from server.tools.worker_tool import spawn_worker, send_message
 from server.tools.runtime_tool_node import RuntimeToolNode
 from core.tool_registry import physical_tool_manager
+
+
+def _route_after_coordinator(state: AgentState):
+    if state.get("runtime_continue"):
+        return "coordinator"
+    messages = state.get("messages", [])
+    if messages and getattr(messages[-1], "tool_calls", None):
+        return "tools"
+    return END
 
 
 async def build_agent():
@@ -61,8 +69,8 @@ async def build_agent():
     workflow.add_edge(START, "coordinator")
     workflow.add_conditional_edges(
         "coordinator",
-        tools_condition,
-        {"tools": "tools", END: END}
+        _route_after_coordinator,
+        {"coordinator": "coordinator", "tools": "tools", END: END}
     )
     workflow.add_edge("tools", "coordinator")
 

@@ -81,6 +81,12 @@ from server.agent.llm_factory import get_worker_llm, get_tool_llm
 from core.tool_registry import physical_tool_manager
 from core.tool_runtime import ToolGrantSnapshot, ToolSet
 from core.session_context import SessionContext
+from core.agent_runtime import (
+    AgentStopReason,
+    exhaustion_fallback,
+    exhaustion_prompt,
+    usage_total,
+)
 from core.observability.context import current_telemetry_context
 from core.observability.models import SpanKind, SpanStatus
 from core.observability.runtime import global_telemetry
@@ -151,21 +157,30 @@ async def _execute_sandbox_loop(
 ) -> WorkerExecutionResultSpec:
     """Execute one isolated Worker attempt under an explicit resource budget."""
     worker_logger = logger.bind(worker_id=worker_id, session_id=session_id)
-    budget = budget or WorkerResourceBudget()
+    from configs.settings import settings
+
+    runtime_settings = settings.get_agent_runtime("worker")
+    if budget is None:
+        budget = WorkerResourceBudget(
+            max_injections=int(runtime_settings.get("max_injections", 15)),
+            injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
+            max_tool_result_chars=int(runtime_settings.get("max_tool_result_chars", 50_000)),
+            finalize_on_exhaustion=bool(runtime_settings.get("finalize_on_exhaustion", True)),
+        )
     if not isinstance(toolset, ToolSet):
         toolset = physical_tool_manager.get_worker_toolset(
             allowed_names=[item.name for item in toolset],
             session_id=session_id,
             profile="legacy",
         )
-    llm = get_worker_llm(tool_specified_model=model_name) if model_name else get_tool_llm()
+    base_llm = get_worker_llm(tool_specified_model=model_name) if model_name else get_tool_llm()
+    llm = base_llm
     if toolset.tools:
         llm = llm.bind_tools(toolset.tools)
     start_time = time.time()
     total_tokens_used = 0
     tool_uses_count = 0
-    from configs.settings import settings
-
+    injection_count = 0
     fallback_context, fallback_output = settings.get_context_limits(model_name or None)
     context_window = getattr(llm, "context_window_tokens", fallback_context)
     output_reserve = getattr(llm, "max_output_tokens", fallback_output)
@@ -190,7 +205,7 @@ async def _execute_sandbox_loop(
     ) -> WorkerExecutionResultSpec:
         completed_at = time.time()
         duration_ms = int((completed_at - start_time) * 1000)
-        return WorkerExecutionResultSpec(
+        execution = WorkerExecutionResultSpec(
             status=status,
             summary=summary,
             output=output,
@@ -208,13 +223,68 @@ async def _execute_sandbox_loop(
             termination_reason=termination_reason,
             attempt=attempt,
         )
+        global_telemetry.event(
+            "agent.run.completed",
+            level="info" if status == "completed" else "warning",
+            payload={
+                "role": "worker",
+                "worker_id": worker_id,
+                "status": status,
+                "stop_reason": termination_reason,
+                "iterations": min(budget.max_turns, max(0, tool_uses_count + 1)),
+                "tokens": total_tokens_used,
+                "tool_calls": tool_uses_count,
+                "injections": injection_count,
+                "duration_ms": duration_ms,
+            },
+        )
+        return execution
 
     async def query_loop() -> WorkerExecutionResultSpec:
-        nonlocal total_tokens_used, tool_uses_count
+        nonlocal total_tokens_used, tool_uses_count, injection_count
+
+        async def finalize(reason: AgentStopReason) -> str:
+            nonlocal total_tokens_used
+            if not budget.finalize_on_exhaustion:
+                return exhaustion_fallback(reason)
+            global_telemetry.event(
+                "agent.run.finalizing",
+                payload={"role": "worker", "reason": reason.value, "worker_id": worker_id},
+            )
+            try:
+                final_response = await base_llm.ainvoke(
+                    [*messages, SystemMessage(content=exhaustion_prompt(reason))]
+                )
+                total = usage_total(final_response)
+                total_tokens_used += total
+                content = str(getattr(final_response, "content", "") or "").strip()
+                if content:
+                    messages.append(final_response)
+                    record_sidechain_transcript(session_id, worker_id, [final_response])
+                    return content
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                worker_logger.warning(
+                    "Worker finalization failed", reason=reason.value, error=str(error)
+                )
+            return exhaustion_fallback(reason)
+
+        global_telemetry.event(
+            "agent.run.started",
+            payload={"role": "worker", "worker_id": worker_id, "attempt": attempt},
+        )
         for _turn in range(budget.max_turns):
+            global_telemetry.event(
+                "agent.iteration.started",
+                payload={"role": "worker", "iteration": _turn + 1, "worker_id": worker_id},
+            )
             task_info = global_task_manager.get_active_task(worker_id)
             if task_info:
-                while not task_info.pending_messages.empty():
+                remaining_injections = max(0, budget.max_injections - injection_count)
+                batch_limit = min(budget.injection_batch_size, remaining_injections)
+                drained = 0
+                while drained < batch_limit and not task_info.pending_messages.empty():
                     command = task_info.pending_messages.get_nowait()
                     if command.kind == "cancel":
                         raise asyncio.CancelledError
@@ -226,12 +296,24 @@ async def _execute_sandbox_loop(
                         )
                     )
                     messages.append(interruption_msg)
+                    drained += 1
+                    injection_count += 1
                     record_sidechain_transcript(session_id, worker_id, [interruption_msg])
                     task_info.pending_messages.task_done()
                     worker_logger.info(
                         "Worker command received",
                         command_id=command.command_id,
                         command_kind=command.kind,
+                    )
+                if drained:
+                    global_telemetry.event(
+                        "agent.message.injected",
+                        payload={
+                            "role": "worker",
+                            "worker_id": worker_id,
+                            "count": drained,
+                            "total": injection_count,
+                        },
                     )
 
             async with _observed_worker_span(
@@ -251,14 +333,16 @@ async def _execute_sandbox_loop(
             response = await llm.ainvoke(context_view.messages)
             messages.append(response)
             if getattr(response, "usage_metadata", None):
-                total_tokens_used += response.usage_metadata.get("total_tokens", 0)
+                total_tokens_used += usage_total(response)
             record_sidechain_transcript(session_id, worker_id, [response])
 
             if total_tokens_used > budget.max_tokens:
+                final_output = await finalize(AgentStopReason.TOKEN_BUDGET)
                 return result(
                     status="failed",
                     summary="Worker exceeded its token budget.",
                     termination_reason="token_budget",
+                    output=final_output,
                     error=WorkerErrorSpec(
                         category="budget",
                         message=f"Token budget exceeded: {total_tokens_used}/{budget.max_tokens}",
@@ -266,19 +350,46 @@ async def _execute_sandbox_loop(
                     ),
                 )
             if not response.tool_calls:
+                content = str(response.content or "").strip()
+                finish_reason = str(
+                    getattr(response, "response_metadata", {}).get("finish_reason", "")
+                ).lower()
+                if not content:
+                    messages.append(SystemMessage(content=(
+                        "[RUNTIME_RETRY] The previous model response was empty. "
+                        "Return a non-empty answer or make the required tool call."
+                    )))
+                    global_telemetry.event(
+                        "agent.response.recovering",
+                        level="warning",
+                        payload={"role": "worker", "reason": "empty_response"},
+                    )
+                    continue
+                if finish_reason in {"length", "max_tokens"}:
+                    messages.append(SystemMessage(content=(
+                        "[RUNTIME_CONTINUE] Continue exactly where the truncated response ended. "
+                        "Do not repeat completed content."
+                    )))
+                    global_telemetry.event(
+                        "agent.response.recovering",
+                        payload={"role": "worker", "reason": "length"},
+                    )
+                    continue
                 return result(
                     status="completed",
                     summary="Worker completed the assigned task.",
                     termination_reason="completed",
-                    output=str(response.content),
+                    output=content,
                 )
 
             remaining = budget.max_tool_calls - tool_uses_count
             if remaining < len(response.tool_calls):
+                final_output = await finalize(AgentStopReason.TOOL_BUDGET)
                 return result(
                     status="failed",
                     summary="Worker exceeded its tool-call budget.",
                     termination_reason="tool_budget",
+                    output=final_output,
                     error=WorkerErrorSpec(
                         category="budget",
                         message=f"Tool-call budget exceeded: {budget.max_tool_calls}",
@@ -292,7 +403,9 @@ async def _execute_sandbox_loop(
             tool_results = await toolset.execute_many(calls)
             for tool_call, execution in zip(response.tool_calls, tool_results, strict=True):
                 tool_msg = ToolMessage(
-                    content=execution.to_model_content(),
+                    content=execution.to_model_content(
+                        max_chars=budget.max_tool_result_chars
+                    ),
                     tool_call_id=tool_call["id"],
                     name=tool_call["name"],
                     status="success" if execution.ok else "error",
@@ -301,10 +414,12 @@ async def _execute_sandbox_loop(
                 messages.append(tool_msg)
                 record_sidechain_transcript(session_id, worker_id, [tool_msg])
 
+        final_output = await finalize(AgentStopReason.MAX_ITERATIONS)
         return result(
             status="failed",
             summary="Worker exhausted its ReAct turn budget.",
             termination_reason="max_turns",
+            output=final_output,
             error=WorkerErrorSpec(
                 category="budget",
                 message=f"Maximum turns reached: {budget.max_turns}",
@@ -329,6 +444,7 @@ async def _execute_sandbox_loop(
             status="timed_out",
             summary=f"Worker attempt timed out after {budget.max_duration_s:g} seconds.",
             termination_reason="timeout",
+            output=exhaustion_fallback(AgentStopReason.MODEL_TIMEOUT),
             error=WorkerErrorSpec(category="timeout", message=str(error) or "timeout", retryable=True),
         )
     except Exception as error:
@@ -338,6 +454,7 @@ async def _execute_sandbox_loop(
             status="failed",
             summary=f"Worker attempt failed: {error}",
             termination_reason="unrecoverable_error",
+            output=exhaustion_fallback(AgentStopReason.MODEL_ERROR),
             error=WorkerErrorSpec(
                 category=category,
                 message=str(error),
@@ -568,6 +685,7 @@ async def spawn_worker(
         JSON 字符串（WorkerNotificationSpec），包含 task_id 和 "started" 状态。
     """
     from configs.settings import settings
+    runtime_settings = settings.get_agent_runtime("worker")
 
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
     parent_turn_id = config.get("configurable", {}).get("turn_id", "")
@@ -662,6 +780,10 @@ async def spawn_worker(
             max_duration_s=max_duration_s,
             max_tokens=max_tokens,
             max_tool_calls=max_tool_calls,
+            max_injections=int(runtime_settings.get("max_injections", 15)),
+            injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
+            max_tool_result_chars=int(runtime_settings.get("max_tool_result_chars", 50_000)),
+            finalize_on_exhaustion=bool(runtime_settings.get("finalize_on_exhaustion", True)),
         ),
         retry_policy=WorkerRetryPolicy(max_attempts=max_attempts),
     )
@@ -756,6 +878,8 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
 
     budget_data = metadata.get("budget", {})
     retry_data = metadata.get("retry", {})
+    from configs.settings import settings
+    runtime_settings = settings.get_agent_runtime("worker")
     global_task_manager.register_task(
         task_id=to_agent_id,
         task_type=agent_name,
@@ -773,6 +897,10 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
             max_duration_s=float(budget_data.get("maxDurationS", 60.0)),
             max_tokens=int(budget_data.get("maxTokens", 32_000)),
             max_tool_calls=int(budget_data.get("maxToolCalls", 12)),
+            max_injections=int(runtime_settings.get("max_injections", 15)),
+            injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
+            max_tool_result_chars=int(runtime_settings.get("max_tool_result_chars", 50_000)),
+            finalize_on_exhaustion=bool(runtime_settings.get("finalize_on_exhaustion", True)),
         ),
         retry_policy=WorkerRetryPolicy(
             max_attempts=int(retry_data.get("maxAttempts", 3))

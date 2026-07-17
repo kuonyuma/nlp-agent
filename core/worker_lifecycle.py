@@ -89,6 +89,10 @@ class WorkerResourceBudget:
     max_duration_s: float = 60.0
     max_tokens: int = 32_000
     max_tool_calls: int = 12
+    max_injections: int = 15
+    injection_batch_size: int = 3
+    max_tool_result_chars: int = 50_000
+    finalize_on_exhaustion: bool = True
 
     def __post_init__(self) -> None:
         if self.max_turns < 1:
@@ -99,6 +103,12 @@ class WorkerResourceBudget:
             raise ValueError("max_tokens must be at least 1")
         if self.max_tool_calls < 0:
             raise ValueError("max_tool_calls cannot be negative")
+        if self.max_injections < 0:
+            raise ValueError("max_injections cannot be negative")
+        if self.injection_batch_size < 1:
+            raise ValueError("injection_batch_size must be at least 1")
+        if self.max_tool_result_chars < 512:
+            raise ValueError("max_tool_result_chars must be at least 512")
 
 
 @dataclass(frozen=True, slots=True)

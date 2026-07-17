@@ -102,6 +102,7 @@ async def main() -> None:
         session_id = context.session_id
         active_session["id"] = session_id
         config = {
+            "recursion_limit": 64,
             "configurable": {
                 "thread_id": session_id,
                 "turn_id": turn_id,

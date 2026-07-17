@@ -9,6 +9,7 @@ from core.coordinator_runtime import CoordinatorRuntime
 from core.session_context import SessionContext
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
+from core.agent_runtime import global_agent_injections
 from schemas.models import WorkerExecutionResultSpec, WorkerTimingSpec
 
 
@@ -173,4 +174,40 @@ async def test_worker_resume_preserves_full_session_identity():
     await asyncio.sleep(0.02)
 
     assert contexts[-1] == scoped
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_new_message_is_injected_into_active_coordinator_turn():
+    bus = WorkerEventBus()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def invoke(messages, context, background, turn_id):
+        calls.append(messages)
+        if len(calls) == 1:
+            entered.set()
+            await release.wait()
+        else:
+            await global_agent_injections.drain(context.session_id, limit=3)
+
+    runtime = CoordinatorRuntime(bus, invoke)
+    first = asyncio.create_task(runtime.submit_user_turn(
+        "session-inject", HumanMessage(content="first", id="turn-first")
+    ))
+    await entered.wait()
+
+    await asyncio.wait_for(
+        runtime.submit_user_turn(
+            "session-inject", HumanMessage(content="follow-up", id="turn-follow")
+        ),
+        timeout=0.2,
+    )
+    assert global_agent_injections.pending("session-inject") == 1
+
+    release.set()
+    await asyncio.wait_for(first, 1)
+    assert len(calls) == 2
+    assert global_agent_injections.pending("session-inject") == 0
     await runtime.close()

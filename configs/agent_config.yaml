@@ -85,6 +85,24 @@ memory:
   recent_archive_tokens: 2000
   curate_after_archives: 8
 
+# One logical Agent turn is bounded independently from provider-level retries
+# and timeouts. Coordinator and Worker consume the same runtime contract.
+agent_runtime:
+  coordinator:
+    max_iterations: 12
+    max_duration_s: 600
+    max_tokens: 128000
+    max_tool_calls: 32
+    max_injections: 15
+    injection_batch_size: 3
+    max_tool_result_chars: 50000
+    finalize_on_exhaustion: true
+  worker:
+    max_injections: 15
+    injection_batch_size: 3
+    max_tool_result_chars: 50000
+    finalize_on_exhaustion: true
+
 # 工具注册、权限与扩展均在此处集中配置。未声明的工具不会被隐式授权。
 tools:
   policies:

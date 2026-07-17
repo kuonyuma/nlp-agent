@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     def memory_runtime(self) -> dict:
         return dict(self._config.get("memory", {}))
 
+    def get_agent_runtime(self, role: str) -> dict:
+        return dict(self._config.get("agent_runtime", {}).get(role, {}))
+
     def _resolve_worker_model(
         self,
         agent_name: str | None = None,
