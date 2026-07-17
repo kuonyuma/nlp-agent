@@ -48,6 +48,8 @@ class FakeEngine:
         self.injected = []
         self.active = {}
         self.closed = False
+        self.cancel_calls = []
+        self.lifecycle = []
 
     async def start(self, event_sink):
         self.sink = event_sink
@@ -72,12 +74,15 @@ class FakeEngine:
         return turn_id
 
     async def cancel_turn(self, context, turn_id):
+        self.cancel_calls.append(turn_id)
+        self.lifecycle.append("cancel")
         self.active.pop(context.session_id, None)
 
     async def delete_session(self, context):
         self.active.pop(context.session_id, None)
 
     async def close(self):
+        self.lifecycle.append("close")
         self.closed = True
 
 
@@ -94,6 +99,7 @@ async def test_gateway_runs_turn_replays_events_and_deduplicates(tmp_path, princ
         engine=engine,
         repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
         sessions=sessions,
+        shutdown_grace_s=0,
     )
     await gateway.start()
     session = await gateway.create_session(principal, workspace_id="w1")
@@ -177,6 +183,7 @@ async def test_gateway_serializes_concurrent_turn_submission_per_session(tmp_pat
         engine=engine,
         repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
         sessions=sessions,
+        shutdown_grace_s=0,
     )
     await gateway.start()
     session = await gateway.create_session(principal, workspace_id="w1")
@@ -196,3 +203,64 @@ async def test_gateway_serializes_concurrent_turn_submission_per_session(tmp_pat
     assert sum(not isinstance(result, Exception) for result in results) == 1
     assert sum(isinstance(result, TurnConflictError) for result in results) == 1
     await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_shutdown_allows_active_turn_to_finish_within_grace(tmp_path, principal):
+    engine = FakeEngine()
+    engine.block = asyncio.Event()
+    sessions = FakeSessions()
+    gateway = BackendGateway(
+        engine=engine,
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=sessions,
+        shutdown_grace_s=0.5,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    accepted = await gateway.submit_turn(
+        principal, SubmitTurnRequest(session_id=session.session_id, content="finish")
+    )
+    while session.session_id not in engine.active:
+        await asyncio.sleep(0)
+
+    close_task = asyncio.create_task(gateway.close())
+    await asyncio.sleep(0.01)
+    engine.block.set()
+    await close_task
+
+    assert engine.cancel_calls == []
+    assert engine.lifecycle == ["close"]
+    reopened = GatewayRepository(tmp_path / "gateway.sqlite3")
+    assert reopened.get_turn(accepted.turn_id).status == TurnStatus.COMPLETED
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_shutdown_cancels_turn_after_grace_before_engine_close(
+    tmp_path, principal
+):
+    engine = FakeEngine()
+    engine.block = asyncio.Event()
+    sessions = FakeSessions()
+    gateway = BackendGateway(
+        engine=engine,
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=sessions,
+        shutdown_grace_s=0.01,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    accepted = await gateway.submit_turn(
+        principal, SubmitTurnRequest(session_id=session.session_id, content="blocked")
+    )
+    while session.session_id not in engine.active:
+        await asyncio.sleep(0)
+
+    await gateway.close()
+
+    assert engine.cancel_calls == [accepted.turn_id]
+    assert engine.lifecycle == ["cancel", "close"]
+    reopened = GatewayRepository(tmp_path / "gateway.sqlite3")
+    assert reopened.get_turn(accepted.turn_id).status == TurnStatus.CANCELLED
+    reopened.close()
