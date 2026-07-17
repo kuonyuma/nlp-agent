@@ -11,7 +11,7 @@ flowchart LR
     UI["React WebUI"] -->|"HTTP control plane"| API["FastAPI :8765"]
     UI <-->|"WebSocket realtime plane /ws/v1"| API
     API -->|"direct async Python calls"| GW["BackendGateway"]
-    GW --> STORE["SQLite Turn / Event / Outbox"]
+    GW --> STORE["SQLite Turn / Durable Event"]
     GW --> ENGINE["LangGraphAgentEngine"]
     ENGINE --> AGENTS["Coordinator / Workers / Tools"]
 ```
@@ -25,8 +25,9 @@ uv run python main.py serve
 
 The server binds to `127.0.0.1:8765` by default. Uvicorn must stay at one
 worker while the Gateway is embedded. The FastAPI lifespan performs
-`gateway.start()` before readiness succeeds and `gateway.close()` during
-graceful shutdown.
+`gateway.start()` before readiness succeeds. During shutdown it rejects new
+turns, closes WebSocket channels, drains active turns for `shutdown_grace_s`,
+cancels any remainder, closes Agent-owned resources, and flushes SQLite.
 
 Health probes:
 
@@ -119,7 +120,16 @@ For reconnect recovery, the browser sends:
 
 The adapter subscribes to live events first, then replays SQLite events. It
 deduplicates by `(turn_id, sequence)` and fills detected gaps before delivering
-new live events, so a reconnect cannot silently reorder the stream.
+new live events, so a reconnect cannot silently reorder the stream. When old
+events have expired, the server emits `stream.gap` and the browser reloads the
+final turn or session transcript through HTTP.
+
+Each connection has its own bounded send queue. Publishing never waits on a
+slow browser; queue overflow or a send exceeding `ws_send_timeout_s` closes only
+that client with code `1013`, after which it reconnects and uses
+`stream.resume`. Uvicorn provides protocol-level ping/pong using
+`ws_ping_interval_s` and `ws_ping_timeout_s`. Global and per-user connection
+limits prevent stalled clients from accumulating without bound.
 
 ## Adapting nanobot WebUI
 

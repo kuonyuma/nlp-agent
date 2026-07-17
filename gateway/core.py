@@ -39,6 +39,10 @@ class BackendGateway:
         engine: AgentEngine | None = None,
         repository: GatewayRepository | None = None,
         sessions: LocalSessionService = local_session_service,
+        shutdown_grace_s: float | None = None,
+        event_retention_days: int | None = None,
+        max_events_per_session: int | None = None,
+        retention_cleanup_interval_s: float | None = None,
     ) -> None:
         project = Path(__file__).resolve().parent.parent
         from configs.settings import settings
@@ -55,6 +59,40 @@ class BackendGateway:
         self.events = GatewayEventBroker()
         self._turn_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_turn_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.shutdown_grace_s = max(
+            0.0,
+            float(
+                shutdown_grace_s
+                if shutdown_grace_s is not None
+                else gateway_config.get("shutdown_grace_s", 30)
+            ),
+        )
+        self.event_retention_days = max(
+            1,
+            int(
+                event_retention_days
+                if event_retention_days is not None
+                else gateway_config.get("event_retention_days", 7)
+            ),
+        )
+        self.max_events_per_session = max(
+            1,
+            int(
+                max_events_per_session
+                if max_events_per_session is not None
+                else gateway_config.get("max_events_per_session", 50_000)
+            ),
+        )
+        self.retention_cleanup_interval_s = max(
+            1.0,
+            float(
+                retention_cleanup_interval_s
+                if retention_cleanup_interval_s is not None
+                else gateway_config.get("retention_cleanup_interval_s", 3_600)
+            ),
+        )
+        self._maintenance_stop = asyncio.Event()
+        self._maintenance_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
         self._accepting = False
@@ -72,11 +110,36 @@ class BackendGateway:
                     GatewayEventType.TURN_FAILED,
                     {"status": "interrupted", "error_kind": "gateway_restart"},
                 )
-            for event in await asyncio.to_thread(self.repository.pending_outbox):
-                self.events.publish(event)
-                await asyncio.to_thread(self.repository.mark_delivered, event.event_id)
+            await self.prune_events()
+            self._maintenance_stop.clear()
+            self._maintenance_task = asyncio.create_task(
+                self._event_maintenance_loop(),
+                name="gateway-event-retention",
+            )
             self._started = True
             self._accepting = True
+
+    async def _event_maintenance_loop(self) -> None:
+        while not self._maintenance_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._maintenance_stop.wait(),
+                    timeout=self.retention_cleanup_interval_s,
+                )
+            except asyncio.TimeoutError:
+                await self.prune_events()
+
+    async def prune_events(self) -> dict[str, int]:
+        return await asyncio.to_thread(
+            self.repository.prune_events,
+            retention_days=self.event_retention_days,
+            max_events_per_session=self.max_events_per_session,
+        )
+
+    async def begin_shutdown(self) -> None:
+        """Enter draining state before network channels are stopped."""
+        async with self._lifecycle_lock:
+            self._accepting = False
 
     def _require_started(self) -> None:
         if not self._started or not self._accepting:
@@ -464,11 +527,7 @@ class BackendGateway:
             event_type=event_type,
             payload=payload,
         )
-        dropped = self.events.publish(event)
-        await asyncio.to_thread(self.repository.mark_delivered, event.event_id)
-        if dropped:
-            # The durable log remains the source of truth; reconnecting clients replay by sequence.
-            pass
+        self.events.publish(event)
         return event
 
     async def health(self) -> GatewayHealth:
@@ -480,21 +539,33 @@ class BackendGateway:
             active_turns=sum(not task.done() for task in self._turn_tasks.values()),
             subscribers=self.events.subscriber_count,
             database=repository["database"],
-            pending_outbox=repository["pending_outbox"],
+            durable_events=repository["durable_events"],
         )
 
-    async def close(self) -> None:
+    async def close(self, *, force: bool = False) -> None:
         async with self._lifecycle_lock:
             if not self._started:
+                await asyncio.to_thread(self.repository.flush)
                 self.repository.close()
                 return
             self._accepting = False
+            self._maintenance_stop.set()
+            if self._maintenance_task is not None:
+                await asyncio.gather(self._maintenance_task, return_exceptions=True)
+                self._maintenance_task = None
             tasks = [task for task in self._turn_tasks.values() if not task.done()]
-            for task in tasks:
+            pending = set(tasks)
+            if pending and not force and self.shutdown_grace_s > 0:
+                _done, pending = await asyncio.wait(
+                    pending,
+                    timeout=self.shutdown_grace_s,
+                )
+            for task in pending:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             await self.engine.close()
+            await asyncio.to_thread(self.repository.flush)
             self.repository.close()
             self._turn_tasks.clear()
             self._session_turn_locks.clear()
