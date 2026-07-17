@@ -4,12 +4,15 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from core.identity import AuthenticatedPrincipal
 from core.session_context import SessionContext
 from gateway.contracts import GatewayEventType
 from gateway.core import BackendGateway
 from gateway.repository import GatewayRepository
 from server.web.app import create_app
 from server.web.auth import SameOriginSessionAuth
+from server.web.contracts import ServerEventEnvelope
+from server.web.websocket import WebSocketConnection, WebSocketHub
 
 
 class FakeSessions:
@@ -270,3 +273,59 @@ def test_websocket_rejects_cross_origin(web_app):
             ) as websocket:
                 websocket.receive_json()
         assert exc.value.code == 4403
+
+
+class SlowWebSocket:
+    def __init__(self):
+        self.block = asyncio.Event()
+        self.closed = []
+
+    async def send_json(self, _payload):
+        await self.block.wait()
+
+    async def close(self, *, code, reason):
+        self.closed.append((code, reason))
+
+
+@pytest.mark.asyncio
+async def test_websocket_slow_sender_is_disconnected_without_blocking_publish():
+    websocket = SlowWebSocket()
+    principal = AuthenticatedPrincipal(
+        user_id="slow-user", workspace_ids=frozenset({"default"})
+    )
+    connection = WebSocketConnection(
+        websocket,
+        gateway=None,
+        principal=principal,
+        max_queue=10,
+        send_queue_size=1,
+        send_timeout_s=0.1,
+    )
+    connection.start()
+    event = ServerEventEnvelope(type="test.event", payload={})
+
+    assert await connection.send(event) is True
+    await asyncio.wait_for(connection.wait_closed(), timeout=0.5)
+
+    assert websocket.closed[0][0] == 1013
+
+
+def test_websocket_hub_enforces_global_and_per_user_limits():
+    alice = AuthenticatedPrincipal(user_id="alice")
+    bob = AuthenticatedPrincipal(user_id="bob")
+    hub = WebSocketHub(max_connections=2, max_connections_per_user=1)
+
+    def connection(principal):
+        return WebSocketConnection(
+            SlowWebSocket(),
+            gateway=None,
+            principal=principal,
+            max_queue=10,
+            send_queue_size=1,
+            send_timeout_s=0.1,
+        )
+
+    assert hub.try_add(connection(alice)) is True
+    assert hub.try_add(connection(alice)) is False
+    assert hub.try_add(connection(bob)) is True
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="carol"))) is False

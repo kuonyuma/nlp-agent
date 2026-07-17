@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -29,12 +30,34 @@ from server.web.contracts import (
 from server.web.protocol import control_event, gateway_event_envelope
 
 
-class WebSocketHub:
-    def __init__(self) -> None:
-        self._connections: set[WebSocketConnection] = set()
+@dataclass(slots=True)
+class _OutboundFrame:
+    event: ServerEventEnvelope
+    delivered: asyncio.Future[bool] | None = None
 
-    def add(self, connection: "WebSocketConnection") -> None:
+
+class WebSocketHub:
+    def __init__(
+        self,
+        *,
+        max_connections: int = 200,
+        max_connections_per_user: int = 10,
+    ) -> None:
+        self._connections: set[WebSocketConnection] = set()
+        self.max_connections = max(1, max_connections)
+        self.max_connections_per_user = max(1, max_connections_per_user)
+
+    def try_add(self, connection: "WebSocketConnection") -> bool:
+        if len(self._connections) >= self.max_connections:
+            return False
+        user_connections = sum(
+            item.principal.user_id == connection.principal.user_id
+            for item in self._connections
+        )
+        if user_connections >= self.max_connections_per_user:
+            return False
         self._connections.add(connection)
+        return True
 
     def discard(self, connection: "WebSocketConnection") -> None:
         self._connections.discard(connection)
@@ -66,18 +89,15 @@ class WebSocketHub:
                         control_event(
                             "server.shutdown",
                             payload={"reason": "service_restart"},
-                        )
+                        ),
+                        wait=True,
                     )
                     for connection in connections
                 ),
                 return_exceptions=True,
             )
         for connection in connections:
-            try:
-                await connection.websocket.close(code=1012, reason="service restart")
-            except RuntimeError:
-                pass
-            await connection.close()
+            await connection.close(code=1012, reason="service restart")
 
 
 class WebSocketConnection:
@@ -88,6 +108,8 @@ class WebSocketConnection:
         principal: AuthenticatedPrincipal,
         *,
         max_queue: int,
+        send_queue_size: int,
+        send_timeout_s: float,
     ) -> None:
         self.websocket = websocket
         self.gateway = gateway
@@ -97,14 +119,80 @@ class WebSocketConnection:
         self._subscription_tasks: dict[str, asyncio.Task[None]] = {}
         self._last_sequences: dict[str, int] = {}
         self._turn_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._send_lock = asyncio.Lock()
+        self._send_queue: asyncio.Queue[_OutboundFrame] = asyncio.Queue(
+            maxsize=max(1, send_queue_size)
+        )
+        self.send_timeout_s = max(0.1, send_timeout_s)
+        self._sender_task: asyncio.Task[None] | None = None
+        self._closed_event = asyncio.Event()
         self._closed = False
 
-    async def send(self, event: ServerEventEnvelope) -> None:
+    def start(self) -> None:
+        if self._sender_task is None:
+            self._sender_task = asyncio.create_task(
+                self._sender_loop(),
+                name=f"websocket-sender:{self.principal.user_id}",
+            )
+
+    async def send(self, event: ServerEventEnvelope, *, wait: bool = False) -> bool:
         if self._closed:
-            return
-        async with self._send_lock:
-            await self.websocket.send_json(event.model_dump(mode="json", exclude_none=True))
+            return False
+        delivered = asyncio.get_running_loop().create_future() if wait else None
+        try:
+            self._send_queue.put_nowait(_OutboundFrame(event, delivered))
+        except asyncio.QueueFull:
+            await self._terminate(code=1013, reason="slow client send queue full")
+            return False
+        if delivered is not None:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(delivered),
+                    timeout=self.send_timeout_s + 0.5,
+                )
+            except (asyncio.TimeoutError, ConnectionError):
+                if not delivered.done():
+                    delivered.cancel()
+                await self._terminate(code=1013, reason="slow client send timeout")
+                return False
+        return True
+
+    async def _sender_loop(self) -> None:
+        try:
+            while True:
+                frame = await self._send_queue.get()
+                try:
+                    await asyncio.wait_for(
+                        self.websocket.send_json(
+                            frame.event.model_dump(mode="json", exclude_none=True)
+                        ),
+                        timeout=self.send_timeout_s,
+                    )
+                    if frame.delivered is not None and not frame.delivered.done():
+                        frame.delivered.set_result(True)
+                except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError, OSError) as error:
+                    if frame.delivered is not None and not frame.delivered.done():
+                        frame.delivered.set_exception(ConnectionError(str(error)))
+                    await self._terminate(code=1013, reason="slow or disconnected client")
+                    return
+                finally:
+                    self._send_queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._fail_queued_frames()
+
+    def _fail_queued_frames(self) -> None:
+        while True:
+            try:
+                frame = self._send_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if frame.delivered is not None and not frame.delivered.done():
+                frame.delivered.set_exception(ConnectionError("WebSocket connection closed"))
+            self._send_queue.task_done()
+
+    async def wait_closed(self) -> None:
+        await self._closed_event.wait()
 
     async def subscribe(self, session_id: str) -> bool:
         if session_id in self._subscriptions:
@@ -174,6 +262,20 @@ class WebSocketConnection:
             )
             if not events:
                 break
+            first = events[0]
+            if first.sequence > after + 1:
+                await self.send(
+                    control_event(
+                        "stream.gap",
+                        session_id=first.session_id,
+                        turn_id=first.turn_id,
+                        payload={
+                            "expected_sequence": after + 1,
+                            "received_sequence": first.sequence,
+                            "reason": "events_expired",
+                        },
+                    )
+                )
             for event in events:
                 if event.sequence > target_sequence:
                     break
@@ -223,10 +325,12 @@ class WebSocketConnection:
                 )
             )
 
-    async def close(self) -> None:
+    async def _terminate(self, *, code: int, reason: str) -> None:
         if self._closed:
             return
         self._closed = True
+        self._closed_event.set()
+        current = asyncio.current_task()
         subscriptions = list(self._subscriptions.values())
         tasks = list(self._subscription_tasks.values())
         self._subscriptions.clear()
@@ -234,10 +338,26 @@ class WebSocketConnection:
         for subscription in subscriptions:
             await subscription.close()
         for task in tasks:
-            if not task.done():
+            if task is not current and not task.done():
                 task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        wait_tasks = [task for task in tasks if task is not current]
+        if wait_tasks:
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
+        if self._sender_task is not None and self._sender_task is not current:
+            if not self._sender_task.done():
+                self._sender_task.cancel()
+            await asyncio.gather(self._sender_task, return_exceptions=True)
+        try:
+            await asyncio.wait_for(
+                self.websocket.close(code=code, reason=reason),
+                timeout=min(1.0, self.send_timeout_s),
+            )
+        except (asyncio.TimeoutError, RuntimeError, OSError):
+            pass
+        self._fail_queued_frames()
+
+    async def close(self, *, code: int = 1000, reason: str = "connection closed") -> None:
+        await self._terminate(code=code, reason=reason)
 
 
 def _command_error(error: Exception) -> tuple[str, str]:
@@ -363,6 +483,8 @@ async def websocket_endpoint(
     hub: WebSocketHub,
     max_message_bytes: int,
     max_queue: int,
+    send_queue_size: int,
+    send_timeout_s: float,
 ) -> None:
     try:
         auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
@@ -374,15 +496,20 @@ async def websocket_endpoint(
         await websocket.close(code=4403, reason="origin rejected")
         return
 
-    await websocket.accept()
     connection = WebSocketConnection(
         websocket,
         gateway,
         claims.principal(),
         max_queue=max_queue,
+        send_queue_size=send_queue_size,
+        send_timeout_s=send_timeout_s,
     )
-    hub.add(connection)
-    await connection.send(
+    if not hub.try_add(connection):
+        await websocket.close(code=4429, reason="connection limit reached")
+        return
+    await websocket.accept()
+    connection.start()
+    ready_sent = await connection.send(
         control_event(
             "connection.ready",
             payload={
@@ -390,13 +517,29 @@ async def websocket_endpoint(
                 "workspace_ids": sorted(claims.workspace_ids),
                 "protocol_version": "1",
             },
-        )
+        ),
+        wait=True,
     )
+    if not ready_sent:
+        hub.discard(connection)
+        return
+    try:
+        await _receive_commands(websocket, connection, max_message_bytes)
+    finally:
+        hub.discard(connection)
+        await connection.close()
+
+
+async def _receive_commands(
+    websocket: WebSocket,
+    connection: WebSocketConnection,
+    max_message_bytes: int,
+) -> None:
     try:
         while True:
             raw = await websocket.receive_text()
             if len(raw.encode("utf-8")) > max_message_bytes:
-                await websocket.close(code=1009, reason="message too large")
+                await connection.close(code=1009, reason="message too large")
                 return
             request_id: str | None = None
             try:
@@ -414,6 +557,3 @@ async def websocket_endpoint(
                 )
     except WebSocketDisconnect:
         pass
-    finally:
-        hub.discard(connection)
-        await connection.close()

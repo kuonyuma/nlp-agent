@@ -106,9 +106,16 @@ def create_app(
 ) -> FastAPI:
     web_config = settings.web_runtime
     auth = auth or SameOriginSessionAuth.from_config(web_config)
-    hub = WebSocketHub()
+    hub = WebSocketHub(
+        max_connections=int(web_config.get("ws_max_connections", 200)),
+        max_connections_per_user=int(
+            web_config.get("ws_max_connections_per_user", 10)
+        ),
+    )
     stream_queue_size = int(settings.gateway_runtime.get("stream_queue_size", 500))
     max_ws_message_bytes = int(web_config.get("max_ws_message_bytes", 1_048_576))
+    ws_send_queue_size = int(web_config.get("ws_send_queue_size", 256))
+    ws_send_timeout_s = float(web_config.get("ws_send_timeout_s", 10))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -118,6 +125,7 @@ def create_app(
         try:
             yield
         finally:
+            await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()
 
@@ -254,7 +262,7 @@ def create_app(
             {
                 "status": "ready" if ready else "not_ready",
                 "active_turns": health.active_turns,
-                "pending_outbox": health.pending_outbox,
+                "durable_events": health.durable_events,
             },
             status_code=200 if ready else 503,
         )
@@ -473,7 +481,11 @@ def create_app(
                 "pong",
                 "server.shutdown",
             ],
-            "limits": {"max_websocket_message_bytes": max_ws_message_bytes},
+            "limits": {
+                "max_websocket_message_bytes": max_ws_message_bytes,
+                "websocket_send_queue_size": ws_send_queue_size,
+                "websocket_send_timeout_s": ws_send_timeout_s,
+            },
         }
 
     @app.patch("/api/v1/settings", tags=["settings"])
@@ -502,6 +514,8 @@ def create_app(
             hub=hub,
             max_message_bytes=max_ws_message_bytes,
             max_queue=stream_queue_size,
+            send_queue_size=ws_send_queue_size,
+            send_timeout_s=ws_send_timeout_s,
         )
 
     static_dir_value = str(web_config.get("static_dir", "")).strip()
