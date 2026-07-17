@@ -213,12 +213,19 @@ class TelemetryRepository:
         }
 
     def list_traces(self, *, limit: int = 100, session_id: str | None = None,
-                    status: str | None = None) -> list[dict[str, Any]]:
+                    status: str | None = None, user_id: str | None = None,
+                    workspace_ids: frozenset[str] | None = None) -> list[dict[str, Any]]:
         clauses, args = [], []
         if session_id:
             clauses.append("session_id=?"); args.append(session_id)
         if status:
             clauses.append("status=?"); args.append(status)
+        if user_id:
+            clauses.append("user_id=?"); args.append(user_id)
+        if workspace_ids and "*" not in workspace_ids:
+            marks = ",".join("?" for _ in workspace_ids)
+            clauses.append(f"workspace_id IN ({marks})")
+            args.extend(sorted(workspace_ids))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         return self._decode(self._rows(
             f"SELECT * FROM traces{where} ORDER BY started_at DESC LIMIT ?",
@@ -243,17 +250,28 @@ class TelemetryRepository:
             "SELECT * FROM daily_metrics WHERE day>=? ORDER BY day,component,name", (since,)
         )
 
-    def sessions(self, days: int = 30, limit: int = 100) -> list[dict[str, Any]]:
+    def sessions(self, days: int = 30, limit: int = 100, *,
+                 user_id: str | None = None,
+                 workspace_ids: frozenset[str] | None = None) -> list[dict[str, Any]]:
         since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        clauses = ["started_at>=?", "completed_at IS NOT NULL"]
+        args: list[Any] = [since]
+        if user_id:
+            clauses.append("user_id=?"); args.append(user_id)
+        if workspace_ids and "*" not in workspace_ids:
+            marks = ",".join("?" for _ in workspace_ids)
+            clauses.append(f"workspace_id IN ({marks})")
+            args.extend(sorted(workspace_ids))
+        where = " AND ".join(clauses)
         return self._rows(
-            """SELECT session_id,workspace_id,user_id,channel,COUNT(*) turns,
+            f"""SELECT session_id,workspace_id,user_id,channel,COUNT(*) turns,
                       SUM(CASE WHEN status IN ('error','timeout') THEN 1 ELSE 0 END) errors,
                       CAST(AVG(duration_ms) AS INTEGER) avg_duration_ms,
                       SUM(total_tokens) total_tokens,MAX(started_at) last_seen
-               FROM traces WHERE started_at>=? AND completed_at IS NOT NULL
+               FROM traces WHERE {where}
                GROUP BY session_id,workspace_id,user_id,channel
                ORDER BY last_seen DESC LIMIT ?""",
-            (since, min(max(1, limit), 500)),
+            (*args, min(max(1, limit), 500)),
         )
 
     def recent_events(self, *, limit: int = 200, level: str | None = None,
@@ -290,6 +308,24 @@ class TelemetryRepository:
                 self._conn.execute(f"DELETE FROM spans WHERE trace_id IN ({marks})", old)
                 self._conn.execute(f"DELETE FROM traces WHERE trace_id IN ({marks})", old)
             self._conn.execute("DELETE FROM events WHERE timestamp<?", (event_before,))
+
+    def delete_session(self, session_id: str) -> None:
+        with self._lock, self._conn:
+            trace_ids = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT trace_id FROM traces WHERE session_id=?", (session_id,)
+                ).fetchall()
+            ]
+            if trace_ids:
+                marks = ",".join("?" for _ in trace_ids)
+                self._conn.execute(
+                    f"DELETE FROM spans WHERE trace_id IN ({marks})", trace_ids
+                )
+                self._conn.execute(
+                    f"DELETE FROM events WHERE trace_id IN ({marks})", trace_ids
+                )
+            self._conn.execute("DELETE FROM traces WHERE session_id=?", (session_id,))
 
     def health(self) -> dict[str, Any]:
         counts = {}

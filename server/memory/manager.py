@@ -324,7 +324,10 @@ class MemoryManager:
             if duplicate:
                 return duplicate
             record = MemoryArchiveRecord(
-                cursor=max((row.cursor for row in existing), default=0) + 1,
+                cursor=max(
+                    self.get_curator_cursor(),
+                    max((row.cursor for row in existing), default=0),
+                ) + 1,
                 source_id=source_id,
                 workspace_id=self.context.workspace_id,
                 user_id=self.context.user_id,
@@ -361,6 +364,19 @@ class MemoryManager:
                 continue
             records.append(record)
         return records
+
+    def delete_session_archives(self, session_id: str) -> int:
+        """Remove one session's short-term archives without touching durable topics."""
+        if not self.archive_file.exists():
+            return 0
+        with self._lock_for(self.archive_file):
+            records = self.read_archives()
+            kept = [record for record in records if record.session_id != session_id]
+            removed = len(records) - len(kept)
+            if removed:
+                content = "".join(record.model_dump_json() + "\n" for record in kept)
+                self._atomic_write(self.archive_file, content)
+            return removed
 
     def get_curator_cursor(self) -> int:
         if not self.curator_state_file.exists():

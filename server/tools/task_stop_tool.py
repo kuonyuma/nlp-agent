@@ -37,6 +37,7 @@ Side effects:
 """
 import json
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 from core.task_manager import global_task_manager
 from schemas.task_stop import TaskStopInputSpec, TaskStopOutputSpec
 
@@ -53,8 +54,13 @@ DESCRIPTION = """
 
 
 @tool("TaskStop", args_schema=TaskStopInputSpec, description=DESCRIPTION)
-async def task_stop_tool(task_id: str = None, shell_id: str = None) -> str:
+async def task_stop_tool(
+    task_id: str = None,
+    shell_id: str = None,
+    config: RunnableConfig | None = None,
+) -> str:
     target_id = task_id or shell_id
+    session_id = (config or {}).get("configurable", {}).get("thread_id", "")
     # 查验底层系统是否有这个任务
     task = global_task_manager.get_task(target_id)
 
@@ -65,6 +71,14 @@ async def task_stop_tool(task_id: str = None, shell_id: str = None) -> str:
             success=False,
             message=f"No task found with ID: {target_id}",
             error_code=1
+        ).model_dump_json(exclude_none=True)
+
+    if not session_id or task.session_id != session_id:
+        logger.warning("拒绝跨会话停止任务", task_id=target_id, session_id=session_id)
+        return TaskStopOutputSpec(
+            success=False,
+            message="Task does not belong to the current session.",
+            error_code=403,
         ).model_dump_json(exclude_none=True)
 
     # 失败路径 2：任务没在运行
