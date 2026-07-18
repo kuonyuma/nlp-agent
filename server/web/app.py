@@ -35,10 +35,28 @@ from server.web.contracts import (
     InjectChatBody,
     SubmitChatBody,
     ToolApprovalBody,
+    UpdateCustomToolsBody,
+    UpdateToolPoliciesBody,
     UpdateSettingsBody,
+    McpServerBody,
+    SkillBody,
+    WorkerProfileBody,
 )
 from server.web.protocol import control_event
-from server.web.developer import developer_snapshot
+from server.web.developer import developer_snapshot, require_admin
+from server.web.developer_runtime import (
+    DeveloperConfigurationError,
+    delete_mcp_server,
+    delete_skill,
+    delete_worker_profile,
+    read_skill,
+    test_mcp_server,
+    update_custom_tools,
+    update_tool_policies,
+    upsert_mcp_server,
+    upsert_skill,
+    upsert_worker_profile,
+)
 from server.teacher.models import UpdateTeachingGoals
 from server.teacher.service import teacher_service
 from server.web.websocket import WebSocketHub, websocket_endpoint
@@ -251,6 +269,16 @@ def create_app(
             code="validation_error",
             title="Request validation failed",
             detail=str(error.errors()),
+        )
+
+    @app.exception_handler(DeveloperConfigurationError)
+    async def developer_configuration_error(request: Request, error: DeveloperConfigurationError):
+        return _problem(
+            request,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="developer_configuration_invalid",
+            title="Developer configuration is invalid",
+            detail=str(error),
         )
 
     @app.get("/health/live", tags=["health"])
@@ -496,6 +524,56 @@ def create_app(
     @app.get("/api/v1/developer/snapshot", tags=["developer"])
     async def get_developer_snapshot(request: Request, principal: Principal):
         return await developer_snapshot(principal, request.app.state.gateway)
+
+    @app.put("/api/v1/developer/tools/policies", tags=["developer"])
+    async def put_tool_policies(body: UpdateToolPoliciesBody, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await update_tool_policies(body.policies)
+
+    @app.put("/api/v1/developer/tools/custom", tags=["developer"])
+    async def put_custom_tools(body: UpdateCustomToolsBody, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await update_custom_tools(body.custom)
+
+    @app.put("/api/v1/developer/mcp/{name}", tags=["developer"])
+    async def put_mcp_server(name: str, body: McpServerBody, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await upsert_mcp_server(name, body.config)
+
+    @app.delete("/api/v1/developer/mcp/{name}", tags=["developer"])
+    async def remove_mcp_server(name: str, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await delete_mcp_server(name)
+
+    @app.post("/api/v1/developer/mcp/{name}/test", tags=["developer"])
+    async def post_mcp_test(name: str, body: McpServerBody, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await test_mcp_server(name, body.config)
+
+    @app.put("/api/v1/developer/skills/{name}", tags=["developer"])
+    async def put_skill(name: str, body: SkillBody, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await upsert_skill(name, body.content)
+
+    @app.get("/api/v1/developer/skills/{name}", tags=["developer"])
+    async def get_skill(name: str, principal: Principal):
+        require_admin(principal)
+        return read_skill(name)
+
+    @app.delete("/api/v1/developer/skills/{name}", tags=["developer"])
+    async def remove_skill(name: str, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await delete_skill(name)
+
+    @app.put("/api/v1/developer/worker-profiles/{name}", tags=["developer"])
+    async def put_worker_profile(name: str, body: WorkerProfileBody, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await upsert_worker_profile(name, body.profile)
+
+    @app.delete("/api/v1/developer/worker-profiles/{name}", tags=["developer"])
+    async def remove_worker_profile(name: str, principal: Principal, _claims: WriteClaims):
+        require_admin(principal)
+        return await delete_worker_profile(name)
 
     @app.get("/api/v1/teacher/overview", tags=["teacher"])
     async def teacher_overview(

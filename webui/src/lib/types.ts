@@ -31,7 +31,7 @@ export interface DeveloperSnapshot {
     mcp_servers: Record<string, Record<string, unknown>>;
     custom: Record<string, unknown>;
   };
-  skills: Array<{ name: string; path: string; format: string; bytes: number; modified_at: number }>;
+  skills: Array<{ name: string; path: string; source: string; description: string; allowed_tools: string[]; capabilities: string[]; available: boolean; missing_requirements: string[]; bytes: number; modified_at: number }>;
   agents: Record<string, unknown>;
   workspace: { roots: Array<{ name: string; path: string; exists: boolean; writable: boolean }> };
   web: Record<string, unknown>;

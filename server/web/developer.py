@@ -55,23 +55,27 @@ def _tool_snapshot() -> dict[str, Any]:
             for name, server in config.mcp_servers.items()
         },
         "custom": config.custom.model_dump(mode="json"),
+        "custom_reload_requires_restart": bool(config.custom.modules),
     }
 
 
 def _skills_snapshot() -> list[dict[str, Any]]:
-    root = BASE_DIR / "skills"
-    if not root.exists():
-        return []
     result: list[dict[str, Any]] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in {".md", ".yaml", ".yml"}:
-            continue
-        stat = path.stat()
+    from core.skill_loader import skill_loader
+
+    for skill in sorted(skill_loader.skills.values(), key=lambda item: item.name):
+        stat = skill.path.stat()
+        available, missing = skill.availability()
         result.append(
             {
-                "name": path.stem,
-                "path": path.relative_to(BASE_DIR).as_posix(),
-                "format": path.suffix.lstrip("."),
+                "name": skill.name,
+                "path": skill.path.relative_to(BASE_DIR).as_posix(),
+                "source": skill.source,
+                "description": skill.description,
+                "allowed_tools": sorted(skill.allowed_tools),
+                "capabilities": sorted(skill.capabilities),
+                "available": available,
+                "missing_requirements": missing,
                 "bytes": stat.st_size,
                 "modified_at": stat.st_mtime,
             }

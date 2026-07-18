@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-import yaml
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from core.runtime_config import load_runtime_config
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,9 +21,7 @@ class Settings(BaseSettings):
 
     def __init__(self, **values):
         super().__init__(**values)
-        yaml_path = BASE_DIR / "configs" / "agent_config.yaml"
-        with yaml_path.open("r", encoding="utf-8") as file:
-            self._config = yaml.safe_load(file) or {}
+        self._config = load_runtime_config()
 
     def _get_llm_config(self, name: str) -> dict:
         presets = self._config.get("model_presets", {})

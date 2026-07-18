@@ -67,6 +67,19 @@ export const api = {
       body: JSON.stringify(settings),
     }),
   getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
+  updateToolPolicies: (policies: Record<string, unknown>) =>
+    request<Record<string, unknown>>("/developer/tools/policies", { method: "PUT", body: JSON.stringify({ policies }) }),
+  updateCustomTools: (custom: Record<string, unknown>) => request<{ restart_required: boolean; reason: string }>("/developer/tools/custom", { method: "PUT", body: JSON.stringify({ custom }) }),
+  saveMcp: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/mcp/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  testMcp: (name: string, config: Record<string, unknown>) =>
+    request<{ ok: boolean; server: string; tools: string[] }>(`/developer/mcp/${encodeURIComponent(name)}/test`, { method: "POST", body: JSON.stringify({ config }) }),
+  deleteMcp: (name: string) => request<void>(`/developer/mcp/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  getSkill: (name: string) => request<{ name: string; content: string }>(`/developer/skills/${encodeURIComponent(name)}`),
+  saveSkill: (name: string, content: string) => request<Record<string, unknown>>(`/developer/skills/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ content }) }),
+  deleteSkill: (name: string) => request<void>(`/developer/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  saveWorkerProfile: (name: string, profile: Record<string, unknown>) => request<Record<string, unknown>>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ profile }) }),
+  deleteWorkerProfile: (name: string) => request<void>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "DELETE" }),
   getTeacherOverview: (workspaceId = "default", days = 30) =>
     request<TeacherOverview>(`/teacher/overview?workspace_id=${encodeURIComponent(workspaceId)}&days=${days}`),
   updateTeachingGoals: (workspaceId: string, goals: Omit<TeachingGoals, "workspace_id">) =>

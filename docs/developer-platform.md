@@ -29,10 +29,26 @@ local signed session must contain the `admin` role. The workspace provides:
 - Skills and local workspace data roots;
 - explicit unavailable states for Apps, Cron, Browser and Voice integrations.
 
-`GET /api/v1/developer/snapshot` is read-only. Secret, password, API-key,
-authorization and access-token fields are removed or reduced to a configured
-boolean before serialization. Runtime configuration remains file-owned by
-`.env` and `configs/agent_config.yaml`.
+The control plane has a complete Tool / Skill / MCP loop:
+
+- Tool policies can be edited and take effect for newly-built ToolSets.
+- Workspace Skills can be created, edited and deleted. They are stored in
+  `.data/skills/<name>/SKILL.md` and reload immediately; a workspace Skill with
+  the same name overrides a project Skill.
+- Worker Profiles can be edited and reload with the Skill catalog.
+- MCP servers can be tested with an isolated catalog, then saved and hot
+  reconnected into the live Tool Runtime.
+- Custom Python Tool discovery settings can be saved, but intentionally require
+  an explicit Runtime restart: dynamically unloading imported Python modules is
+  unsafe.
+
+The editable state is stored atomically in
+`.data/developer/runtime-overrides.yaml`, then merged with the commented base
+configuration in `configs/agent_config.yaml`. This means WebUI changes never
+rewrite or discard comments in the base configuration. Secret, password,
+API-key, authorization and access-token fields are removed or reduced to a
+configured boolean before snapshots are returned. Writes require the local
+`admin` role, same-origin validation, and CSRF validation.
 
 ## Stage 6: isolated monitor
 
