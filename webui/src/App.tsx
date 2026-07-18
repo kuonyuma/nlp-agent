@@ -61,7 +61,7 @@ export function App() {
         </div>
         <Composer disabled={workspace.socketStatus !== "connected"} running={workspace.isRunning} onSend={(text) => void workspace.send(text)} onCancel={workspace.cancel} />
       </main>
-      <LearningPanel open={learningOpen} onClose={() => setLearningOpen(false)} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setLearningOpen(false); void workspace.send(content); }} />
+      <LearningPanel open={learningOpen} onClose={() => setLearningOpen(false)} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setLearningOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />
       {learningOpen && <button className="learning-backdrop" type="button" aria-label="关闭学习记录" onClick={() => setLearningOpen(false)} />}
       <SettingsDialog open={settingsOpen} settings={workspace.settings} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} />
       {archived.length > 0 && <span className="sr-only">已归档 {archived.length} 个学习对话</span>}

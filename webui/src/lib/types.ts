@@ -79,6 +79,7 @@ export interface SessionLearningMeta {
   archived?: boolean;
   summary?: string;
   concepts?: string[];
+  reviewConcepts?: string[];
   updatedAt?: number;
 }
 
