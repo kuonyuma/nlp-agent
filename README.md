@@ -65,6 +65,14 @@ Build its frontend with `cd webui; npm run build:monitor`. Architecture,
 security boundaries, ports, and development commands are documented in
 [`docs/developer-platform.md`](docs/developer-platform.md).
 
+## Teacher mode
+
+Teacher mode is available on the primary WebUI at `/teacher`. It provides local
+teaching-goal configuration, student-question classification, frequent-question
+analysis, weak-topic inference, and topic/difficulty statistics. Course, Prompt,
+and durable report repository interfaces are reserved for the later account and
+database phase. See [`docs/teacher-mode.md`](docs/teacher-mode.md).
+
 在 `.env` 中至少配置 `DEEPSEEK_API_KEY`。可在
 `configs/agent_config.yaml` 中修改 Coordinator、Worker 模型和按智能体名称的覆盖规则。
 

@@ -25,6 +25,13 @@ concept chips) is isolated in `localStorage` under
   port `8766` in production and Vite port `5174` during frontend development,
   keeping monitoring traffic away from student chat.
 
+## Teacher experience
+
+`/teacher/*` shares the student WebUI port and provides a teacher-only education
+view: teaching goals, classified student questions, frequent questions, weak
+knowledge points, and topic/difficulty/type statistics. Course, Prompt, and
+durable report pages already have stable backend interface placeholders.
+
 ## Development
 
 ```powershell
