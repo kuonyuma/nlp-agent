@@ -64,6 +64,17 @@ def run_secret_command(arguments: list[str], *, env_path: Path) -> int:
             print(f"已保存 {name} 到 Windows 凭据管理器。")
             return 0
 
+        if command == "setup":
+            saved = 0
+            print("逐项输入密钥；直接回车会跳过该项，输入不会回显。")
+            for name in MANAGED_SECRET_NAMES:
+                value = getpass.getpass(f"{name}: ")
+                if value:
+                    set_secret(name, value)
+                    saved += 1
+            print(f"已保存 {saved} 项到 Windows 凭据管理器。")
+            return 0
+
         if command == "delete" and len(arguments) == 2:
             name = arguments[1]
             print("已删除。" if delete_secret(name) else "该密钥不存在。")
@@ -86,5 +97,5 @@ def run_secret_command(arguments: list[str], *, env_path: Path) -> int:
         print(f"密钥操作失败：{exc}")
         return 1
 
-    print("用法：python main.py secrets [status|set NAME|delete NAME|migrate-env [--remove-from-env]]")
+    print("用法：python main.py secrets [status|setup|set NAME|delete NAME|migrate-env [--remove-from-env]]")
     return 2

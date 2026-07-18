@@ -19,6 +19,12 @@ python main.py secrets set DEEPSEEK_API_KEY
 python main.py secrets set NLP_AGENT_WEB_SECRET
 ```
 
+首次在新电脑上配置多个密钥，可一次执行并按提示输入；不需要的项目直接回车跳过：
+
+```powershell
+uv run python main.py secrets setup
+```
+
 检查状态或删除一项密钥：
 
 ```powershell

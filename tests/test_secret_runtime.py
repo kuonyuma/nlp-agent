@@ -50,3 +50,16 @@ def test_status_lists_managed_credentials_after_env_is_clean(monkeypatch, tmp_pa
     output = capsys.readouterr().out
     assert "DEEPSEEK_API_KEY: Windows 凭据管理器" in output
     assert "TAVILY_API_KEY: 未配置" in output
+
+
+def test_setup_saves_only_values_entered(monkeypatch, tmp_path: Path) -> None:
+    answers = iter(["deepseek-value", "", "tavily-value", *([""] * 8)])
+    saved: dict[str, str] = {}
+    monkeypatch.setattr(secret_cli.getpass, "getpass", lambda _: next(answers))
+    monkeypatch.setattr(secret_cli, "set_secret", saved.__setitem__)
+
+    assert secret_cli.run_secret_command(["setup"], env_path=tmp_path / ".env") == 0
+    assert saved == {
+        "DEEPSEEK_API_KEY": "deepseek-value",
+        "NLP_AGENT_WEB_SECRET": "tavily-value",
+    }
