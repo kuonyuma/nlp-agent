@@ -37,6 +37,46 @@ export interface DeveloperSnapshot {
   web: Record<string, unknown>;
 }
 
+export interface TeachingGoals {
+  workspace_id: string;
+  course_title: string;
+  description: string;
+  objectives: string[];
+  focus_topics: string[];
+  target_level: "beginner" | "intermediate" | "advanced";
+}
+
+export interface ClassifiedQuestion {
+  turn_id: string;
+  session_id: string;
+  user_id: string;
+  workspace_id: string;
+  question: string;
+  topic: string;
+  question_type: string;
+  difficulty: "beginner" | "intermediate" | "advanced";
+  keywords: string[];
+  status: string;
+  created_at: string;
+  has_error: boolean;
+}
+
+export interface TeacherDistribution { name: string; count: number; percentage: number }
+export interface TeacherOverview {
+  workspace_id: string;
+  period_days: number;
+  goals: TeachingGoals;
+  revision: number;
+  updated_at: string | null;
+  summary: { questions: number; sessions: number; students: number; error_questions: number };
+  questions: ClassifiedQuestion[];
+  frequent_questions: Array<{ question: string; count: number; topic: string; question_type: string }>;
+  weak_topics: Array<{ topic: string; score: number; questions: number; repeat_questions: number; errors: number; sessions: number; risk: "low" | "medium" | "high" }>;
+  topic_distribution: TeacherDistribution[];
+  difficulty_distribution: TeacherDistribution[];
+  type_distribution: TeacherDistribution[];
+}
+
 export interface SessionSummary {
   session_id: string;
   user_id: string;
