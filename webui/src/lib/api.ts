@@ -1,4 +1,4 @@
-import type { AuthSession, SessionSummary, TurnRecord, UserSettings } from "./types";
+import type { AuthSession, DeveloperSnapshot, SessionSummary, TurnRecord, UserSettings } from "./types";
 
 const API_ROOT = "/api/v1";
 
@@ -66,4 +66,5 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(settings),
     }),
+  getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
 };

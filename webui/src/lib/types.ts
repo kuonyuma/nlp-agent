@@ -9,8 +9,32 @@ export type TurnStatus =
 export interface AuthSession {
   user_id: string;
   workspace_ids: string[];
+  roles: string[];
   csrf_token: string;
   expires_at: number;
+}
+
+export interface DeveloperSnapshot {
+  runtime: Record<string, unknown>;
+  features: Record<string, { available: boolean; reason: string }>;
+  models: {
+    defaults: Record<string, unknown>;
+    routes: Record<string, unknown>;
+    models: Record<string, Record<string, unknown>>;
+    presets: Record<string, Record<string, unknown>>;
+    providers: Record<string, Record<string, unknown>>;
+  };
+  tools: {
+    catalog_revision: number;
+    items: Array<Record<string, unknown>>;
+    policies: Record<string, unknown>;
+    mcp_servers: Record<string, Record<string, unknown>>;
+    custom: Record<string, unknown>;
+  };
+  skills: Array<{ name: string; path: string; format: string; bytes: number; modified_at: number }>;
+  agents: Record<string, unknown>;
+  workspace: { roots: Array<{ name: string; path: string; exists: boolean; writable: boolean }> };
+  web: Record<string, unknown>;
 }
 
 export interface SessionSummary {
