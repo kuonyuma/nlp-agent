@@ -18,7 +18,7 @@ const sections: Array<{ id: SettingsSection; label: string; icon: typeof Setting
 const levelLabel: Record<LearningContext["level"], string> = { beginner: "入门", intermediate: "进阶", advanced: "高阶" };
 const modeLabel: Record<LearningContext["mode"], string> = { explain: "讲解", socratic: "苏格拉底追问", practice: "练习", review: "复习" };
 
-export function SettingsDialog({ open, settings, learningContext, onClose, onChange, onLearningContextChange, onOpenDeveloper }: {
+export function SettingsDialog({ open, settings, learningContext, onClose, onChange, onLearningContextChange, onOpenDeveloper, onOpenTeacher }: {
   open: boolean;
   settings: UserSettings;
   learningContext: LearningContext;
@@ -26,6 +26,7 @@ export function SettingsDialog({ open, settings, learningContext, onClose, onCha
   onChange: (patch: Partial<UserSettings>) => void;
   onLearningContextChange: (context: LearningContext) => void;
   onOpenDeveloper: () => void;
+  onOpenTeacher: () => void;
 }) {
   const [section, setSection] = useState<SettingsSection>("general");
   if (!open) return null;
@@ -44,7 +45,7 @@ export function SettingsDialog({ open, settings, learningContext, onClose, onCha
           <div className="settings-scroll">
             {section === "general" && <>
               <SettingGroup title="界面语言" description="语言偏好会同步保存到本地后端。"><label className="settings-field"><span><Globe2 size={15} />阅读语言</span><select value={settings.locale} onChange={(event) => onChange({ locale: event.target.value })}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></SettingGroup>
-              <SettingGroup title="学习空间" description="当前为单一同域学习空间；课程、班级和学生账号将在后续接入。"><div className="settings-note">默认工作空间：<b>{settings.default_workspace_id ?? "default"}</b></div></SettingGroup>
+              <SettingGroup title="学习空间" description="当前为单一同域学习空间；课程、班级和学生账号将在后续接入。"><div className="settings-note">默认工作空间：<b>{settings.default_workspace_id ?? "default"}</b></div><button className="settings-link-button" type="button" onClick={onOpenTeacher}>进入教师模式 <ChevronRight size={15} /></button></SettingGroup>
             </>}
             {section === "appearance" && <SettingGroup title="主题" description="跟随系统，或固定为浅色、深色主题。"><div className="theme-grid"><ThemeButton active={settings.theme === "light"} icon={<Sun size={18} />} label="浅色" onClick={() => onChange({ theme: "light" })} /><ThemeButton active={settings.theme === "dark"} icon={<Moon size={18} />} label="深色" onClick={() => onChange({ theme: "dark" })} /><ThemeButton active={settings.theme === "system"} icon={<MonitorCog size={18} />} label="跟随系统" onClick={() => onChange({ theme: "system" })} /></div></SettingGroup>}
             {section === "chat" && <><SettingGroup title="回答呈现" description="控制实时回答在页面上的呈现方式。"><ToggleRow title="显示思考过程" detail="显示模型返回的推理流；教学回答本身不受影响。" checked={settings.show_reasoning} onChange={(checked) => onChange({ show_reasoning: checked })} /><label className="settings-field"><span>流式渲染节奏<small>较快更实时，较慢更稳定</small></span><select value={settings.stream_render_interval_ms} onChange={(event) => onChange({ stream_render_interval_ms: Number(event.target.value) })}><option value={0}>即时</option><option value={30}>平衡（30 ms）</option><option value={80}>平滑（80 ms）</option></select></label></SettingGroup><SettingGroup title="快捷操作" description="发送消息后，可以在学习记录中生成练习、标记待复习概念，或导出 Markdown 学习报告。"><div className="settings-note">对话发送：Enter；换行：Shift + Enter</div></SettingGroup></>}

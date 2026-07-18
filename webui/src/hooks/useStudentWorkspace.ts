@@ -207,11 +207,11 @@ export function useStudentWorkspace() {
     void (async () => {
       try {
         await ensureAuth();
-        const [sessionItems, settingsResponse] = await Promise.all([loadSessions(), api.getSettings()]);
+        const [, settingsResponse] = await Promise.all([loadSessions(), api.getSettings()]);
         if (cancelled) return;
         setSettings({ ...DEFAULT_SETTINGS, ...(settingsResponse.preferences.settings ?? {}) });
-        const first = sessionItems.find((session) => !loadLearningPreferences().sessions[session.session_id]?.archived) ?? sessionItems[0];
-        if (first) setActiveSessionId(first.session_id);
+        // Match nanobot's home behavior: boot into a clean composer instead of
+        // forcing the most recent transcript open. History remains in Sidebar.
         setBootStatus("ready");
       } catch (reason) {
         if (!cancelled) {
