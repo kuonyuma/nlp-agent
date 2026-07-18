@@ -16,6 +16,14 @@ export default defineConfig(({ mode }) => {
       outDir: "dist",
       emptyOutDir: true,
       sourcemap: false,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes("node_modules/katex")) return "katex";
+            if (id.includes("node_modules/react-markdown") || id.includes("node_modules/remark-") || id.includes("node_modules/rehype-")) return "markdown";
+          },
+        },
+      },
     },
     server: {
       host: "127.0.0.1",
