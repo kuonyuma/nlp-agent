@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
-from configs.settings import settings
+from dotenv import dotenv_values
+
+from configs.settings import BASE_DIR, settings
 from core.model_runtime.adapters.deepseek import DeepSeekAdapter
 from core.model_runtime.adapters.openai_compatible import OpenAICompatibleAdapter
 from core.model_runtime.contracts import ModelPresetConfig, ModelRuntimeConfig
@@ -25,6 +28,7 @@ class ModelFactory:
         self.registry = registry or global_provider_registry
         _register_builtins(self.registry)
         self._cache: dict[tuple[str, ...], ResilientChatModel] = {}
+        self._dotenv = dotenv_values(BASE_DIR / ".env")
 
     @classmethod
     def from_settings(cls) -> "ModelFactory":
@@ -37,7 +41,7 @@ class ModelFactory:
         }))
 
     def _api_key(self, env_name: str) -> str:
-        return settings.secret_value(env_name)
+        return str(os.environ.get(env_name) or getattr(settings, env_name, "") or self._dotenv.get(env_name) or "")
 
     def _candidate(self, preset_name: str, preset: ModelPresetConfig) -> ModelCandidate:
         definition = self.config.models[preset.model]
