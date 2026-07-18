@@ -80,6 +80,7 @@ export function useStudentWorkspace() {
   const socketRef = useRef<StudentSocket | null>(null);
   const pendingRequests = useRef(new Map<string, string>());
   const loadGeneration = useRef(0);
+  const creationRef = useRef<Promise<string> | null>(null);
 
   const persistPreferences = useCallback((update: (current: LearningPreferences) => LearningPreferences) => {
     setPreferences((current) => {
@@ -250,12 +251,21 @@ export function useStudentWorkspace() {
     root.classList.toggle("dark", dark);
   }, [settings.locale, settings.theme]);
 
-  const createSession = useCallback(async () => {
-    const session = await api.createSession();
-    setSessions((current) => [session, ...current]);
-    updateSessionMeta(session.session_id, { topic: preferences.context.topic, title: "新的学习对话" });
-    setActiveSessionId(session.session_id);
-    return session.session_id;
+  const createSession = useCallback(() => {
+    if (creationRef.current) return creationRef.current;
+    const creation = (async () => {
+      const session = await api.createSession();
+      setSessions((current) => current.some((item) => item.session_id === session.session_id) ? current : [session, ...current]);
+      updateSessionMeta(session.session_id, { topic: preferences.context.topic, title: "新的学习对话" });
+      setActiveSessionId(session.session_id);
+      return session.session_id;
+    })();
+    creationRef.current = creation;
+    void creation.then(
+      () => { creationRef.current = null; },
+      () => { creationRef.current = null; },
+    );
+    return creation;
   }, [preferences.context.topic, updateSessionMeta]);
 
   const send = useCallback(async (content: string) => {

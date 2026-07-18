@@ -4,9 +4,10 @@ import { useMemo, useState } from "react";
 import { deriveTitle } from "@/lib/learning-preferences";
 import type { LearningPreferences, SessionLearningMeta, SessionSummary } from "@/lib/types";
 
-function formatTime(timestamp?: number): string {
+function formatTime(timestamp?: number | string): string {
   if (!timestamp) return "";
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(timestamp * 1000));
+  const date = typeof timestamp === "number" ? new Date(timestamp * 1000) : new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
 }
 
 export function Sidebar({ sessions, preferences, activeId, open, onClose, onSelect, onCreate, onMeta, onDelete, onSettings, onDeveloper, onTeacher }: {

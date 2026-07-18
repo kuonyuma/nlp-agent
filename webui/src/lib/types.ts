@@ -82,8 +82,8 @@ export interface SessionSummary {
   user_id: string;
   workspace_id: string;
   channel: string;
-  created_at?: number;
-  last_active?: number;
+  created_at?: number | string;
+  last_active?: number | string;
 }
 
 export interface TurnRecord {
