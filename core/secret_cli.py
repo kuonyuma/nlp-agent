@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from core.secret_store import (
+    MANAGED_SECRET_NAMES,
     SecretStoreUnavailable,
     delete_secret,
     looks_like_secret_name,
@@ -44,12 +45,16 @@ def run_secret_command(arguments: list[str], *, env_path: Path) -> int:
     try:
         if command == "status":
             values = _env_secrets(env_path)
-            names = sorted(values)
+            names = sorted(set(values) | set(MANAGED_SECRET_NAMES))
             states = secret_status(names)
-            if not names:
-                print("系统凭据库中没有待迁移的 .env 密钥。")
             for name in names:
-                location = "Windows 凭据管理器" if states[name] else ".env（待迁移）"
+                location = (
+                    "Windows 凭据管理器"
+                    if states[name]
+                    else ".env（待迁移）"
+                    if name in values
+                    else "未配置"
+                )
                 print(f"{name}: {location}")
             return 0
 

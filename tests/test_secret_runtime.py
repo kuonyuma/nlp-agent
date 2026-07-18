@@ -36,3 +36,17 @@ def test_migrate_env_removes_assignments_with_whitespace(monkeypatch, tmp_path: 
 
     assert stored == {"TAVILY_API_KEY": "tavily-value", "REDIS_PASSWORD": "redis-value"}
     assert env_path.read_text(encoding="utf-8") == "REDIS_HOST=localhost\n"
+
+
+def test_status_lists_managed_credentials_after_env_is_clean(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setattr(
+        secret_cli,
+        "secret_status",
+        lambda names: {name: name == "DEEPSEEK_API_KEY" for name in names},
+    )
+
+    assert secret_cli.run_secret_command(["status"], env_path=tmp_path / ".env") == 0
+
+    output = capsys.readouterr().out
+    assert "DEEPSEEK_API_KEY: Windows 凭据管理器" in output
+    assert "TAVILY_API_KEY: 未配置" in output

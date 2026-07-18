@@ -11,6 +11,19 @@ from collections.abc import Iterable
 
 
 SERVICE_NAME = "Pro_NLP"
+MANAGED_SECRET_NAMES = (
+    "AMAP_API_KEY",
+    "ARK_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "LANGCHAIN_API_KEY",
+    "MYSQL_PASSWORD",
+    "NLP_AGENT_WEB_SECRET",
+    "QWEATHER_API_KEY",
+    "REDIS_PASSWORD",
+    "TAVILY_API_KEY",
+    "aliyun_API_KEY",
+    "volcengine_API_KEY",
+)
 
 
 class SecretStoreUnavailable(RuntimeError):
