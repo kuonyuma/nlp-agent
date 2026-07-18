@@ -23,7 +23,7 @@ web:
   cookie_ttl_s: 86400
   cookie_secure: false
   allowed_hosts: [127.0.0.1, localhost, testserver]
-  allowed_origins: [http://127.0.0.1:8765, http://localhost:8765]
+  allowed_origins: [http://127.0.0.1:8765, http://localhost:8765, http://127.0.0.1:5173]
   max_ws_message_bytes: 1048576
   ws_send_queue_size: 256
   ws_send_timeout_s: 10
@@ -31,7 +31,7 @@ web:
   ws_ping_timeout_s: 20
   ws_max_connections: 200
   ws_max_connections_per_user: 10
-  static_dir: ""
+  static_dir: webui/dist
 
 providers:
   deepseek:

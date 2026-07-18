@@ -520,6 +520,8 @@ def create_app(
 
     static_dir_value = str(web_config.get("static_dir", "")).strip()
     static_dir = Path(static_dir_value).expanduser() if static_dir_value else None
+    if static_dir is not None and not static_dir.is_absolute():
+        static_dir = Path(__file__).resolve().parents[2] / static_dir
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="webui")
     else:
