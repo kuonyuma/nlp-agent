@@ -158,4 +158,5 @@ export interface UserSettings {
   theme: "system" | "light" | "dark";
   show_reasoning: boolean;
   stream_render_interval_ms: number;
+  default_workspace_id?: string;
 }

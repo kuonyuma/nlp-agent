@@ -1,22 +1,63 @@
-import { Moon, Sun, X } from "lucide-react";
+import { BookOpenCheck, ChevronRight, CircleHelp, Database, Gauge, Globe2, MonitorCog, Moon, Settings2, Sun, X } from "lucide-react";
+import { useState } from "react";
+import type { ReactNode } from "react";
 
-import type { UserSettings } from "@/lib/types";
+import type { LearningContext, UserSettings } from "@/lib/types";
 
-export function SettingsDialog({ open, settings, onClose, onChange }: {
+type SettingsSection = "general" | "appearance" | "chat" | "learning" | "data" | "advanced";
+
+const sections: Array<{ id: SettingsSection; label: string; icon: typeof Settings2 }> = [
+  { id: "general", label: "通用", icon: Settings2 },
+  { id: "appearance", label: "外观", icon: Sun },
+  { id: "chat", label: "对话与流式", icon: Gauge },
+  { id: "learning", label: "学习体验", icon: BookOpenCheck },
+  { id: "data", label: "数据与隐私", icon: Database },
+  { id: "advanced", label: "高级设置", icon: MonitorCog },
+];
+
+const levelLabel: Record<LearningContext["level"], string> = { beginner: "入门", intermediate: "进阶", advanced: "高阶" };
+const modeLabel: Record<LearningContext["mode"], string> = { explain: "讲解", socratic: "苏格拉底追问", practice: "练习", review: "复习" };
+
+export function SettingsDialog({ open, settings, learningContext, onClose, onChange, onLearningContextChange, onOpenDeveloper }: {
   open: boolean;
   settings: UserSettings;
+  learningContext: LearningContext;
   onClose: () => void;
   onChange: (patch: Partial<UserSettings>) => void;
+  onLearningContextChange: (context: LearningContext) => void;
+  onOpenDeveloper: () => void;
 }) {
+  const [section, setSection] = useState<SettingsSection>("general");
   if (!open) return null;
+  const updateLearning = (patch: Partial<LearningContext>) => onLearningContextChange({ ...learningContext, ...patch });
+
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className="dialog-backdrop settings-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-label="偏好设置" onMouseDown={(event) => event.stopPropagation()}>
-        <header><div><strong>学生偏好设置</strong><p>只显示与学习体验相关的选项</p></div><button className="icon-button" type="button" onClick={onClose}><X size={18} /></button></header>
-        <div className="setting-row"><div><strong>界面主题</strong><p>跟随系统或手动选择</p></div><div className="segmented"><button className={settings.theme === "light" ? "active" : ""} onClick={() => onChange({ theme: "light" })}><Sun size={14} />浅色</button><button className={settings.theme === "dark" ? "active" : ""} onClick={() => onChange({ theme: "dark" })}><Moon size={14} />深色</button><button className={settings.theme === "system" ? "active" : ""} onClick={() => onChange({ theme: "system" })}>自动</button></div></div>
-        <label className="setting-row"><div><strong>界面语言</strong><p>语言偏好会同步到后端设置</p></div><select value={settings.locale} onChange={(event) => onChange({ locale: event.target.value })}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
-        <label className="setting-row"><div><strong>显示思考内容</strong><p>默认仅展示教育化处理状态</p></div><input type="checkbox" checked={settings.show_reasoning} onChange={(event) => onChange({ show_reasoning: event.target.checked })} /></label>
+        <aside className="settings-nav">
+          <div className="settings-nav-brand"><Settings2 size={19} /><span><strong>偏好设置</strong><small>学习空间</small></span></div>
+          <nav>{sections.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={section === id ? "active" : ""} onClick={() => setSection(id)}><Icon size={16} />{label}</button>)}</nav>
+          <p><CircleHelp size={14} />仅显示学生模式可安全调整的选项。</p>
+        </aside>
+        <div className="settings-content">
+          <header><div><strong>{sections.find((item) => item.id === section)?.label}</strong><p>{section === "advanced" ? "模型、工具与运行时配置在开发者工作台统一管理。" : "修改会立即保存，并在下次打开时恢复。"}</p></div><button className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}><X size={19} /></button></header>
+          <div className="settings-scroll">
+            {section === "general" && <>
+              <SettingGroup title="界面语言" description="语言偏好会同步保存到本地后端。"><label className="settings-field"><span><Globe2 size={15} />阅读语言</span><select value={settings.locale} onChange={(event) => onChange({ locale: event.target.value })}><option value="zh-CN">简体中文</option><option value="en">English</option></select></label></SettingGroup>
+              <SettingGroup title="学习空间" description="当前为单一同域学习空间；课程、班级和学生账号将在后续接入。"><div className="settings-note">默认工作空间：<b>{settings.default_workspace_id ?? "default"}</b></div></SettingGroup>
+            </>}
+            {section === "appearance" && <SettingGroup title="主题" description="跟随系统，或固定为浅色、深色主题。"><div className="theme-grid"><ThemeButton active={settings.theme === "light"} icon={<Sun size={18} />} label="浅色" onClick={() => onChange({ theme: "light" })} /><ThemeButton active={settings.theme === "dark"} icon={<Moon size={18} />} label="深色" onClick={() => onChange({ theme: "dark" })} /><ThemeButton active={settings.theme === "system"} icon={<MonitorCog size={18} />} label="跟随系统" onClick={() => onChange({ theme: "system" })} /></div></SettingGroup>}
+            {section === "chat" && <><SettingGroup title="回答呈现" description="控制实时回答在页面上的呈现方式。"><ToggleRow title="显示思考过程" detail="显示模型返回的推理流；教学回答本身不受影响。" checked={settings.show_reasoning} onChange={(checked) => onChange({ show_reasoning: checked })} /><label className="settings-field"><span>流式渲染节奏<small>较快更实时，较慢更稳定</small></span><select value={settings.stream_render_interval_ms} onChange={(event) => onChange({ stream_render_interval_ms: Number(event.target.value) })}><option value={0}>即时</option><option value={30}>平衡（30 ms）</option><option value={80}>平滑（80 ms）</option></select></label></SettingGroup><SettingGroup title="快捷操作" description="发送消息后，可以在学习记录中生成练习、标记待复习概念，或导出 Markdown 学习报告。"><div className="settings-note">对话发送：Enter；换行：Shift + Enter</div></SettingGroup></>}
+            {section === "learning" && <><SettingGroup title="默认学习上下文" description="会在新提问前附加教学目标；可随时在聊天顶部临时调整。"><label className="settings-field"><span>学习主题</span><input value={learningContext.topic} onChange={(event) => updateLearning({ topic: event.target.value })} placeholder="例如：依存句法" /></label><div className="settings-two-fields"><label className="settings-field"><span>难度</span><select value={learningContext.level} onChange={(event) => updateLearning({ level: event.target.value as LearningContext["level"] })}>{Object.entries(levelLabel).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="settings-field"><span>教学方式</span><select value={learningContext.mode} onChange={(event) => updateLearning({ mode: event.target.value as LearningContext["mode"] })}>{Object.entries(modeLabel).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></SettingGroup><SettingGroup title="学习记录" description="会话标题、概念、待复习标记和摘要仅存储在此浏览器；聊天内容由后端会话持久化。"><div className="settings-note">打开右侧“学习记录”可查看进度并导出报告。</div></SettingGroup></>}
+            {section === "data" && <><SettingGroup title="数据存储" description="Pro_NLP 当前采用同域、本地部署。不会从学生设置页暴露 Provider 密钥、工具权限或系统 Trace。"><div className="settings-note">实时事件用于断线恢复；已完成对话可通过学习记录导出。</div></SettingGroup><SettingGroup title="隐私说明" description="学生界面只显示教学语义。运行 Trace、Token、Worker 与工具参数仅在独立的开发者监控平台可见。"><button className="settings-link-button" type="button" onClick={onOpenDeveloper}>打开开发者工作台 <ChevronRight size={15} /></button></SettingGroup></>}
+            {section === "advanced" && <><SettingGroup title="开发者配置" description="与 nanobot 类似的 Provider、模型路由、MCP、Skills、Apps、Cron、运行时状态和调试数据已被隔离到开发者模式。"><button className="settings-primary-button" type="button" onClick={onOpenDeveloper}>前往开发者工作台 <ChevronRight size={16} /></button></SettingGroup><SettingGroup title="为什么不在这里显示？" description="学生模式避免暴露 API Key、原始 Tool JSON、工作区权限和 Agent 运维细节，以保持教学体验清晰、安全。" /></>}
+          </div>
+        </div>
       </section>
     </div>
   );
 }
+
+function SettingGroup({ title, description, children }: { title: string; description: string; children?: ReactNode }) { return <section className="settings-group"><div><h2>{title}</h2><p>{description}</p></div>{children}</section>; }
+function ToggleRow({ title, detail, checked, onChange }: { title: string; detail: string; checked: boolean; onChange: (checked: boolean) => void }) { return <label className="settings-toggle-row"><span><strong>{title}</strong><small>{detail}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /></label>; }
+function ThemeButton({ active, icon, label, onClick }: { active: boolean; icon: ReactNode; label: string; onClick: () => void }) { return <button type="button" className={active ? "active" : ""} onClick={onClick}>{icon}<span>{label}</span></button>; }
