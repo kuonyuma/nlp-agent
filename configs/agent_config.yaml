@@ -31,7 +31,7 @@ web:
   ws_ping_timeout_s: 20
   ws_max_connections: 200
   ws_max_connections_per_user: 10
-  static_dir: ""
+  static_dir: webui/dist
 
 providers:
   deepseek:
