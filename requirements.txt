@@ -5,6 +5,7 @@ langchain-core>=0.3
 langchain-deepseek>=0.1
 langchain-openai>=0.3
 langgraph>=0.2
+keyring>=25.0
 langgraph-checkpoint-sqlite>=2
 openai>=1.0
 pydantic>=2.0

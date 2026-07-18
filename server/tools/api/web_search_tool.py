@@ -35,10 +35,11 @@ class WebSearchResponse(BaseModel):
 async def web_search(query: str, max_results: int = 5) -> str:
     """搜索需要最新公开信息或外部资料的问题。"""
 
-    if not settings.TAVILY_API_KEY:
+    api_key = settings.secret_value("TAVILY_API_KEY")
+    if not api_key:
         return '{"error":"TAVILY_API_KEY 未配置"}'
     payload = {
-        "api_key": settings.TAVILY_API_KEY,
+        "api_key": api_key,
         "query": query,
         "max_results": max_results,
         "search_depth": "basic",

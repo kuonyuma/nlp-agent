@@ -23,7 +23,7 @@ def check_config() -> bool:
     print(f"Coordinator: {config['model_id']} ({config['base_url']})")
     print(f"Worker:      {settings.tool_llm['model_id']}")
     if not config.get("api_key_configured"):
-        print("Missing DEEPSEEK_API_KEY; create .env in the project root.")
+        print("缺少模型 API Key；执行 `python main.py secrets migrate-env` 或 `python main.py secrets set <NAME>`。")
         return False
     return True
 
@@ -113,6 +113,11 @@ async def main() -> None:
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "chat"
+    if command == "secrets":
+        from configs.settings import BASE_DIR
+        from core.secret_cli import run_secret_command
+
+        raise SystemExit(run_secret_command(sys.argv[2:], env_path=BASE_DIR / ".env"))
     if command in {"serve", "web"}:
         from server.web.__main__ import run
 
@@ -124,5 +129,5 @@ if __name__ == "__main__":
     elif command in {"chat", "--chat", "-c"}:
         asyncio.run(main())
     else:
-        print("Usage: python main.py [chat|serve|monitor]")
+        print("Usage: python main.py [chat|serve|monitor|secrets]")
         raise SystemExit(2)

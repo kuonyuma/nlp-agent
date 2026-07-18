@@ -96,7 +96,7 @@ async def developer_snapshot(
             "adapter": provider.get("adapter"),
             "base_url": provider.get("base_url"),
             "api_key_env": env_name,
-            "api_key_configured": bool(getattr(settings, env_name, "")),
+            "api_key_configured": settings.secret_configured(env_name),
         }
     data_roots = []
     for name in ("sessions", "memory", "gateway", "observability", "tool-audit"):
