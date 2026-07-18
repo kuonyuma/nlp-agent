@@ -4,12 +4,6 @@ import { useMemo, useState, type ReactNode } from "react";
 import { deriveTitle } from "@/lib/learning-preferences";
 import type { LearningPreferences, SessionLearningMeta, SessionSummary } from "@/lib/types";
 
-function formatTime(timestamp?: number | string): string {
-  if (!timestamp) return "";
-  const date = typeof timestamp === "number" ? new Date(timestamp * 1000) : new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
-}
-
 export function Sidebar({ sessions, preferences, activeId, open, collapsed, connected, onClose, onCollapse, onExpand, onSelect, onCreate, onMeta, onDelete, onSettings }: {
   sessions: SessionSummary[];
   preferences: LearningPreferences;
@@ -63,7 +57,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
           {items.map((session) => {
             const meta = preferences.sessions[session.session_id] ?? {};
             return <div className={`session-item ${activeId === session.session_id ? "active" : ""}`} key={session.session_id}>
-              <button className="session-main" type="button" onClick={() => { onSelect(session.session_id); onClose(); }}><span>{meta.title ?? "新的学习对话"}</span><small>{formatTime(session.last_active)}</small></button>
+              <button className="session-main" type="button" onClick={() => { onSelect(session.session_id); onClose(); }}><span>{meta.title ?? "新的学习对话"}</span></button>
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
                 <button type="button" onClick={() => { const title = prompt("重命名学习对话", meta.title ?? ""); if (title?.trim()) onMeta(session.session_id, { title: title.trim() }); }}><Pencil size={14} />重命名</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
