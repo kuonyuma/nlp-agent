@@ -555,5 +555,9 @@ async def _receive_commands(
                         payload={"code": code, "message": message},
                     )
                 )
-    except WebSocketDisconnect:
+    # A browser may cancel an upgrade while the server is yielding to its
+    # sender task.  Starlette exposes that as a RuntimeError before a normal
+    # WebSocketDisconnect can be produced; it is a disconnect, not an ASGI
+    # application failure.
+    except (WebSocketDisconnect, RuntimeError):
         pass
