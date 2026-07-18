@@ -85,6 +85,13 @@ class Settings(BaseSettings):
             config["auth_secret"] = self.NLP_AGENT_WEB_SECRET
         return config
 
+    @property
+    def monitor_runtime(self) -> dict:
+        config = dict(self._config.get("monitor", {}))
+        if self.NLP_AGENT_WEB_SECRET:
+            config["auth_secret"] = self.NLP_AGENT_WEB_SECRET
+        return config
+
     def _resolve_worker_model(
         self,
         agent_name: str | None = None,

@@ -51,6 +51,28 @@ realtime plane. See [`docs/web-api.md`](docs/web-api.md) for authentication,
 routes, event contracts, reconnect recovery, and the nanobot WebUI adaptation
 map.
 
+## Developer and observability platform
+
+The administrator control plane stays on the main WebUI at `/developer`. The
+read-mostly Trace, Token, latency, error, session, event, and storage monitor is
+isolated on `127.0.0.1:8766` and does not own an Agent runtime:
+
+```powershell
+uv run python main.py monitor
+```
+
+Build its frontend with `cd webui; npm run build:monitor`. Architecture,
+security boundaries, ports, and development commands are documented in
+[`docs/developer-platform.md`](docs/developer-platform.md).
+
+## Teacher mode
+
+Teacher mode is available on the primary WebUI at `/teacher`. It provides local
+teaching-goal configuration, student-question classification, frequent-question
+analysis, weak-topic inference, and topic/difficulty statistics. Course, Prompt,
+and durable report repository interfaces are reserved for the later account and
+database phase. See [`docs/teacher-mode.md`](docs/teacher-mode.md).
+
 在 `.env` 中至少配置 `DEEPSEEK_API_KEY`。可在
 `configs/agent_config.yaml` 中修改 Coordinator、Worker 模型和按智能体名称的覆盖规则。
 

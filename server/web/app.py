@@ -8,7 +8,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, WebSocket, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyCookie
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -38,6 +38,9 @@ from server.web.contracts import (
     UpdateSettingsBody,
 )
 from server.web.protocol import control_event
+from server.web.developer import developer_snapshot
+from server.teacher.models import UpdateTeachingGoals
+from server.teacher.service import teacher_service
 from server.web.websocket import WebSocketHub, websocket_endpoint
 
 
@@ -283,6 +286,7 @@ def create_app(
         return {
             "user_id": claims.user_id,
             "workspace_ids": sorted(claims.workspace_ids),
+            "roles": sorted(claims.roles),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at,
             "ephemeral_secret": auth.ephemeral_secret,
@@ -293,6 +297,7 @@ def create_app(
         return {
             "user_id": claims.user_id,
             "workspace_ids": sorted(claims.workspace_ids),
+            "roles": sorted(claims.roles),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at,
         }
@@ -488,6 +493,87 @@ def create_app(
             },
         }
 
+    @app.get("/api/v1/developer/snapshot", tags=["developer"])
+    async def get_developer_snapshot(request: Request, principal: Principal):
+        return await developer_snapshot(principal, request.app.state.gateway)
+
+    @app.get("/api/v1/teacher/overview", tags=["teacher"])
+    async def teacher_overview(
+        request: Request,
+        principal: Principal,
+        workspace_id: str = Query(default="default", min_length=1, max_length=128),
+        days: int = Query(default=30, ge=1, le=365),
+    ):
+        analytics = await teacher_service.analytics(
+            principal, request.app.state.gateway, workspace_id, days
+        )
+        goals = await teacher_service.goals(
+            principal, request.app.state.gateway, workspace_id
+        )
+        return {**analytics, **goals}
+
+    @app.get("/api/v1/teacher/goals/{workspace_id}", tags=["teacher"])
+    async def get_teacher_goals(
+        workspace_id: str, request: Request, principal: Principal
+    ):
+        return await teacher_service.goals(
+            principal, request.app.state.gateway, workspace_id
+        )
+
+    @app.put("/api/v1/teacher/goals/{workspace_id}", tags=["teacher"])
+    async def put_teacher_goals(
+        workspace_id: str,
+        body: UpdateTeachingGoals,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        return await teacher_service.update_goals(
+            principal, request.app.state.gateway, workspace_id, body
+        )
+
+    @app.get("/api/v1/teacher/questions", tags=["teacher"])
+    async def teacher_questions(
+        request: Request,
+        principal: Principal,
+        workspace_id: str = Query(default="default", min_length=1, max_length=128),
+        days: int = Query(default=30, ge=1, le=365),
+        limit: int = Query(default=500, ge=1, le=2_000),
+    ):
+        result = await teacher_service.analytics(
+            principal, request.app.state.gateway, workspace_id, days, limit
+        )
+        return {"items": result["questions"], "period_days": days}
+
+    @app.get("/api/v1/teacher/analytics", tags=["teacher"])
+    async def teacher_analytics(
+        request: Request,
+        principal: Principal,
+        workspace_id: str = Query(default="default", min_length=1, max_length=128),
+        days: int = Query(default=30, ge=1, le=365),
+    ):
+        result = await teacher_service.analytics(
+            principal, request.app.state.gateway, workspace_id, days
+        )
+        result.pop("questions", None)
+        return result
+
+    @app.get("/api/v1/teacher/{resource}", tags=["teacher"])
+    async def teacher_placeholder(
+        resource: str,
+        principal: Principal,
+        workspace_id: str = Query(default="default", min_length=1, max_length=128),
+    ):
+        if resource not in {"courses", "prompts", "reports"}:
+            raise FileNotFoundError(resource)
+        teacher_service.require_teacher(principal, workspace_id)
+        return {
+            "items": [],
+            "resource": resource,
+            "workspace_id": workspace_id,
+            "status": "interface_reserved",
+        }
+
     @app.patch("/api/v1/settings", tags=["settings"])
     async def update_settings(
         body: UpdateSettingsBody,
@@ -523,6 +609,16 @@ def create_app(
     if static_dir is not None and not static_dir.is_absolute():
         static_dir = Path(__file__).resolve().parents[2] / static_dir
     if static_dir is not None and static_dir.is_dir():
+        @app.get("/developer", include_in_schema=False)
+        @app.get("/developer/{developer_path:path}", include_in_schema=False)
+        async def developer_spa(developer_path: str = ""):
+            return FileResponse(static_dir / "index.html")
+
+        @app.get("/teacher", include_in_schema=False)
+        @app.get("/teacher/{teacher_path:path}", include_in_schema=False)
+        async def teacher_spa(teacher_path: str = ""):
+            return FileResponse(static_dir / "index.html")
+
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="webui")
     else:
         @app.get("/", include_in_schema=False)

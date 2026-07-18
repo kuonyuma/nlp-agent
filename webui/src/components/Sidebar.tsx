@@ -1,4 +1,4 @@
-import { Archive, BookOpen, GraduationCap, Heart, Menu, MoreHorizontal, Pencil, Plus, Search, Settings, Trash2, X } from "lucide-react";
+import { Archive, BookOpen, Code2, GraduationCap, Heart, Menu, MoreHorizontal, Pencil, Plus, Presentation, Search, Settings, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { deriveTitle } from "@/lib/learning-preferences";
@@ -9,7 +9,7 @@ function formatTime(timestamp?: number): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(timestamp * 1000));
 }
 
-export function Sidebar({ sessions, preferences, activeId, open, onClose, onSelect, onCreate, onMeta, onDelete, onSettings }: {
+export function Sidebar({ sessions, preferences, activeId, open, onClose, onSelect, onCreate, onMeta, onDelete, onSettings, onDeveloper, onTeacher }: {
   sessions: SessionSummary[];
   preferences: LearningPreferences;
   activeId: string | null;
@@ -20,6 +20,8 @@ export function Sidebar({ sessions, preferences, activeId, open, onClose, onSele
   onMeta: (id: string, patch: Partial<SessionLearningMeta>) => void;
   onDelete: (id: string) => void;
   onSettings: () => void;
+  onDeveloper: () => void;
+  onTeacher: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -72,6 +74,8 @@ export function Sidebar({ sessions, preferences, activeId, open, onClose, onSele
         <div className="sidebar-footer">
           <button type="button" onClick={() => setShowArchived((value) => !value)}><Archive size={16} />{showArchived ? "返回最近对话" : "查看归档"}</button>
           <button type="button" onClick={onSettings}><Settings size={16} />偏好设置</button>
+          <button type="button" onClick={onDeveloper}><Code2 size={16} />开发者模式</button>
+          <button type="button" onClick={onTeacher}><Presentation size={16} />教师模式</button>
         </div>
       </aside>
     </>

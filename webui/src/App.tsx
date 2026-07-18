@@ -7,9 +7,17 @@ import { LearningPanel } from "@/components/LearningPanel";
 import { MessageList } from "@/components/MessageList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sidebar, SidebarToggle } from "@/components/Sidebar";
+import { DeveloperWorkspace } from "@/components/developer/DeveloperWorkspace";
+import { TeacherWorkspace } from "@/components/teacher/TeacherWorkspace";
 import { useStudentWorkspace } from "@/hooks/useStudentWorkspace";
 
 export function App() {
+  if (location.pathname.startsWith("/developer")) return <DeveloperWorkspace />;
+  if (location.pathname.startsWith("/teacher")) return <TeacherWorkspace />;
+  return <StudentApp />;
+}
+
+function StudentApp() {
   const workspace = useStudentWorkspace();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [learningOpen, setLearningOpen] = useState(false);
@@ -44,6 +52,8 @@ export function App() {
         onMeta={workspace.updateSessionMeta}
         onDelete={(id) => { if (confirm("删除后将同时清除后端对话记录，确定继续吗？")) void workspace.deleteSession(id); }}
         onSettings={() => setSettingsOpen(true)}
+        onDeveloper={() => { location.href = "/developer"; }}
+        onTeacher={() => { location.href = "/teacher"; }}
       />
       <main className="thread-shell">
         <header className="thread-header">

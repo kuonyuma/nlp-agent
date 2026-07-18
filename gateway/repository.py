@@ -237,6 +237,25 @@ class GatewayRepository:
             ).fetchall()
         return [self._turn(row) for row in rows]
 
+    def list_questions(
+        self,
+        *,
+        workspace_id: str,
+        since: str,
+        limit: int = 2_000,
+    ) -> list[dict[str, Any]]:
+        """Teacher-facing read model; account/course joins can replace this later."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT turn_id,session_id,workspace_id,user_id,status,input_text,
+                          final_text,error_kind,created_at,completed_at
+                   FROM gateway_turns
+                   WHERE workspace_id=? AND created_at>=?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (workspace_id, since, min(max(1, limit), 10_000)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def latest_event_sequence(self, turn_id: str) -> int:
         with self._lock:
             row = self._conn.execute(

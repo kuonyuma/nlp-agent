@@ -16,11 +16,28 @@ UI-only learning metadata (titles, topics, favorites, archives, summaries, and
 concept chips) is isolated in `localStorage` under
 `nlp-agent.learning-preferences.v1` until dedicated teacher/course APIs exist.
 
+## Developer experience
+
+- `/developer/*` is the administrator-only control plane on the student WebUI
+  port. It exposes sanitized Agent, Worker, tool, model, MCP, Skill, workspace,
+  and runtime snapshots.
+- The observability/debug platform is a separate build and process. It uses
+  port `8766` in production and Vite port `5174` during frontend development,
+  keeping monitoring traffic away from student chat.
+
+## Teacher experience
+
+`/teacher/*` shares the student WebUI port and provides a teacher-only education
+view: teaching goals, classified student questions, frequent questions, weak
+knowledge points, and topic/difficulty/type statistics. Course, Prompt, and
+durable report pages already have stable backend interface placeholders.
+
 ## Development
 
 ```powershell
 npm install
 npm run dev
+npm run dev:monitor
 ```
 
 FastAPI should run at `http://127.0.0.1:8765`; Vite runs at
@@ -36,4 +53,5 @@ npm run typecheck
 npm run lint
 npm run test
 npm run build
+npm run build:monitor
 ```

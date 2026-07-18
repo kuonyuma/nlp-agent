@@ -9,8 +9,72 @@ export type TurnStatus =
 export interface AuthSession {
   user_id: string;
   workspace_ids: string[];
+  roles: string[];
   csrf_token: string;
   expires_at: number;
+}
+
+export interface DeveloperSnapshot {
+  runtime: Record<string, unknown>;
+  features: Record<string, { available: boolean; reason: string }>;
+  models: {
+    defaults: Record<string, unknown>;
+    routes: Record<string, unknown>;
+    models: Record<string, Record<string, unknown>>;
+    presets: Record<string, Record<string, unknown>>;
+    providers: Record<string, Record<string, unknown>>;
+  };
+  tools: {
+    catalog_revision: number;
+    items: Array<Record<string, unknown>>;
+    policies: Record<string, unknown>;
+    mcp_servers: Record<string, Record<string, unknown>>;
+    custom: Record<string, unknown>;
+  };
+  skills: Array<{ name: string; path: string; format: string; bytes: number; modified_at: number }>;
+  agents: Record<string, unknown>;
+  workspace: { roots: Array<{ name: string; path: string; exists: boolean; writable: boolean }> };
+  web: Record<string, unknown>;
+}
+
+export interface TeachingGoals {
+  workspace_id: string;
+  course_title: string;
+  description: string;
+  objectives: string[];
+  focus_topics: string[];
+  target_level: "beginner" | "intermediate" | "advanced";
+}
+
+export interface ClassifiedQuestion {
+  turn_id: string;
+  session_id: string;
+  user_id: string;
+  workspace_id: string;
+  question: string;
+  topic: string;
+  question_type: string;
+  difficulty: "beginner" | "intermediate" | "advanced";
+  keywords: string[];
+  status: string;
+  created_at: string;
+  has_error: boolean;
+}
+
+export interface TeacherDistribution { name: string; count: number; percentage: number }
+export interface TeacherOverview {
+  workspace_id: string;
+  period_days: number;
+  goals: TeachingGoals;
+  revision: number;
+  updated_at: string | null;
+  summary: { questions: number; sessions: number; students: number; error_questions: number };
+  questions: ClassifiedQuestion[];
+  frequent_questions: Array<{ question: string; count: number; topic: string; question_type: string }>;
+  weak_topics: Array<{ topic: string; score: number; questions: number; repeat_questions: number; errors: number; sessions: number; risk: "low" | "medium" | "high" }>;
+  topic_distribution: TeacherDistribution[];
+  difficulty_distribution: TeacherDistribution[];
+  type_distribution: TeacherDistribution[];
 }
 
 export interface SessionSummary {
