@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Tuple
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
 from utils.tokens import rough_estimation_for_messages
 from utils.logger import get_logger
+from core.prompt_runtime import global_prompt_runtime
 
 logger = get_logger("shiliu.auto_compact")
 
@@ -113,14 +114,14 @@ async def _generate_global_summary(messages: List[BaseMessage]) -> str:
     from server.agent.llm_factory import get_utility_llm
     llm = get_utility_llm()
 
-    prompt = "请作为系统核心记忆压缩模块，将以下用户与 AI 的完整交互历史（包含已经过局部折叠的片段）进行全局、系统性总结。必须保留所有用户未满足的需求、关键报错信息、和重要文件路径。\n\n"
-    
+    conversation = ""
     for m in messages:
         text = str(m.content)
         if len(text) > 2000:
             text = text[:1000] + "\n...(truncated)...\n" + text[-1000:]
-        prompt += f"[{m.type}]: {text}\n"
+        conversation += f"[{m.type}]: {text}\n"
         
+    prompt = global_prompt_runtime.render("compression.auto_summary", conversation=conversation)
     resp = await llm.ainvoke([HumanMessage(content=prompt)])
     return resp.content
 

@@ -820,8 +820,6 @@ class ToolRuntime:
         return ToolSet(snapshot, [item for item in descriptors if item is not None], self.executor)
 
     async def start_mcp(self, configs: Mapping[str, Any]) -> None:
-        if not configs:
-            return
         from core.mcp_runtime import MCPRuntime
 
         if self._mcp_runtime is None:

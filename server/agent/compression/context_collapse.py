@@ -13,6 +13,7 @@ from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AI
 
 from utils.tokens import rough_estimation_for_messages
 from utils.logger import get_logger
+from core.prompt_runtime import global_prompt_runtime
 
 logger = get_logger("shiliu.context_collapse")
 
@@ -235,14 +236,17 @@ async def _generate_span_summary(span_messages: List[BaseMessage]) -> str:
     from server.agent.llm_factory import get_utility_llm
     llm = get_utility_llm()
     
-    prompt = "请用一段话极简地总结以下历史对话和工具调用的核心信息。不要遗漏任何影响后续任务的关键事实、结论、文件路径或实体状态。\n\n"
+    conversation = ""
     for m in span_messages:
         text = str(m.content)
         if len(text) > 1000:
             text = text[:1000] + "...(truncated)"
-        prompt += f"[{m.type}]: {text}\n"
+        conversation += f"[{m.type}]: {text}\n"
         
     try:
+        prompt = global_prompt_runtime.render(
+            "compression.collapse_summary", conversation=conversation
+        )
         resp = await llm.ainvoke([HumanMessage(content=prompt)])
         return resp.content
     except Exception as e:

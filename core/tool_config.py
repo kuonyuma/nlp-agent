@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from core.runtime_config import load_runtime_config
 from core.tool_runtime import ToolScope
 
 
@@ -104,9 +104,12 @@ class AgentRuntimeConfig(StrictConfigModel):
 
 def load_agent_runtime_config(path: Path | None = None) -> AgentRuntimeConfig:
     if path is None:
-        path = Path(__file__).resolve().parent.parent / "configs" / "agent_config.yaml"
-    with path.open("r", encoding="utf-8") as file:
-        raw = yaml.safe_load(file) or {}
+        raw = load_runtime_config()
+    else:
+        import yaml
+
+        with path.open("r", encoding="utf-8") as file:
+            raw = yaml.safe_load(file) or {}
     payload = {
         "tools": raw.get("tools", {}),
         "worker_profiles": raw.get("worker_profiles", {}),

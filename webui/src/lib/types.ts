@@ -31,7 +31,7 @@ export interface DeveloperSnapshot {
     mcp_servers: Record<string, Record<string, unknown>>;
     custom: Record<string, unknown>;
   };
-  skills: Array<{ name: string; path: string; format: string; bytes: number; modified_at: number }>;
+  skills: Array<{ name: string; path: string; source: string; description: string; allowed_tools: string[]; capabilities: string[]; available: boolean; missing_requirements: string[]; bytes: number; modified_at: number }>;
   agents: Record<string, unknown>;
   workspace: { roots: Array<{ name: string; path: string; exists: boolean; writable: boolean }> };
   web: Record<string, unknown>;
@@ -82,8 +82,8 @@ export interface SessionSummary {
   user_id: string;
   workspace_id: string;
   channel: string;
-  created_at?: number;
-  last_active?: number;
+  created_at?: number | string;
+  last_active?: number | string;
 }
 
 export interface TurnRecord {
@@ -158,4 +158,5 @@ export interface UserSettings {
   theme: "system" | "light" | "dark";
   show_reasoning: boolean;
   stream_render_interval_ms: number;
+  default_workspace_id?: string;
 }

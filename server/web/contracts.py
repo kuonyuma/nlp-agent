@@ -45,6 +45,26 @@ class UpdateSettingsBody(StrictModel):
     default_workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class UpdateToolPoliciesBody(StrictModel):
+    policies: dict[str, Any]
+
+
+class UpdateCustomToolsBody(StrictModel):
+    custom: dict[str, Any]
+
+
+class McpServerBody(StrictModel):
+    config: dict[str, Any]
+
+
+class SkillBody(StrictModel):
+    content: str = Field(min_length=1, max_length=200_000)
+
+
+class WorkerProfileBody(StrictModel):
+    profile: dict[str, Any]
+
+
 class CommandEnvelope(StrictModel):
     v: Literal["1"] = API_VERSION
     type: str = Field(min_length=1, max_length=100)

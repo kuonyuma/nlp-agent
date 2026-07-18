@@ -38,6 +38,16 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   return <section className="developer-section"><header><div><h2>{title}</h2>{hint && <p>{hint}</p>}</div></header>{children}</section>;
 }
 
+function JsonEditor({ value, onSave, label = "保存" }: { value: unknown; onSave: (value: Record<string, unknown>) => Promise<void>; label?: string }) {
+  const [text, setText] = useState(() => JSON.stringify(value, null, 2));
+  const [message, setMessage] = useState("");
+  const save = async () => {
+    try { const parsed = JSON.parse(text) as Record<string, unknown>; await onSave(parsed); setMessage("已保存并应用"); }
+    catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+  };
+  return <div className="developer-editor"><textarea value={text} onChange={(event) => setText(event.target.value)} spellCheck={false} /><div><button type="button" onClick={() => void save()}>{label}</button>{message && <small>{message}</small>}</div></div>;
+}
+
 function Overview({ snapshot }: { snapshot: DeveloperSnapshot }) {
   const runtime = snapshot.runtime;
   return <div className="developer-page-grid">
@@ -53,25 +63,31 @@ function Overview({ snapshot }: { snapshot: DeveloperSnapshot }) {
   </div>;
 }
 
-function Agents({ snapshot }: { snapshot: DeveloperSnapshot }) {
-  return <><Section title="Agent / Worker 运行配置" hint="Coordinator 与 Worker 的迭代、时限、工具结果和兜底策略。"><JsonBlock value={snapshot.agents} /></Section><Section title="当前 Gateway"><JsonBlock value={snapshot.runtime} /></Section></>;
+function Agents({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
+  const agents = snapshot.agents as Record<string, unknown>;
+  const profiles = (agents.profiles ?? {}) as Record<string, unknown>;
+  const [name, setName] = useState("");
+  return <><Section title="Worker Profile" hint="Profile 组合 Skill、能力与工具授权；保存后会重新加载 Skill 解析器。"><div className="developer-inline-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="profile 名称，例如 researcher" /><button type="button" onClick={() => { if (name) void api.saveWorkerProfile(name, { description: "", skills: [], allowed_tools: [], capabilities: [] }).then(refresh); }}>新建</button></div>{Object.entries(profiles).map(([profileName, profile]) => <div className="developer-managed-card" key={profileName}><strong>{profileName}</strong><JsonEditor value={profile} label="保存 Profile" onSave={async (value) => { await api.saveWorkerProfile(profileName, value); await refresh(); }} /><button className="danger" type="button" onClick={() => { if (confirm(`删除 Profile ${profileName}？`)) void api.deleteWorkerProfile(profileName).then(refresh); }}>删除</button></div>)}</Section><Section title="Agent / Worker 运行配置"><JsonBlock value={{ runtime: agents.runtime, overrides: agents.overrides }} /></Section><Section title="当前 Gateway"><JsonBlock value={snapshot.runtime} /></Section></>;
 }
 
-function Tools({ snapshot }: { snapshot: DeveloperSnapshot }) {
-  return <><Section title="工具目录" hint={`${snapshot.tools.items.length} 个已注册工具；权限、风险、超时和重试来自后端真实描述符。`}><div className="developer-table-wrap"><table><thead><tr><th>工具</th><th>来源</th><th>作用域</th><th>风险</th><th>超时</th><th>状态</th></tr></thead><tbody>{snapshot.tools.items.map((tool) => <tr key={String(tool.name)}><td><strong>{String(tool.name)}</strong><small>{String(tool.description ?? "")}</small></td><td>{String(tool.source)} / {String(tool.provider)}</td><td>{Array.isArray(tool.scopes) ? tool.scopes.join(", ") : "-"}</td><td>{String(tool.risk)}</td><td>{String(tool.timeout_s)}s</td><td><StatusPill ok={Boolean(tool.enabled)}>{tool.enabled ? "启用" : "停用"}</StatusPill></td></tr>)}</tbody></table></div></Section><Section title="权限策略"><JsonBlock value={snapshot.tools.policies} /></Section></>;
+function Tools({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
+  return <><Section title="工具目录" hint={`${snapshot.tools.items.length} 个已注册工具；工具实现仍由后端代码或已安装扩展提供。`}><div className="developer-table-wrap"><table><thead><tr><th>工具</th><th>来源</th><th>作用域</th><th>风险</th><th>超时</th></tr></thead><tbody>{snapshot.tools.items.map((tool) => <tr key={String(tool.name)}><td><strong>{String(tool.name)}</strong><small>{String(tool.description ?? "")}</small></td><td>{String(tool.source)} / {String(tool.provider)}</td><td>{Array.isArray(tool.scopes) ? tool.scopes.join(", ") : "-"}</td><td>{String(tool.risk)}</td><td>{String(tool.timeout_s)}s</td></tr>)}</tbody></table></div></Section><Section title="角色权限策略" hint="保存后新建的 Coordinator/Worker 立即按新策略生成 ToolSet；已启动 Worker 的授权快照不会被扩大。"><JsonEditor value={snapshot.tools.policies} label="保存权限策略" onSave={async (value) => { await api.updateToolPolicies(value); await refresh(); }} /></Section><Section title="自定义 Tool" hint="可通过 Python modules 或 entry point 安装。修改来源已持久化，但必须重启 Runtime 才会安全加载或卸载 Python 模块。"><JsonEditor value={snapshot.tools.custom} label="保存自定义 Tool 配置" onSave={async (value) => { const result = await api.updateCustomTools(value); await refresh(); alert(result.reason); }} /></Section></>;
 }
 
 function Models({ snapshot }: { snapshot: DeveloperSnapshot }) {
   return <><Section title="Provider / API Key" hint="密钥值永远不会发送到浏览器。"><div className="developer-card-grid">{Object.entries(snapshot.models.providers).map(([name, provider]) => <article className="developer-card" key={name}><div><KeyRound size={18} /><strong>{name}</strong></div><StatusPill ok={Boolean(provider.api_key_configured)}>{provider.api_key_configured ? "密钥已配置" : "缺少密钥"}</StatusPill><p>{String(provider.base_url ?? "")}</p></article>)}</div></Section><Section title="模型路由与故障转移"><JsonBlock value={{ defaults: snapshot.models.defaults, routes: snapshot.models.routes }} /></Section><Section title="思考、生成、超时与重试预设"><JsonBlock value={snapshot.models.presets} /></Section></>;
 }
 
-function Mcp({ snapshot }: { snapshot: DeveloperSnapshot }) {
+function Mcp({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
   const entries = Object.entries(snapshot.tools.mcp_servers);
-  return <Section title="MCP Servers" hint="连接配置与工具隔离状态；认证头和环境变量只显示是否存在。">{entries.length ? <div className="developer-card-grid">{entries.map(([name, config]) => <article className="developer-card" key={name}><div><PlugZap size={18} /><strong>{name}</strong></div><StatusPill ok>已配置</StatusPill><JsonBlock value={config} /></article>)}</div> : <div className="developer-empty"><PlugZap /><strong>尚未配置 MCP Server</strong><p>在 agent_config.yaml 的 tools.mcp_servers 中添加后会出现在这里。</p></div>}</Section>;
+  const [name, setName] = useState(""); const [config, setConfig] = useState('{\n  "transport": "stdio",\n  "command": "",\n  "args": [],\n  "enabled_tools": ["*"],\n  "scopes": ["worker"]\n}'); const [result, setResult] = useState("");
+  const parsed = () => JSON.parse(config) as Record<string, unknown>;
+  return <><Section title="MCP Servers" hint="保存会持久化并热重连；测试使用隔离 Catalog，不会把试连工具泄漏到运行时。"><div className="developer-editor"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="server 名称" /><textarea value={config} onChange={(event) => setConfig(event.target.value)} spellCheck={false} /><div><button type="button" onClick={() => { try { void api.testMcp(name, parsed()).then((value) => setResult(`连接成功：${value.tools.join(", ") || "未发现工具"}`)).catch((error) => setResult(error.message)); } catch (error) { setResult(String(error)); } }}>测试连接</button><button type="button" onClick={() => { try { void api.saveMcp(name, parsed()).then(async () => { setResult("已保存并热重连"); await refresh(); }).catch((error) => setResult(error.message)); } catch (error) { setResult(String(error)); } }}>保存 MCP</button>{result && <small>{result}</small>}</div></div>{entries.map(([serverName, serverConfig]) => <div className="developer-managed-card" key={serverName}><strong>{serverName}</strong><JsonBlock value={serverConfig} /><button className="danger" type="button" onClick={() => { if (confirm(`删除 MCP ${serverName}？`)) void api.deleteMcp(serverName).then(refresh); }}>删除</button></div>)}</Section></>;
 }
 
-function Skills({ snapshot }: { snapshot: DeveloperSnapshot }) {
-  return <Section title="Skills" hint="统一目录内可被运行时发现的 Markdown/YAML 能力定义。"><div className="developer-list">{snapshot.skills.map((skill) => <article key={skill.path}><FileKey2 size={18} /><span><strong>{skill.name}</strong><small>{skill.path} · {skill.bytes.toLocaleString()} bytes</small></span><StatusPill ok>{skill.format}</StatusPill></article>)}</div></Section>;
+function Skills({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
+  const [name, setName] = useState(""); const [content, setContent] = useState("---\nname: example\ndescription: 用途说明\nallowed_tools: []\ncapabilities: []\n---\n\n写入该 Skill 的操作流程。"); const [message, setMessage] = useState("");
+  return <Section title="Skills" hint="保存到 .data/skills/<name>/SKILL.md，并立即重新加载。项目内 Skill 只读；同名工作区 Skill 会覆盖它。"><div className="developer-editor"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Skill 名称" /><textarea value={content} onChange={(event) => setContent(event.target.value)} spellCheck={false} /><div><button type="button" onClick={() => void api.saveSkill(name, content).then(async () => { setMessage("已保存并重载"); await refresh(); }).catch((error) => setMessage(error.message))}>保存 Skill</button>{message && <small>{message}</small>}</div></div><div className="developer-list">{snapshot.skills.map((skill) => <article key={skill.path}><FileKey2 size={18} /><span><strong>{skill.name}</strong><small>{skill.description} · {skill.source} · {skill.path}</small></span><StatusPill ok={skill.available}>{skill.available ? "可用" : "缺少依赖"}</StatusPill><button type="button" onClick={() => void api.getSkill(skill.name).then((value) => { setName(value.name); setContent(value.content); })}>编辑</button>{skill.source === "workspace" && <button className="danger" type="button" onClick={() => { if (confirm(`删除 Skill ${skill.name}？`)) void api.deleteSkill(skill.name).then(refresh); }}>删除</button>}</article>)}</div></Section>;
 }
 
 function Automations({ snapshot }: { snapshot: DeveloperSnapshot }) {
@@ -98,14 +114,14 @@ export function DeveloperWorkspace() {
   const navigate = (next: DeveloperPage) => { history.pushState({}, "", next === "overview" ? "/developer" : `/developer/${next}`); setPage(next); };
   const content = useMemo(() => {
     if (!snapshot) return null;
-    if (page === "agents") return <Agents snapshot={snapshot} />;
-    if (page === "tools") return <Tools snapshot={snapshot} />;
+    if (page === "agents") return <Agents snapshot={snapshot} refresh={load} />;
+    if (page === "tools") return <Tools snapshot={snapshot} refresh={load} />;
     if (page === "models") return <Models snapshot={snapshot} />;
-    if (page === "mcp") return <Mcp snapshot={snapshot} />;
-    if (page === "skills") return <Skills snapshot={snapshot} />;
+    if (page === "mcp") return <Mcp snapshot={snapshot} refresh={load} />;
+    if (page === "skills") return <Skills snapshot={snapshot} refresh={load} />;
     if (page === "automations") return <Automations snapshot={snapshot} />;
     if (page === "settings") return <RuntimeSettings snapshot={snapshot} />;
     return <Overview snapshot={snapshot} />;
-  }, [page, snapshot]);
+  }, [page, snapshot, load]);
   return <div className="developer-shell"><aside className="developer-nav"><div className="developer-brand"><TerminalSquare /><span><strong>NLP Developer</strong><small>Control plane · 8765</small></span></div><nav>{NAV.map(({ page: itemPage, label, icon: Icon }) => <button className={page === itemPage ? "active" : ""} type="button" key={itemPage} onClick={() => navigate(itemPage)}><Icon size={17} />{label}</button>)}</nav><a href="/"><ChevronLeft size={16} />返回学生模式</a></aside><main className="developer-main"><header className="developer-topbar"><div><Globe2 size={16} /><span>本地管理员</span></div><button type="button" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button></header><div className="developer-content">{loading && !snapshot ? <div className="developer-loading"><RefreshCw className="spin" />正在读取运行时…</div> : error ? <div className="developer-error"><ShieldCheck /><strong>无法进入开发者模式</strong><p>{error}</p></div> : content}</div></main></div>;
 }

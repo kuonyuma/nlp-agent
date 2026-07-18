@@ -15,6 +15,7 @@ export class StudentSocket {
   private stopped = false;
   private reconnectTimer: number | null = null;
   private reconnectAttempt = 0;
+  private ready = false;
   private activeSession: string | null = null;
   private readonly lastSequences = new Map<string, number>();
   private readonly pending: Command[] = [];
@@ -32,12 +33,10 @@ export class StudentSocket {
     this.socket = new WebSocket(`${protocol}//${location.host}/ws/v1`);
     this.socket.onopen = () => {
       this.reconnectAttempt = 0;
-      this.onStatus("connected");
-      if (this.activeSession) this.command("session.subscribe", { session_id: this.activeSession });
-      for (const [turnId, sequence] of this.lastSequences) {
-        this.command("stream.resume", { turn_id: turnId, after_sequence: sequence });
-      }
-      while (this.pending.length) this.sendNow(this.pending.shift()!);
+      // TCP/WebSocket upgrade succeeded, but the server still has to accept
+      // this connection into the Agent gateway.  Commands wait for its
+      // protocol-level connection.ready frame.
+      this.ready = false;
     };
     this.socket.onmessage = (message) => {
       let event: ServerEvent;
@@ -45,6 +44,15 @@ export class StudentSocket {
         event = JSON.parse(String(message.data)) as ServerEvent;
       } catch {
         return;
+      }
+      if (event.type === "connection.ready") {
+        this.ready = true;
+        this.onStatus("connected");
+        if (this.activeSession) this.command("session.subscribe", { session_id: this.activeSession });
+        for (const [turnId, sequence] of this.lastSequences) {
+          this.command("stream.resume", { turn_id: turnId, after_sequence: sequence });
+        }
+        while (this.pending.length) this.sendNow(this.pending.shift()!);
       }
       if (event.turn_id && event.sequence != null) {
         this.lastSequences.set(event.turn_id, Math.max(event.sequence, this.lastSequences.get(event.turn_id) ?? 0));
@@ -56,6 +64,7 @@ export class StudentSocket {
     };
     this.socket.onclose = () => {
       this.socket = null;
+      this.ready = false;
       if (this.stopped) {
         this.onStatus("offline");
         return;
@@ -67,7 +76,7 @@ export class StudentSocket {
   }
 
   setSession(sessionId: string | null): void {
-    const open = this.socket?.readyState === WebSocket.OPEN;
+    const open = this.isReady();
     if (open && this.activeSession && this.activeSession !== sessionId) {
       this.command("session.unsubscribe", { session_id: this.activeSession });
     }
@@ -78,7 +87,7 @@ export class StudentSocket {
 
   resume(turnId: string, afterSequence = 0): void {
     this.lastSequences.set(turnId, afterSequence);
-    if (this.socket?.readyState === WebSocket.OPEN) {
+    if (this.isReady()) {
       this.command("stream.resume", { turn_id: turnId, after_sequence: afterSequence });
     } else {
       this.connect();
@@ -95,7 +104,7 @@ export class StudentSocket {
 
   command(type: string, payload: Record<string, unknown>, requestId: string = crypto.randomUUID()): void {
     const command: Command = { v: "1", type, request_id: requestId, payload };
-    if (this.socket?.readyState === WebSocket.OPEN) this.sendNow(command);
+    if (this.isReady()) this.sendNow(command);
     else {
       this.pending.push(command);
       this.connect();
@@ -107,9 +116,14 @@ export class StudentSocket {
     if (this.reconnectTimer != null) window.clearTimeout(this.reconnectTimer);
     this.socket?.close(1000, "student ui closed");
     this.socket = null;
+    this.ready = false;
   }
 
   private sendNow(command: Command): void {
     this.socket?.send(JSON.stringify(command));
+  }
+
+  private isReady(): boolean {
+    return this.ready && this.socket?.readyState === WebSocket.OPEN;
   }
 }

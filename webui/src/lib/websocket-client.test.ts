@@ -25,6 +25,8 @@ describe("StudentSocket", () => {
     client.setSession("session_1");
     const instance = instances[0];
     instance.open();
+    expect(instance.sent).toEqual([]);
+    instance.onmessage?.({ data: JSON.stringify({ v: "1", type: "connection.ready", timestamp: new Date().toISOString(), payload: {} }) });
     client.sendChat("session_1", "hello", "request_1");
 
     const frames = instance.sent.map((value) => JSON.parse(value) as { type: string; v: string; payload: Record<string, unknown> });
