@@ -1,1 +1,1 @@
-[RUNTIME_RETRY] The previous model response was empty. Return a non-empty final answer or make the necessary tool call.
+[RUNTIME_RETRY] 上一次模型回复为空。请返回非空的最终答复，或发起必要的工具调用。
