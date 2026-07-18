@@ -149,6 +149,23 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
         assert developer.status_code == 200
         assert developer.json()["runtime"]["status"] == "ok"
         assert "tools" in developer.json()
+        teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
+        assert teacher.status_code == 200
+        assert teacher.json()["summary"]["questions"] == 0
+        goals = client.put(
+            "/api/v1/teacher/goals/default",
+            json={
+                "course_title": "NLP 入门",
+                "description": "课程目标",
+                "objectives": ["理解分词", "掌握文本分类"],
+                "focus_topics": ["分词", "文本分类"],
+                "target_level": "beginner",
+            },
+            headers=write_headers(csrf),
+        )
+        assert goals.status_code == 200
+        assert client.get("/api/v1/teacher/goals/default").json()["goals"]["course_title"] == "NLP 入门"
+        assert client.get("/api/v1/teacher/courses").json()["status"] == "interface_reserved"
 
         rejected = client.post("/api/v1/sessions", json={"workspace_id": "default"})
         assert rejected.status_code == 403
@@ -177,6 +194,9 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
                 break
             asyncio.run(asyncio.sleep(0.001))
         assert turn["final_text"] == "answer:hello"
+        classified = client.get("/api/v1/teacher/questions?workspace_id=default").json()["items"]
+        assert classified[0]["question"] == "hello"
+        assert classified[0]["topic"] == "NLP 综合"
         events = client.get(f"/api/v1/chat/turns/{turn_id}/events").json()["items"]
         assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
 
@@ -185,7 +205,7 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
             json={"theme": "dark", "show_reasoning": True},
             headers=write_headers(csrf),
         )
-        assert updated.json()["revision"] == 1
+        assert updated.json()["revision"] == goals.json()["revision"] + 1
         assert client.get("/api/v1/settings").json()["preferences"]["settings"]["theme"] == "dark"
 
         deleted = client.delete(
