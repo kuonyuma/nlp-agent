@@ -5,6 +5,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.session_context import SessionContext
+from core.prompt_runtime import global_prompt_runtime
 from server.agent.llm_factory import get_utility_llm
 from server.memory.manager import MemoryManager
 from server.memory.types import MemoryCurationResult, MemoryScopeKind
@@ -30,25 +31,14 @@ class MemoryCurator:
             f"ARCHIVE {row.archive_id} session={row.session_id}\n{row.summary}"
             for row in batch
         )
-        system = SystemMessage(
-            content=(
-                "You are a conservative long-term memory curator. Keep only information "
-                "that will change future agent behavior across sessions: explicit stable "
-                "user profile facts, preferences, corrections, durable project decisions, "
-                "constraints, or ongoing goals. Ignore transient tasks, logs, tool output, "
-                "web facts that can be searched again, secrets, credentials, and model "
-                "inferences. Never repeat recalled memory as new evidence. User/profile/"
-                "preference/feedback belongs to user scope; project/decision/goal belongs "
-                "to workspace scope. Prefer update over duplicate add. Do not delete memory "
-                "automatically. Every non-ignore operation needs archive evidence and at "
-                "least 0.8 confidence. Return an empty operation list when nothing qualifies."
-            )
-        )
+        system = SystemMessage(content=global_prompt_runtime.render("memory.curator"))
         prompt = HumanMessage(
-            content=(
-                "Current scoped durable memory:\n"
-                f"{manager.build_injection_text(max_tokens=12_000, max_topics=30, recent_archive_tokens=0)}\n\n"
-                f"New archive summaries:\n{archive_text}"
+            content=global_prompt_runtime.render(
+                "memory.curate_request",
+                memory=manager.build_injection_text(
+                    max_tokens=12_000, max_topics=30, recent_archive_tokens=0
+                ),
+                archives=archive_text,
             )
         )
         result = await get_tool_llm().with_structured_output(MemoryCurationResult).ainvoke(

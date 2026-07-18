@@ -128,6 +128,12 @@ memory:
   recent_archive_tokens: 2000
   curate_after_archives: 8
 
+# Prompt templates are Markdown assets under core/prompt_runtime/templates.
+# Pin a version here when a versioned template (for example coordinator.v2.md)
+# is introduced; undeclared or missing template variables fail before an LLM call.
+prompts:
+  versions: {}
+
 # One logical Agent turn is bounded independently from provider-level retries
 # and timeouts. Coordinator and Worker consume the same runtime contract.
 agent_runtime:

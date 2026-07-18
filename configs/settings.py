@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     def memory_runtime(self) -> dict:
         return dict(self._config.get("memory", {}))
 
+    @property
+    def prompt_runtime(self) -> dict:
+        return dict(self._config.get("prompts", {}))
+
     def get_agent_runtime(self, role: str) -> dict:
         return dict(self._config.get("agent_runtime", {}).get(role, {}))
 

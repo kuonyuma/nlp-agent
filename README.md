@@ -10,6 +10,7 @@
 - 长期记忆的提取、索引和按需注入
 - Context Trim、Snip、Micro-Compact、Context Collapse、Auto-Compact
 - Markdown Skill 加载和最小权限工具分配
+- Prompt Runtime：版本化 Markdown 模板、严格变量校验、组合渲染与热重载缓存
 - 文件读取、时间和网页搜索通用工具
 - 单实例 Backend Gateway Core，统一管理 Agent、Turn、Worker 和关闭生命周期
 - SQLite Turn/Event/Outbox、幂等提交、断线事件重放与流式订阅
@@ -75,6 +76,16 @@ database phase. See [`docs/teacher-mode.md`](docs/teacher-mode.md).
 
 在 `.env` 中至少配置 `DEEPSEEK_API_KEY`。可在
 `configs/agent_config.yaml` 中修改 Coordinator、Worker 模型和按智能体名称的覆盖规则。
+
+## Prompt Runtime
+
+运行规则不再散落在 Python 字符串中。`core/prompt_runtime/templates/` 下的 Markdown
+模板通过 `PromptRegistry` 注册，`PromptRenderer` 在模型调用前严格校验变量，
+`PromptComposer` 用独立片段组成系统消息。Skill 保持为领域知识/SOP，不承担运行时
+规则。当前 Coordinator、Worker、Memory、Compression 和 Runtime recovery 均已接入；
+新增模板应同时在 `core/prompt_runtime/registry.py` 声明 id、版本和变量契约。
+要切换一个已提交的版本化模板（如 `coordinator.v2.md`），在
+`configs/agent_config.yaml` 的 `prompts.versions` 中设置 `coordinator: "2"`。
 
 ## 常用命令
 

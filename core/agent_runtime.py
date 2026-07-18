@@ -132,12 +132,9 @@ def compact_model_content(content: str, max_chars: int) -> str:
 
 
 def exhaustion_prompt(reason: AgentStopReason) -> str:
-    return (
-        "[RUNTIME_FINALIZATION]\n"
-        f"The agent runtime stopped further tool iteration because {reason.value} was reached. "
-        "Do not call tools. Give the best useful final answer from the evidence already present. "
-        "Clearly distinguish completed work, uncertainty, failures, and any remaining work."
-    )
+    from core.prompt_runtime import global_prompt_runtime
+
+    return global_prompt_runtime.render("runtime.exhaustion", reason=reason.value)
 
 
 def exhaustion_fallback(reason: AgentStopReason) -> str:

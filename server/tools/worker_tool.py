@@ -90,6 +90,7 @@ from core.agent_runtime import (
 from core.observability.context import current_telemetry_context
 from core.observability.models import SpanKind, SpanStatus
 from core.observability.runtime import global_telemetry
+from core.prompt_runtime import global_prompt_runtime
 from server.agent.compression.context_manager import global_context_manager
 from utils.tokens import build_context_budget
 from server.agent.node.session_storage import (
@@ -355,10 +356,9 @@ async def _execute_sandbox_loop(
                     getattr(response, "response_metadata", {}).get("finish_reason", "")
                 ).lower()
                 if not content:
-                    messages.append(SystemMessage(content=(
-                        "[RUNTIME_RETRY] The previous model response was empty. "
-                        "Return a non-empty answer or make the required tool call."
-                    )))
+                    messages.append(
+                        SystemMessage(content=global_prompt_runtime.render("retry.empty_response"))
+                    )
                     global_telemetry.event(
                         "agent.response.recovering",
                         level="warning",
@@ -366,10 +366,13 @@ async def _execute_sandbox_loop(
                     )
                     continue
                 if finish_reason in {"length", "max_tokens"}:
-                    messages.append(SystemMessage(content=(
-                        "[RUNTIME_CONTINUE] Continue exactly where the truncated response ended. "
-                        "Do not repeat completed content."
-                    )))
+                    messages.append(
+                        SystemMessage(
+                            content=global_prompt_runtime.render(
+                                "retry.continue_after_truncation"
+                            )
+                        )
+                    )
                     global_telemetry.event(
                         "agent.response.recovering",
                         payload={"role": "worker", "reason": "length"},
@@ -709,30 +712,15 @@ async def spawn_worker(
     resolved_model = settings._resolve_model_name(agent_name, model or profile.model)
     sop_prompt = profile.system_prompt
 
-    system_instruction = f"""[后台特工硬性约束]
-停止，请先仔细阅读本协议。
-你是一个被独立唤醒的后台执行特工（Worker 子进程），你不是与用户对话的主控系统。
-你的执行结果只发给主控系统，绝不会被真实用户直接看到。
-
-不可违背的硬性规则：
-1. 【禁止闲聊】：绝对不要问好、不要提问、不要建议下一步操作。
-2. 【禁止主观发挥】：不要在回复中加入任何自我评价或多余的解释。
-3. 【直接执行】：直接且仅使用你被授予的工具来完成指令，不得调用未授权能力。
-4. 【强制输出格式】：你的回复【必须】严格以"执行范围："开头。
-5. 【陈述事实】：只汇报客观事实结果，汇报完毕后立刻停止。
-[/后台特工硬性约束]
-
-[专家领域与标准操作流程 (SOP)]
-{sop_prompt}
-[/专家领域与标准操作流程 (SOP)]"""
-
     import datetime
     current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %A')
-    runtime_context = f"[当前系统环境]\n当前真实时间：{current_time}\n[/当前系统环境]"
+    skill_section = f"[专家领域与标准操作流程 (SOP)]\n{sop_prompt}\n[/专家领域与标准操作流程 (SOP)]"
+    system_instruction = global_prompt_runtime.composer.compose(
+        [("worker", {"today": current_time}), skill_section]
+    )
 
     initial_messages = [
         SystemMessage(content=system_instruction),
-        SystemMessage(content=runtime_context),
         HumanMessage(content=f"【任务指令】：\n{directive}")
     ]
 
