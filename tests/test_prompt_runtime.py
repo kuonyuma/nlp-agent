@@ -13,6 +13,17 @@ def test_registered_prompt_renders_and_tracks_version() -> None:
     assert "Worker A" in renderer.render("coordinator", worker_profiles="Worker A")
 
 
+def test_prompt_runtime_can_select_stronger_versioned_templates() -> None:
+    registry = PromptRegistry(versions={"coordinator": "1.1", "worker": "1.1"})
+    renderer = PromptRenderer(registry)
+
+    assert registry.get("coordinator").version == "1.1"
+    assert "先明确目标、范围、约束和完成标准" in renderer.render(
+        "coordinator", worker_profiles="Worker A"
+    )
+    assert "结果格式" in renderer.render("worker", today="2026-07-18")
+
+
 def test_missing_or_unexpected_variables_fail_before_model_call() -> None:
     renderer = PromptRenderer(PromptRegistry())
 

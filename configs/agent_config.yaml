@@ -132,7 +132,9 @@ memory:
 # Pin a version here when a versioned template (for example coordinator.v2.md)
 # is introduced; undeclared or missing template variables fail before an LLM call.
 prompts:
-  versions: {}
+  versions:
+    coordinator: "1.1"
+    worker: "1.1"
 
 # One logical Agent turn is bounded independently from provider-level retries
 # and timeouts. Coordinator and Worker consume the same runtime contract.
