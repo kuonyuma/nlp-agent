@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import re
+from builtins import input
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -58,17 +59,23 @@ def run_secret_command(arguments: list[str], *, env_path: Path) -> int:
                 print(f"{name}: {location}")
             return 0
 
-        if command == "set" and len(arguments) == 2:
+        if command == "set" and len(arguments) in {2, 3}:
             name = arguments[1]
-            set_secret(name, getpass.getpass(f"请输入 {name}（输入不回显）: "))
+            show_input = len(arguments) == 3 and arguments[2] == "--show-input"
+            prompt = f"请输入 {name}{'（输入可见）' if show_input else '（输入不回显）'}: "
+            set_secret(name, input(prompt) if show_input else getpass.getpass(prompt))
             print(f"已保存 {name} 到 Windows 凭据管理器。")
             return 0
 
         if command == "setup":
+            show_input = "--show-input" in arguments
             saved = 0
-            print("逐项输入密钥；直接回车会跳过该项，输入不会回显。")
+            print(
+                "逐项输入密钥；直接回车会跳过该项。"
+                + ("输入将显示在终端中。" if show_input else "输入不会回显。")
+            )
             for name in MANAGED_SECRET_NAMES:
-                value = getpass.getpass(f"{name}: ")
+                value = input(f"{name}: ") if show_input else getpass.getpass(f"{name}: ")
                 if value:
                     set_secret(name, value)
                     saved += 1
@@ -97,5 +104,5 @@ def run_secret_command(arguments: list[str], *, env_path: Path) -> int:
         print(f"密钥操作失败：{exc}")
         return 1
 
-    print("用法：python main.py secrets [status|setup|set NAME|delete NAME|migrate-env [--remove-from-env]]")
+    print("用法：python main.py secrets [status|setup [--show-input]|set NAME [--show-input]|delete NAME|migrate-env [--remove-from-env]]")
     return 2

@@ -25,6 +25,12 @@ python main.py secrets set NLP_AGENT_WEB_SECRET
 uv run python main.py secrets setup
 ```
 
+如需确认粘贴内容，可增加 `--show-input`，但密钥会显示在终端记录中：
+
+```powershell
+uv run python main.py secrets setup --show-input
+```
+
 检查状态或删除一项密钥：
 
 ```powershell

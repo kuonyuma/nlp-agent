@@ -63,3 +63,15 @@ def test_setup_saves_only_values_entered(monkeypatch, tmp_path: Path) -> None:
         "DEEPSEEK_API_KEY": "deepseek-value",
         "NLP_AGENT_WEB_SECRET": "tavily-value",
     }
+
+
+def test_setup_can_show_input_when_explicitly_requested(monkeypatch, tmp_path: Path) -> None:
+    answers = iter(["deepseek-value", *([""] * 10)])
+    saved: dict[str, str] = {}
+    monkeypatch.setattr(secret_cli, "input", lambda _: next(answers))
+    monkeypatch.setattr(secret_cli, "set_secret", saved.__setitem__)
+
+    assert secret_cli.run_secret_command(
+        ["setup", "--show-input"], env_path=tmp_path / ".env"
+    ) == 0
+    assert saved == {"DEEPSEEK_API_KEY": "deepseek-value"}
