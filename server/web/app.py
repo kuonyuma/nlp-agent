@@ -8,7 +8,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, WebSocket, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyCookie
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -38,6 +38,7 @@ from server.web.contracts import (
     UpdateSettingsBody,
 )
 from server.web.protocol import control_event
+from server.web.developer import developer_snapshot
 from server.web.websocket import WebSocketHub, websocket_endpoint
 
 
@@ -283,6 +284,7 @@ def create_app(
         return {
             "user_id": claims.user_id,
             "workspace_ids": sorted(claims.workspace_ids),
+            "roles": sorted(claims.roles),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at,
             "ephemeral_secret": auth.ephemeral_secret,
@@ -293,6 +295,7 @@ def create_app(
         return {
             "user_id": claims.user_id,
             "workspace_ids": sorted(claims.workspace_ids),
+            "roles": sorted(claims.roles),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at,
         }
@@ -488,6 +491,10 @@ def create_app(
             },
         }
 
+    @app.get("/api/v1/developer/snapshot", tags=["developer"])
+    async def get_developer_snapshot(request: Request, principal: Principal):
+        return await developer_snapshot(principal, request.app.state.gateway)
+
     @app.patch("/api/v1/settings", tags=["settings"])
     async def update_settings(
         body: UpdateSettingsBody,
@@ -523,6 +530,11 @@ def create_app(
     if static_dir is not None and not static_dir.is_absolute():
         static_dir = Path(__file__).resolve().parents[2] / static_dir
     if static_dir is not None and static_dir.is_dir():
+        @app.get("/developer", include_in_schema=False)
+        @app.get("/developer/{developer_path:path}", include_in_schema=False)
+        async def developer_spa(developer_path: str = ""):
+            return FileResponse(static_dir / "index.html")
+
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="webui")
     else:
         @app.get("/", include_in_schema=False)

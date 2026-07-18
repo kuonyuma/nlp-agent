@@ -145,6 +145,10 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
         assert client.get("/health/live").json() == {"status": "ok"}
         assert client.get("/health/ready").status_code == 200
         csrf = authenticate(client)
+        developer = client.get("/api/v1/developer/snapshot")
+        assert developer.status_code == 200
+        assert developer.json()["runtime"]["status"] == "ok"
+        assert "tools" in developer.json()
 
         rejected = client.post("/api/v1/sessions", json={"workspace_id": "default"})
         assert rejected.status_code == 403
