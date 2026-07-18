@@ -33,6 +33,18 @@ web:
   ws_max_connections_per_user: 10
   static_dir: webui/dist
 
+# The developer monitor is a separate read-mostly process. It never owns the
+# Agent/Gateway lifecycle and therefore cannot slow down student chat traffic.
+monitor:
+  host: 127.0.0.1
+  port: 8766
+  cookie_name: nlp_monitor_session
+  cookie_ttl_s: 28800
+  cookie_secure: false
+  allowed_hosts: [127.0.0.1, localhost, testserver]
+  allowed_origins: [http://127.0.0.1:8766, http://localhost:8766, http://127.0.0.1:5174]
+  static_dir: webui/monitor-dist
+
 providers:
   deepseek:
     adapter: deepseek
