@@ -19,6 +19,7 @@ export class StudentSocket {
   private activeSession: string | null = null;
   private readonly lastSequences = new Map<string, number>();
   private readonly pending: Command[] = [];
+  private readonly unacknowledgedChats = new Map<string, Command>();
 
   constructor(
     private readonly onEvent: EventHandler,
@@ -47,12 +48,16 @@ export class StudentSocket {
       }
       if (event.type === "connection.ready") {
         this.ready = true;
-        this.onStatus("connected");
         if (this.activeSession) this.command("session.subscribe", { session_id: this.activeSession });
         for (const [turnId, sequence] of this.lastSequences) {
           this.command("stream.resume", { turn_id: turnId, after_sequence: sequence });
         }
+        for (const command of [...this.unacknowledgedChats.values()]) this.sendNow(command);
         while (this.pending.length) this.sendNow(this.pending.shift()!);
+        this.onStatus("connected");
+      }
+      if ((event.type === "command.ack" || event.type === "command.error") && event.request_id) {
+        this.unacknowledgedChats.delete(event.request_id);
       }
       if (event.turn_id && event.sequence != null) {
         this.lastSequences.set(event.turn_id, Math.max(event.sequence, this.lastSequences.get(event.turn_id) ?? 0));
@@ -94,8 +99,8 @@ export class StudentSocket {
     }
   }
 
-  sendChat(sessionId: string, content: string, requestId: string): void {
-    this.command("chat.send", { session_id: sessionId, content, idempotency_key: requestId }, requestId);
+  sendChat(sessionId: string, content: string, requestId: string, learningContext?: object): void {
+    this.command("chat.send", { session_id: sessionId, content, idempotency_key: requestId, ...(learningContext ? { learning_context: learningContext } : {}) }, requestId);
   }
 
   cancel(turnId: string): void {
@@ -117,9 +122,12 @@ export class StudentSocket {
     this.socket?.close(1000, "student ui closed");
     this.socket = null;
     this.ready = false;
+    this.pending.length = 0;
+    this.unacknowledgedChats.clear();
   }
 
   private sendNow(command: Command): void {
+    if (command.type === "chat.send") this.unacknowledgedChats.set(command.request_id, command);
     this.socket?.send(JSON.stringify(command));
   }
 

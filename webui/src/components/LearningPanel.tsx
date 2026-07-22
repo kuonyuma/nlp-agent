@@ -6,7 +6,7 @@ function downloadReport(title: string, context: LearningContext, meta: SessionLe
   const body = [
     `# ${title}`,
     "",
-    `- 学习主题：${meta.topic ?? context.topic}`,
+    `- 学习主题：${(meta.topic ?? context.topic_name) || "未选择"}`,
     `- 学习难度：${context.level}`,
     `- 教学模式：${context.mode}`,
     "",
@@ -36,7 +36,7 @@ export function LearningPanel({ open, onClose, title, context, meta, messages, o
   return (
     <aside className={`learning-panel ${open ? "open" : ""}`}>
       <header><div><BookMarked size={17} /><strong>本次学习</strong></div><button className="icon-button" type="button" onClick={onClose}><X size={17} /></button></header>
-      <section><h3><Target size={15} />学习目标</h3><p>理解并能够运用“{meta.topic ?? context.topic}”相关概念，通过讲解、示例与练习建立完整认识。</p></section>
+      <section><h3><Target size={15} />学习目标</h3><p>理解并能够运用“{(meta.topic ?? context.topic_name) || "当前问题"}”相关概念，通过讲解、示例与练习建立完整认识。</p></section>
       <section><h3><Lightbulb size={15} />已涉及概念</h3><div className="concept-list">{meta.concepts?.length ? meta.concepts.map((concept) => {
         const reviewing = meta.reviewConcepts?.includes(concept) ?? false;
         return <button className={reviewing ? "reviewing" : ""} type="button" title="点击切换待复习状态" key={concept} onClick={() => onMeta({ reviewConcepts: reviewing ? meta.reviewConcepts?.filter((item) => item !== concept) : [...(meta.reviewConcepts ?? []), concept] })}>{concept}</button>;

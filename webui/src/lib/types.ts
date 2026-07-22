@@ -46,6 +46,16 @@ export interface TeachingGoals {
   target_level: "beginner" | "intermediate" | "advanced";
 }
 
+export type AvailabilityStatus = "enabled" | "disabled";
+export type BlueprintStatus = "draft" | AvailabilityStatus;
+export interface KnowledgePoint { id: string; name: string; markdown: string; status: AvailabilityStatus; sort_order: number }
+export interface CourseTopic { id: string; name: string; description: string; status: AvailabilityStatus; knowledge_points: KnowledgePoint[] }
+export interface RubricPoint { id?: string; criterion: string; weight: number }
+export interface ExerciseBlueprint { id: string; name: string; topic_id: string; knowledge_point_id: string; instructions: string; question_type: string; status: BlueprintStatus; rubric: RubricPoint[] }
+export interface ReviewBlueprint { id: string; name: string; topic_id: string; knowledge_point_id: string; instructions: string; exercise_blueprint_id: string | null; status: BlueprintStatus; question_type: string; rubric: RubricPoint[] }
+export interface GuidedBlueprint { id: string; name: string; topic_id: string; knowledge_point_id: string; guidance: string; status: BlueprintStatus }
+export interface TeacherCatalog { workspace_id: string; topics: CourseTopic[]; exercise_blueprints: ExerciseBlueprint[]; review_blueprints: ReviewBlueprint[]; guided_blueprints: GuidedBlueprint[] }
+
 export interface ClassifiedQuestion {
   turn_id: string;
   session_id: string;
@@ -82,8 +92,8 @@ export interface SessionSummary {
   user_id: string;
   workspace_id: string;
   channel: string;
-  created_at?: number | string;
-  last_active?: number | string;
+  created_at?: number;
+  last_active?: number;
 }
 
 export interface TurnRecord {
@@ -97,6 +107,9 @@ export interface TurnRecord {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  learning_context?: LearningContext | null;
+  learning_progress?: Record<string, unknown> | null;
+  exercise_state?: Record<string, unknown> | null;
 }
 
 export interface ServerEvent {
@@ -112,7 +125,8 @@ export interface ServerEvent {
 }
 
 export interface LearningContext {
-  topic: string;
+  topic_id: string | null;
+  topic_name: string;
   level: "beginner" | "intermediate" | "advanced";
   mode: "explain" | "socratic" | "practice" | "review";
 }
@@ -123,6 +137,8 @@ export interface ActivityItem {
   label: string;
   status: "running" | "completed" | "error";
   detail?: string;
+  startedAt?: string;
+  completedAt?: string;
 }
 
 export interface ChatMessage {
@@ -134,11 +150,14 @@ export interface ChatMessage {
   status?: TurnStatus;
   activities?: ActivityItem[];
   createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
 }
 
 export interface SessionLearningMeta {
   title?: string;
   topic?: string;
+  categoryId?: string;
   favorite?: boolean;
   archived?: boolean;
   summary?: string;
@@ -147,10 +166,17 @@ export interface SessionLearningMeta {
   updatedAt?: number;
 }
 
+export interface LearningCategory {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
 export interface LearningPreferences {
-  version: 1;
+  version: 2;
   context: LearningContext;
   sessions: Record<string, SessionLearningMeta>;
+  categories: LearningCategory[];
 }
 
 export interface UserSettings {
