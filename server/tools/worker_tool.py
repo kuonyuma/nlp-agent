@@ -5,7 +5,7 @@ Worker 生命周期管理工具模块。
 "发号施令→后台执行→结果回传"这一完整闭环的载体。
 主要功能包括：
 - 提供 `spawn_worker` 工具：根据技能黄页创建全新的 Worker 并异步启动沙箱循环。
-- 提供 `send_message` 工具：从磁盘恢复已存在 Worker 的对话历史并追加指令继续执行。
+- 提供 `send_message` 工具：向仍在运行的 Worker 追加指令；已结束的 Worker 不会被重新启动。
 - 提供 `_execute_sandbox_loop` 内部沙箱引擎：负责 Worker 的 ReAct 循环
   （模型思考 → 工具调用 → 结果回写），包含超时控制、遥测统计、插队消息处理。
 - 提供 `_background_task_wrapper` 壳函数：包裹沙箱循环并在结束时将结果通知
@@ -41,8 +41,8 @@ Functions:
         通过 `asyncio.create_task` 启动后台沙箱，瞬间返回 "started" 通知。
 
     send_message(to_agent_id, message, config) -> str
-        LangChain `@tool`。从 JSONL 磁盘恢复 Worker 历史消息与模型名，
-        追加新 HumanMessage 并以原模型重新启动后台沙箱，支持跨轮次延续上下文。
+        LangChain `@tool`。向仍在运行的 Worker 追加明确指令；若目标已结束，
+        返回失败通知并由 Coordinator 综合已有结果或创建新的 Worker。
 
 Dependencies:
     - `core.skill_loader.skill_loader`: 查询技能名是否合法、获取 SOP Prompt 与工具白名单。
@@ -54,12 +54,13 @@ Dependencies:
     - `configs.settings.settings`: 模型名解析（_resolve_model_name）。
 
 Side effects:
-    - 每次 spawn/send_message 会在 `.data/sessions/<session_id>/subagents/<worker_id>/`
+    - `spawn_worker` 会在 `.data/sessions/<session_id>/subagents/<worker_id>/`
       下创建 metadata.json 和 transcript.jsonl 文件。
     - 通过 `asyncio.create_task` 创建的后台任务不阻塞调用方，Coordinator 立即返回。
     - 沙箱超时（60s）或轮次耗尽（6 轮）均不会导致进程崩溃，错误通过通知 JSON 回传。
 """
 import asyncio
+import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -96,8 +97,6 @@ from utils.tokens import build_context_budget
 from server.agent.node.session_storage import (
     write_agent_metadata,
     record_sidechain_transcript,
-    get_transcript,
-    read_agent_metadata
 )
 from utils.logger import get_logger
 from utils.uuid import create_agent_id
@@ -745,6 +744,20 @@ async def spawn_worker(
         },
         "retry": {"maxAttempts": max_attempts},
     })
+    # Keep orchestration evidence queryable without putting the directive itself
+    # (which may contain user data) into observability storage.
+    global_telemetry.event(
+        "agent.worker.dispatched",
+        payload={
+            "worker_id": worker_id,
+            "agent_name": agent_name,
+            "join": join,
+            "wait_mode": wait_mode,
+            "quorum": quorum,
+            "directive_chars": len(directive),
+            "directive_sha256": hashlib.sha256(directive.encode("utf-8")).hexdigest(),
+        },
+    )
     record_sidechain_transcript(session_id, worker_id, initial_messages)
 
     bg_task = asyncio.create_task(
@@ -786,9 +799,7 @@ async def spawn_worker(
 
 @tool("send_message", args_schema=SendMessageInput)
 async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -> str:
-    """继续一个已经存在的 Worker。发送追加指令，它将带着之前的上下文记忆继续工作。
-
-    会从元数据中恢复该 Worker 创建时使用的模型，保证上下文一致性。
+    """向正在运行的 Worker 追加指令，不恢复或重新启动已结束的 Worker。
 
     Args:
         to_agent_id: 目标 Worker 的 Task-ID。
@@ -799,9 +810,8 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
         JSON 字符串（WorkerNotificationSpec），包含 task_id 和状态摘要。
     """
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
-    current_turn_id = config.get("configurable", {}).get("turn_id", "")
 
-    # 情况 A：Worker 正在运行 → 插队投递，不重启
+    # Worker 正在运行：插队投递，不重启。
     task = global_task_manager.get_active_task(to_agent_id)
     if task:
         accepted = global_task_manager.queue_command(
@@ -824,79 +834,8 @@ async def send_message(to_agent_id: str, message: str, config: RunnableConfig) -
             summary="消息已投递至运行中的 Worker，将在其下一轮工具调用前处理。"
         ).model_dump_json(exclude_none=True)
 
-    # 情况 B：Worker 已停止 → 从磁盘恢复并重新启动
-    try:
-        messages = get_transcript(session_id, to_agent_id)
-        metadata = read_agent_metadata(session_id, to_agent_id)
-    except FileNotFoundError:
-        return WorkerNotificationSpec(
-            task_id=to_agent_id, status="failed", summary="找不到该 Worker 的历史记忆。"
-        ).model_dump_json(exclude_none=True)
-
-    new_human_msg = HumanMessage(content=f"【追加指令】：\n{message}")
-    messages.append(new_human_msg)
-    record_sidechain_transcript(session_id, to_agent_id, [new_human_msg])
-
-    agent_name = metadata.get("agentType", "unknown")
-    resolved_model = metadata.get("model", "")
-    try:
-        grant_data = metadata.get("toolGrant")
-        if grant_data:
-            snapshot = ToolGrantSnapshot.model_validate(grant_data)
-            toolset = physical_tool_manager.get_worker_toolset_from_snapshot(snapshot)
-        else:
-            profile = skill_loader.resolve_profile(agent_name)
-            toolset = physical_tool_manager.get_worker_toolset(
-                allowed_names=profile.allowed_tools,
-                capabilities=profile.capabilities,
-                denied_names=profile.denied_tools,
-                session_id=session_id,
-                profile=profile.name,
-            )
-    except ValueError as error:
-        return WorkerNotificationSpec(
-            task_id=to_agent_id,
-            status="failed",
-            summary=f"Worker 工具授权无法恢复：{error}",
-        ).model_dump_json(exclude_none=True)
-
-    bg_task = asyncio.create_task(
-        _background_task_wrapper(to_agent_id, session_id, messages, toolset, resolved_model)
-    )
-
-    budget_data = metadata.get("budget", {})
-    retry_data = metadata.get("retry", {})
-    from configs.settings import settings
-    runtime_settings = settings.get_agent_runtime("worker")
-    global_task_manager.register_task(
-        task_id=to_agent_id,
-        task_type=agent_name,
-        command=message,
-        future=bg_task,
-        session_id=session_id,
-        join=bool(metadata.get("join", True)),
-        parent_turn_id=current_turn_id or str(metadata.get("parentTurnId", "")),
-        parent_worker_id=str(metadata.get("parentWorkerId", "")),
-        wait_mode=metadata.get("waitMode", "all"),
-        quorum=int(metadata.get("quorum", 1)),
-        wait_timeout_s=float(metadata.get("waitTimeoutS", 60.0)),
-        budget=WorkerResourceBudget(
-            max_turns=int(budget_data.get("maxTurns", 6)),
-            max_duration_s=float(budget_data.get("maxDurationS", 60.0)),
-            max_tokens=int(budget_data.get("maxTokens", 32_000)),
-            max_tool_calls=int(budget_data.get("maxToolCalls", 12)),
-            max_injections=int(runtime_settings.get("max_injections", 15)),
-            injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
-            max_tool_result_chars=int(runtime_settings.get("max_tool_result_chars", 50_000)),
-            finalize_on_exhaustion=bool(runtime_settings.get("finalize_on_exhaustion", True)),
-        ),
-        retry_policy=WorkerRetryPolicy(
-            max_attempts=int(retry_data.get("maxAttempts", 3))
-        ),
-    )
-
     return WorkerNotificationSpec(
         task_id=to_agent_id,
-        status="started",
-        summary="任务已成功从断点唤醒并在后台继续执行。如需终止，请使用 TaskStop 工具。"
+        status="failed",
+        summary="Worker 已结束或不存在，不能重新启动。请由 Coordinator 综合现有结果，或创建新的 Worker。",
     ).model_dump_json(exclude_none=True)

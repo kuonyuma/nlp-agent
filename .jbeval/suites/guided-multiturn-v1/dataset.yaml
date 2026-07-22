@@ -1,0 +1,128 @@
+schema_version: "1.0"
+suite:
+  id: guided-multiturn-v1
+  name: 引导模式多轮会话评测集
+  description: 固定 TF-IDF 与 FAQ 检索蓝图，验证引导会话持续性、蓝图快照和进度持久化。
+
+blueprint_path: blueprint.yaml
+
+defaults:
+  workspace_id: evaluation-guided-isolated
+  repeats: 3
+  timeout_seconds: 120
+
+cases:
+  - id: tfidf-persistent-misconception
+    tags: [guided, multiturn, architecture, critical]
+    turn_budget: 6
+    learning_context:
+      topic_id: tfidf-faq-retrieval
+      topic_name: TF-IDF 与 FAQ 检索
+      level: beginner
+      mode: socratic
+    student_profile:
+      id: persistent-misconception
+      role: 刚接触文本检索、愿意回答但容易把词频当成唯一重要性的学生。
+      initial_goal: 我想理解 TF-IDF 为什么能用于给 FAQ 排序。
+      hidden_misconceptions:
+        - 一个词在文档中出现次数越多，它就一定越重要。
+      behavior_rules:
+        - 前两轮坚持误解。
+        - 被追问时给出简短但相关的回答。
+        - 理解后尝试用自己的话总结。
+    expected_architecture:
+      reuse_chat_session: true
+      reuse_guided_session: true
+      preserve_blueprint: true
+      persist_progress_every_turn: true
+
+  - id: tfidf-ideal-learner
+    tags: [guided, normal]
+    turn_budget: 5
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile:
+      id: ideal
+      role: 能逐步推理并主动总结的初学者。
+      initial_goal: 我想学会用 TF-IDF 排序 FAQ。
+      behavior_rules: [每轮认真回答, 最后独立总结 TF 与 IDF。]
+
+  - id: tfidf-terse-replies
+    tags: [guided, terse, resilience]
+    turn_budget: 6
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile:
+      id: terse
+      role: 回答很短、需要教师持续追问的学生。
+      initial_goal: 我不太懂 TF-IDF。
+      behavior_rules: [前两轮只回答嗯或不知道, 后续在提示下作答。]
+
+  - id: tfidf-answer-seeking
+    tags: [guided, answer-seeking]
+    turn_budget: 6
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile:
+      id: answer-seeking
+      role: 多次要求直接给答案的学生。
+      initial_goal: 直接告诉我 TF-IDF 怎么排序。
+      behavior_rules: [前两轮要求直接答案, 被拒绝后尝试回答。]
+
+  - id: tfidf-off-topic-recovery
+    tags: [guided, off-topic, recovery]
+    turn_budget: 6
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile:
+      id: off-topic
+      role: 会短暂跑题但可被拉回目标的学生。
+      initial_goal: 我想理解 FAQ 的 TF-IDF。
+      behavior_rules: [中途问一次无关问题, 接受教师拉回后继续。]
+
+  - id: tfidf-repeated-misconception
+    tags: [guided, misconception, stress]
+    turn_budget: 8
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile:
+      id: repeated-misconception
+      role: 会反复坚持词频唯一重要性的学生。
+      initial_goal: 我认为词频够了，为什么还要 IDF？
+      hidden_misconceptions: [词频高就一定最相关。]
+      behavior_rules: [至少三轮坚持误解, 之后尝试修正。]
+
+  - id: tfidf-long-context-pressure
+    tags: [guided, long-context, pressure, critical]
+    turn_budget: 18
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile:
+      id: long-pressure
+      role: 会重复确认、要求例子并逐步总结的学生。
+      initial_goal: 我想从词频开始彻底理解 TF-IDF 检索。
+      behavior_rules: [每轮围绕目标继续, 穿插重复确认和要求新例子, 最后总结。]
+
+  - id: tfidf-slow-correction
+    tags: [guided, slow-correction]
+    turn_budget: 7
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile: {id: slow, role: 需要多个例子才修正错误的学生。, initial_goal: 我分不清 TF 和 IDF。, behavior_rules: [每次只接受一点提示, 最后总结。]}
+
+  - id: tfidf-transfer-question
+    tags: [guided, transfer]
+    turn_budget: 6
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile: {id: transfer, role: 希望迁移到新 FAQ 的学生。, initial_goal: 学完后我想判断新的查询怎么排序。, behavior_rules: [要求一个新例子, 最后自己判断。]}
+
+  - id: tfidf-low-confidence
+    tags: [guided, low-confidence]
+    turn_budget: 6
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile: {id: low-confidence, role: 容易说我不会但愿意继续的学生。, initial_goal: 我怕自己算不懂 TF-IDF。, behavior_rules: [至少两次表达不自信, 接受分步问题。]}
+
+  - id: tfidf-contradictory-answers
+    tags: [guided, contradiction]
+    turn_budget: 7
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile: {id: contradictory, role: 前后回答偶有矛盾的学生。, initial_goal: 我想理解常见词为什么权重低。, behavior_rules: [中途给出矛盾答案, 根据追问修正。]}
+
+  - id: tfidf-completion-boundary
+    tags: [guided, completion]
+    turn_budget: 8
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: socratic}
+    student_profile: {id: completion, role: 较快掌握并主动要求总结的学生。, initial_goal: 我只想抓住 TF-IDF 排序要点。, behavior_rules: [较快理解, 主动要求总结并结束。]}

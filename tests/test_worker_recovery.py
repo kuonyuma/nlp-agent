@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 
 import pytest
@@ -173,3 +174,14 @@ async def test_sandbox_finalizes_usefully_after_turn_budget(monkeypatch):
     assert result.status == "failed"
     assert result.termination_reason == "max_turns"
     assert result.output == "partial work summarized"
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_completed_worker_without_restarting():
+    result = await worker_tool.send_message.ainvoke(
+        {"to_agent_id": "completed-worker", "message": "please continue"},
+        config={"configurable": {"thread_id": "s1", "turn_id": "turn-1"}},
+    )
+
+    assert json.loads(result)["status"] == "failed"
+    assert global_task_manager.get_active_task("completed-worker") is None

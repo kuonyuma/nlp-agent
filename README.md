@@ -1,96 +1,99 @@
-# nlp-agent
+# Nova
 
-本项目完整复刻自 `liunor/Agentic-Travel`，并改造成通用 NLP 多智能体框架。
+<p align="center">
+  <img src="webui/logo/nova.png" alt="Nova" width="210">
+</p>
 
-保留的核心能力：
+<p align="center">
+  <strong>你的自然语言处理学习与实践助手</strong><br>
+  从一个问题开始，让学习、练习和复盘变得更简单。
+</p>
 
-- LangGraph Coordinator/Worker 主从编排
-- Worker 并发、续接、停止和消息通知
-- SQLite Checkpointer 与 JSONL 会话记录
-- 长期记忆的提取、索引和按需注入
-- Context Trim、Snip、Micro-Compact、Context Collapse、Auto-Compact
-- Markdown Skill 加载和最小权限工具分配
-- Prompt Runtime：版本化 Markdown 模板、严格变量校验、组合渲染与热重载缓存
-- 文件读取、时间和网页搜索通用工具
-- 单实例 Backend Gateway Core，统一管理 Agent、Turn、Worker 和关闭生命周期
-- SQLite Turn/Event/Outbox、幂等提交、断线事件重放与流式订阅
-- Session/Memory/Trace/Worker 控制的认证主体与所有权隔离
+## Nova 是什么
 
-## Backend Gateway
+Nova 是一个面向自然语言处理学习场景的智能体。你可以和它对话、提问、练习，也可以让它根据你的学习情况给出下一步建议。
 
-CLI 已经通过 `BackendGateway` 进入 Agent，未来 FastAPI 也应只适配该入口，
-不要在 Web 进程中另外构建 LangGraph 或 Worker Runtime。当前本地运行时要求
-单 Gateway 进程；详细生命周期、流式恢复和安全边界见
-[`docs/backend-gateway.md`](docs/backend-gateway.md)。
+## 四个核心模块
 
-已经移除：
+| 模块 | 你可以做什么 |
+| --- | --- |
+| 学习者 | 提问、学习知识点、完成练习、查看学习记录 |
+| 教师 | 组织学习内容、查看学习情况、辅助准备教学活动 |
+| 开发者 | 查看运行状态、调试对话、检查接口和事件 |
+| 运行监控 | 观察服务健康度、请求状态和实时运行信息 |
 
-- RAG、向量库、知识库入库与检索
-- 地图、路线、周边搜索等文旅工具
-- 天气、旅行建议、天文和预报工具
-- 图像生成工具
-- 文旅行程规划 Skill
-- 所有旅行领域专用提示词和记忆分类
+## 快速启动
 
-## 使用 uv 运行
+### 1. 准备环境
+
+请先安装 Python 3.11 或更高版本，以及 [uv](https://docs.astral.sh/uv/)。然后打开 PowerShell，进入项目目录：
+
+```powershell
+cd E:\Github\Pro_NLP
+```
+
+### 2. 安装依赖
 
 ```powershell
 uv sync
-Copy-Item .env-example .env
-uv run python main.py chat
 ```
 
-## FastAPI Web backend
+### 3. 创建配置文件
+
+复制配置模板：
+
+```powershell
+Copy-Item .env-example .env
+```
+
+用记事本打开 `.env`：
+
+```powershell
+notepad .env
+```
+
+至少确认以下配置已经填写：
+
+```dotenv
+DEEPSEEK_API_KEY=你的模型服务密钥
+NLP_AGENT_WEB_SECRET=你自己生成的一段随机长字符串
+```
+
+保存后关闭记事本。`.env` 只用于本机配置，不要提交到 Git。
+
+### 4. 启动 Nova Web
 
 ```powershell
 uv run python main.py serve
 ```
 
-This starts one FastAPI process on `127.0.0.1:8765`. Its lifespan owns exactly
-one `BackendGateway`; HTTP is the control plane and `/ws/v1` is the multiplexed
-realtime plane. See [`docs/web-api.md`](docs/web-api.md) for authentication,
-routes, event contracts, reconnect recovery, and the nanobot WebUI adaptation
-map.
+看到服务启动提示后，在浏览器打开：
 
-## Developer and observability platform
+<http://127.0.0.1:8765>
 
-The administrator control plane stays on the main WebUI at `/developer`. The
-read-mostly Trace, Token, latency, error, session, event, and storage monitor is
-isolated on `127.0.0.1:8766` and does not own an Agent runtime:
+### 5. 访问不同模块
+
+- 学习者：<http://127.0.0.1:8765/>
+- 教师：<http://127.0.0.1:8765/teacher>
+- 开发者：<http://127.0.0.1:8765/developer>
+- 运行监控：先执行 `uv run python main.py monitor`，再打开监控页面
+
+## 其他启动方式
+
+命令行对话：
+
+```powershell
+uv run python main.py chat
+```
+
+运行监控服务：
 
 ```powershell
 uv run python main.py monitor
 ```
 
-Build its frontend with `cd webui; npm run build:monitor`. Architecture,
-security boundaries, ports, and development commands are documented in
-[`docs/developer-platform.md`](docs/developer-platform.md).
+停止服务时，在对应 PowerShell 窗口按 `Ctrl+C` 即可。
 
-## Teacher mode
+## 项目定位
 
-Teacher mode is available on the primary WebUI at `/teacher`. It provides local
-teaching-goal configuration, student-question classification, frequent-question
-analysis, weak-topic inference, and topic/difficulty statistics. Course, Prompt,
-and durable report repository interfaces are reserved for the later account and
-database phase. See [`docs/teacher-mode.md`](docs/teacher-mode.md).
-
-在 `.env` 中至少配置 `DEEPSEEK_API_KEY`。可在
-`configs/agent_config.yaml` 中修改 Coordinator、Worker 模型和按智能体名称的覆盖规则。
-
-## Prompt Runtime
-
-运行规则不再散落在 Python 字符串中。`core/prompt_runtime/templates/` 下的 Markdown
-模板通过 `PromptRegistry` 注册，`PromptRenderer` 在模型调用前严格校验变量，
-`PromptComposer` 用独立片段组成系统消息。Skill 保持为领域知识/SOP，不承担运行时
-规则。当前 Coordinator、Worker、Memory、Compression 和 Runtime recovery 均已接入；
-新增模板应同时在 `core/prompt_runtime/registry.py` 声明 id、版本和变量契约。
-要切换一个已提交的版本化模板（如 `coordinator.v2.md`），在
-`configs/agent_config.yaml` 的 `prompts.versions` 中设置 `coordinator: "2"`。
-
-## 常用命令
-
-```powershell
-uv run python -m compileall .
-uv run pytest
-uv run python main.py chat
-```
+Nova 当前主要用于内网演示、教学和自然语言处理学习实践。欢迎在使用过程中提出建议，一起把它变成更好用的学习伙伴。

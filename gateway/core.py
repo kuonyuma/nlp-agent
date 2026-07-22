@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
+import json
+import re
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
@@ -11,6 +15,7 @@ from typing import Any
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
 from core.session_context import SessionContext
+from core.learning import ExerciseState, LearningContext, TeachingMaterials, default_progress
 from gateway.contracts import (
     GatewayEvent,
     GatewayEventType,
@@ -19,6 +24,7 @@ from gateway.contracts import (
     InjectMessageRequest,
     ResourceNotFoundError,
     SubmitTurnRequest,
+    TeachingConfigurationError,
     TurnAccepted,
     TurnConflictError,
     TurnRecord,
@@ -28,6 +34,41 @@ from gateway.engine import AgentEngine, LangGraphAgentEngine
 from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
 from server.agent.session_service import LocalSessionService, local_session_service
+
+
+_EXERCISE_RESULT_RE = re.compile(r"<!--\s*exercise-result:\s*(\{.*?\})\s*-->", re.DOTALL)
+_GUIDED_RESULT_RE = re.compile(r"<!--\s*guided-result:\s*(\{.*?\})\s*-->", re.DOTALL)
+_EXPLICIT_EXERCISE_START_RE = re.compile(
+    r"(?:开始|继续|新(?:的)?|再来|下一).{0,8}(?:练习|复习|题)|(?:练习|复习).{0,8}(?:开始|继续|下一题)",
+    re.IGNORECASE,
+)
+
+
+def _extract_exercise_result(text: str) -> tuple[str, dict[str, Any] | None]:
+    """Remove the hidden model envelope and return its validated JSON object when present."""
+    match = _EXERCISE_RESULT_RE.search(text)
+    if match is None:
+        return text.strip(), None
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return text.strip(), None
+    return _EXERCISE_RESULT_RE.sub("", text).strip(), value if isinstance(value, dict) else None
+
+
+def _extract_guided_result(text: str) -> tuple[str, dict[str, Any] | None]:
+    match = _GUIDED_RESULT_RE.search(text)
+    if match is None:
+        return text.strip(), None
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return _GUIDED_RESULT_RE.sub("", text).strip(), None
+    return _GUIDED_RESULT_RE.sub("", text).strip(), value if isinstance(value, dict) else None
+
+
+def _is_explicit_exercise_start(content: str) -> bool:
+    return bool(_EXPLICIT_EXERCISE_START_RE.search(content.strip()))
 
 
 class BackendGateway:
@@ -52,8 +93,14 @@ class BackendGateway:
         if not database.is_absolute():
             database = project / database
         self.engine = engine or LangGraphAgentEngine()
+        engine_parameter_count = len(inspect.signature(self.engine.run_turn).parameters)
+        self._engine_accepts_learning = engine_parameter_count >= 6
+        self._engine_accepts_teaching_materials = engine_parameter_count >= 7
         self.repository = repository or GatewayRepository(
-            database
+            database,
+            knowledge_point_prompt_budget=max(
+                1, int(gateway_config.get("knowledge_point_prompt_budget", 12_000))
+            ),
         )
         self.sessions = sessions
         self.events = GatewayEventBroker()
@@ -168,7 +215,130 @@ class BackendGateway:
         self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest
     ) -> TurnAccepted:
         context = await self.sessions.resolve(principal, request.session_id)
+        if request.evaluation is not None:
+            context = context.model_copy(
+                update={"observability_attributes": request.evaluation.trace_attributes()}
+            )
         await self.sessions.touch(principal, request.session_id)
+        if request.idempotency_key:
+            existing = await asyncio.to_thread(
+                self.repository.turn_for_idempotency,
+                user_id=context.user_id,
+                session_id=context.session_id,
+                idempotency_key=request.idempotency_key,
+            )
+            if existing is not None:
+                return TurnAccepted(
+                    turn_id=existing.turn_id,
+                    session_id=existing.session_id,
+                    status=existing.status,
+                    duplicate=True,
+                )
+        active = await asyncio.to_thread(
+            self.repository.active_turn_for_session, context.session_id
+        )
+        if active is not None:
+            raise TurnConflictError(active.turn_id)
+        previous_context, progress, exercise = await asyncio.to_thread(
+            self.repository.latest_learning_state, context.session_id
+        )
+        await asyncio.to_thread(self.repository.expire_guided_sessions, session_id=context.session_id)
+        await asyncio.to_thread(self.repository.expire_exercise_sessions, session_id=context.session_id)
+        learning_context = request.learning_context or previous_context
+        topic_changed = (
+            request.learning_context is not None
+            and previous_context is not None
+            and request.learning_context.topic_id != previous_context.topic_id
+        )
+        mode_changed = (
+            request.learning_context is not None
+            and previous_context is not None
+            and request.learning_context.mode != previous_context.mode
+        )
+        level_changed = (
+            request.learning_context is not None
+            and previous_context is not None
+            and request.learning_context.level != previous_context.level
+        )
+        if topic_changed:
+            progress = None
+        if topic_changed or mode_changed or level_changed:
+            exercise = None
+        if previous_context is not None and previous_context.mode == "socratic" and (topic_changed or mode_changed):
+            await asyncio.to_thread(self.repository.end_guided_sessions, session_id=context.session_id)
+        if previous_context is not None and previous_context.mode in {"practice", "review"} and (topic_changed or mode_changed or level_changed):
+            await asyncio.to_thread(self.repository.end_exercise_sessions, session_id=context.session_id)
+        if learning_context is not None and progress is None:
+            progress = default_progress(learning_context)
+        learning_topic = None
+        if learning_context is not None and learning_context.topic_id:
+            learning_topic = await asyncio.to_thread(
+                self.repository.teaching_topic,
+                context.workspace_id,
+                learning_context.topic_id,
+            )
+            if learning_topic is None:
+                catalog = await asyncio.to_thread(
+                    self.repository.get_teaching_catalog,
+                    context.workspace_id,
+                )
+                if catalog["catalog"].get("topics"):
+                    raise TeachingConfigurationError(
+                        f"学习主题不可用：“{learning_context.topic_name or learning_context.topic_id}”，请重新选择主题。"
+                    )
+        teaching_session = None
+        guided_session: dict[str, Any] = {}
+        if learning_context is not None and learning_context.mode == "socratic":
+            guided_blueprint = await asyncio.to_thread(
+                self.repository.select_guided_blueprint,
+                workspace_id=context.workspace_id,
+                topic_id=learning_context.topic_id or "",
+            ) if learning_context.topic_id else None
+            guided_session = await asyncio.to_thread(
+                self.repository.start_or_resume_guided_session,
+                session_id=context.session_id,
+                workspace_id=context.workspace_id,
+                user_id=context.user_id,
+                topic_id=learning_context.topic_id or "",
+                first_message=request.content,
+                guided_blueprint=guided_blueprint,
+            )
+        if learning_context is not None and learning_context.topic_id and learning_context.mode in {"practice", "review"}:
+            teaching_session = await asyncio.to_thread(
+                self.repository.active_exercise_session,
+                session_id=context.session_id,
+                topic_id=learning_context.topic_id,
+                mode=learning_context.mode,
+            )
+            if teaching_session is None:
+                latest = await asyncio.to_thread(
+                    self.repository.active_or_latest_exercise_session,
+                    session_id=context.session_id, topic_id=learning_context.topic_id,
+                    mode=learning_context.mode,
+                )
+                if latest is not None and latest["status"] == "completed" and not _is_explicit_exercise_start(request.content):
+                    teaching_session = latest
+                else:
+                    teaching_session = await asyncio.to_thread(
+                        self.repository.start_exercise_session,
+                        session_id=context.session_id, workspace_id=context.workspace_id,
+                        user_id=context.user_id, topic_id=learning_context.topic_id,
+                        mode=learning_context.mode,
+                    )
+            if teaching_session is None:
+                mode_name = "练习" if learning_context.mode == "practice" else "复习"
+                raise TeachingConfigurationError(f"该主题尚未配置{mode_name}蓝图。")
+            exercise = await asyncio.to_thread(
+                self.repository.exercise_state, teaching_session["id"]
+            )
+        blueprint = teaching_session["blueprint_snapshot"] if teaching_session else None
+        teaching_materials = TeachingMaterials(
+            learning_topic=learning_topic or {},
+            exercise_blueprint=blueprint if learning_context and learning_context.mode == "practice" and blueprint else {},
+            review_blueprint=blueprint if learning_context and learning_context.mode == "review" and blueprint else {},
+            guided_session=guided_session,
+            guided_blueprint=guided_session.get("guided_blueprint", {}),
+        )
         turn_id = str(uuid.uuid4())
         turn, duplicate = await asyncio.to_thread(
             self.repository.create_turn,
@@ -178,6 +348,19 @@ class BackendGateway:
             user_id=context.user_id,
             input_text=request.content,
             idempotency_key=request.idempotency_key,
+            learning_context=learning_context,
+            learning_progress=progress,
+            guided_session_id=guided_session.get("id") or None,
+            guided_blueprint_id=str(guided_session.get("guided_blueprint", {}).get("id") or "") or None,
+            guided_blueprint_snapshot_sha256=(
+                hashlib.sha256(
+                    json.dumps(guided_session.get("guided_blueprint", {}), ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                if guided_session.get("guided_blueprint") else None
+            ),
+            guided_session_attempts=int(guided_session.get("attempts") or 0),
+            guided_session_status=str(guided_session.get("status") or "active"),
+            exercise_state=exercise,
         )
         if duplicate:
             return TurnAccepted(
@@ -186,20 +369,6 @@ class BackendGateway:
                 status=turn.status,
                 duplicate=True,
             )
-        active = await asyncio.to_thread(
-            self.repository.active_turn_for_session,
-            context.session_id,
-            exclude_turn_id=turn.turn_id,
-        )
-        if active is not None:
-            await asyncio.to_thread(
-                self.repository.update_turn,
-                turn.turn_id,
-                TurnStatus.FAILED,
-                error_kind="turn_conflict",
-                error_message=f"session already has active turn {active.turn_id}",
-            )
-            raise TurnConflictError(active.turn_id)
         await self._emit(
             turn.turn_id,
             context.session_id,
@@ -207,7 +376,11 @@ class BackendGateway:
             {"status": TurnStatus.ACCEPTED.value},
         )
         task = asyncio.create_task(
-            self._run_turn(context, turn.turn_id, request.content),
+            self._run_turn(
+                context, turn.turn_id, request.content, learning_context, progress,
+                exercise, teaching_materials, guided_session.get("id"),
+                teaching_session.get("id") if teaching_session is not None else None,
+            ),
             name=f"gateway-turn:{turn.turn_id}",
         )
         self._turn_tasks[turn.turn_id] = task
@@ -219,7 +392,10 @@ class BackendGateway:
         )
 
     async def _run_turn(
-        self, context: SessionContext, turn_id: str, content: str
+        self, context: SessionContext, turn_id: str, content: str,
+        learning_context: LearningContext | None, progress, exercise,
+        teaching_materials: TeachingMaterials, guided_session_id: str | None,
+        exercise_session_id: str | None,
     ) -> None:
         await asyncio.to_thread(
             self.repository.update_turn, turn_id, TurnStatus.RUNNING
@@ -231,7 +407,23 @@ class BackendGateway:
             {"status": TurnStatus.RUNNING.value},
         )
         try:
-            final_text = await self.engine.run_turn(context, turn_id, content)
+            if self._engine_accepts_teaching_materials:
+                final_text = await self.engine.run_turn(
+                    context, turn_id, content,
+                    learning_context=learning_context,
+                    learning_progress=progress,
+                    exercise_state=exercise,
+                    teaching_materials=teaching_materials,
+                )
+            elif self._engine_accepts_learning:
+                final_text = await self.engine.run_turn(
+                    context, turn_id, content,
+                    learning_context=learning_context,
+                    learning_progress=progress,
+                    exercise_state=exercise,
+                )
+            else:
+                final_text = await self.engine.run_turn(context, turn_id, content)
         except asyncio.CancelledError:
             await self.engine.cancel_turn(context, turn_id)
             await asyncio.to_thread(
@@ -263,11 +455,51 @@ class BackendGateway:
                 },
             )
             return
+        if guided_session_id is not None:
+            final_text, guided_result = _extract_guided_result(final_text)
+            await asyncio.to_thread(
+                self.repository.advance_guided_session,
+                guided_session_id,
+                tutor_message=final_text,
+                known_concepts=(guided_result or {}).get("known_concepts"),
+                misconceptions=(guided_result or {}).get("misconceptions"),
+                completed=(guided_result or {}).get("status") == "completed",
+            )
+            await asyncio.to_thread(
+                self.repository.update_turn_guided_status,
+                turn_id,
+                status="completed" if (guided_result or {}).get("status") == "completed" else "active",
+            )
+        final_exercise_state = exercise
+        if exercise_session_id is not None and exercise is not None:
+            final_text, exercise_result = _extract_exercise_result(final_text)
+            try:
+                if exercise.status == "idle":
+                    question = str((exercise_result or {}).get("question") or final_text).strip()
+                    await asyncio.to_thread(
+                        self.repository.record_exercise_question, exercise_session_id, question
+                    )
+                    final_exercise_state = await asyncio.to_thread(
+                        self.repository.exercise_state, exercise_session_id
+                    )
+                elif exercise.status == "awaiting_answer" and exercise_result and exercise_result.get("kind") == "grading":
+                    matches = exercise_result.get("matches")
+                    if not isinstance(matches, list):
+                        raise ValueError("grading result must contain rubric matches")
+                    final_exercise_state = await asyncio.to_thread(
+                        self.repository.grade_exercise_answer,
+                        exercise_session_id, answer=content, matches=matches,
+                        feedback=str(exercise_result.get("feedback") or ""),
+                    )
+            except ValueError:
+                # The chat answer remains available, but an invalid model envelope must never mutate learning records.
+                pass
         await asyncio.to_thread(
             self.repository.update_turn,
             turn_id,
             TurnStatus.COMPLETED,
             final_text=final_text,
+            exercise_state=final_exercise_state,
         )
         await self._emit(
             turn_id,
@@ -409,6 +641,14 @@ class BackendGateway:
             changes,
         )
 
+    async def get_teaching_catalog(self, principal: AuthenticatedPrincipal, workspace_id: str) -> dict[str, Any]:
+        principal.require_workspace(workspace_id)
+        return await asyncio.to_thread(self.repository.get_teaching_catalog, workspace_id)
+
+    async def update_teaching_catalog(self, principal: AuthenticatedPrincipal, workspace_id: str, catalog: dict[str, Any]) -> dict[str, Any]:
+        principal.require_workspace(workspace_id)
+        return await asyncio.to_thread(self.repository.update_teaching_catalog, workspace_id, catalog)
+
     async def stream_events(
         self,
         principal: AuthenticatedPrincipal,
@@ -423,13 +663,23 @@ class BackendGateway:
         )
         last_sequence = max(0, after_sequence)
         try:
-            history = await self.replay_events(
-                principal, turn_id, after_sequence=last_sequence, limit=2000
-            )
-            for event in history:
-                last_sequence = event.sequence
-                yield event
-            if turn.status in {
+            while True:
+                history = await self.replay_events(
+                    principal, turn_id, after_sequence=last_sequence, limit=2000
+                )
+                for event in history:
+                    last_sequence = event.sequence
+                    yield event
+                if len(history) < 2000:
+                    break
+            if any(event.type in {
+                GatewayEventType.TURN_COMPLETED,
+                GatewayEventType.TURN_FAILED,
+                GatewayEventType.TURN_CANCELLED,
+            } for event in history):
+                return
+            current_turn = await self.get_turn(principal, turn_id)
+            if current_turn.status in {
                 TurnStatus.COMPLETED,
                 TurnStatus.FAILED,
                 TurnStatus.CANCELLED,
@@ -441,15 +691,18 @@ class BackendGateway:
                 if event.sequence <= last_sequence:
                     continue
                 if event.sequence > last_sequence + 1:
-                    missing = await self.replay_events(
-                        principal,
-                        turn_id,
-                        after_sequence=last_sequence,
-                        limit=event.sequence - last_sequence,
-                    )
-                    for replayed in missing:
-                        last_sequence = replayed.sequence
-                        yield replayed
+                    while last_sequence + 1 < event.sequence:
+                        missing = await self.replay_events(
+                            principal,
+                            turn_id,
+                            after_sequence=last_sequence,
+                            limit=min(2000, event.sequence - last_sequence - 1),
+                        )
+                        if not missing:
+                            break
+                        for replayed in missing:
+                            last_sequence = replayed.sequence
+                            yield replayed
                     if event.sequence <= last_sequence:
                         continue
                 last_sequence = event.sequence
@@ -466,16 +719,16 @@ class BackendGateway:
     async def delete_session(
         self, principal: AuthenticatedPrincipal, session_id: str
     ) -> None:
-        context = await self.sessions.resolve(principal, session_id)
-        active = await asyncio.to_thread(
-            self.repository.active_turn_for_session, session_id
-        )
-        if active is not None:
-            await self.cancel_turn(principal, active.turn_id)
-        await self.engine.delete_session(context)
-        await self.sessions.delete(principal, session_id)
-        await asyncio.to_thread(self.repository.delete_session, session_id)
-        self._session_turn_locks.pop(session_id, None)
+        async with self._session_turn_locks[session_id]:
+            context = await self.sessions.resolve(principal, session_id)
+            active = await asyncio.to_thread(
+                self.repository.active_turn_for_session, session_id
+            )
+            if active is not None:
+                await self.cancel_turn(principal, active.turn_id)
+            await self.engine.delete_session(context)
+            await self.sessions.delete(principal, session_id)
+            await asyncio.to_thread(self.repository.delete_session, session_id)
         from core.observability.runtime import global_telemetry
 
         await global_telemetry.flush()

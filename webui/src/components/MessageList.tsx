@@ -1,8 +1,8 @@
 import { Check, Copy, GraduationCap, RotateCcw } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 import { ActivityPanel } from "./ActivityPanel";
-import { MarkdownContent } from "./MarkdownContent";
+import { MarkdownContent, stripInternalChatMetadata } from "./MarkdownContent";
 import type { ChatMessage } from "@/lib/types";
 
 function AssistantMessage({ message, showReasoning, onFollowUp }: {
@@ -13,7 +13,7 @@ function AssistantMessage({ message, showReasoning, onFollowUp }: {
   const [copied, setCopied] = useState(false);
   const streaming = ["accepted", "running"].includes(message.status ?? "");
   const copy = async () => {
-    await navigator.clipboard.writeText(message.content);
+    await navigator.clipboard.writeText(stripInternalChatMetadata(message.content));
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1200);
   };
@@ -21,7 +21,14 @@ function AssistantMessage({ message, showReasoning, onFollowUp }: {
     <article className="assistant-message">
       <div className="assistant-mark"><GraduationCap size={17} /></div>
       <div className="assistant-body">
-        <ActivityPanel activities={message.activities ?? []} reasoning={message.reasoning} showReasoning={showReasoning} />
+        <ActivityPanel
+          activities={message.activities ?? []}
+          reasoning={message.reasoning}
+          showReasoning={showReasoning}
+          running={streaming}
+          startedAt={message.startedAt}
+          completedAt={message.completedAt}
+        />
         {message.status === "failed" ? (
           <div className="error-card">这次讲解没有完成，请稍后重试。</div>
         ) : message.status === "cancelled" && !message.content ? (
@@ -46,8 +53,6 @@ export function MessageList({ messages, loading, showReasoning, onFollowUp }: {
   showReasoning: boolean;
   onFollowUp: (text: string) => void;
 }) {
-  const bottom = useRef<HTMLDivElement>(null);
-  useEffect(() => bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" }), [messages]);
   if (loading) return <div className="empty-state"><span className="loading-dot" />正在加载学习记录…</div>;
   if (!messages.length) {
     return (
@@ -65,7 +70,6 @@ export function MessageList({ messages, loading, showReasoning, onFollowUp }: {
       ) : (
         <AssistantMessage key={message.id} message={message} showReasoning={showReasoning} onFollowUp={onFollowUp} />
       ))}
-      <div ref={bottom} />
     </div>
   );
 }

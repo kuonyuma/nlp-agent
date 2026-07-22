@@ -6,15 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from configs.settings import BASE_DIR, settings
-from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.identity import AuthenticatedPrincipal
+from server.web.authorization import require_admin
 
 
 _SENSITIVE_PARTS = ("secret", "password", "api_key", "authorization", "access_token")
-
-
-def require_admin(principal: AuthenticatedPrincipal) -> None:
-    if not principal.is_admin:
-        raise AccessDeniedError("administrator role is required")
 
 
 def _safe(value: Any, key: str = "") -> Any:

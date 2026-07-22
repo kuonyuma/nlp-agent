@@ -12,12 +12,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyCookie
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.websockets import WebSocketDisconnect
 
 from configs.settings import settings
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
 from core.observability.runtime import TelemetryRuntime
 from core.observability.service import ObservabilityService
 from server.web.auth import AuthenticationError, CsrfRejectedError, OriginRejectedError, SameOriginSessionAuth, SessionClaims
+from server.monitor.reset import LocalRuntimeResetter
 
 
 def _problem(status_code: int, code: str, title: str) -> JSONResponse:
@@ -32,11 +34,13 @@ def create_monitor_app(
     *,
     runtime: TelemetryRuntime | None = None,
     auth: SameOriginSessionAuth | None = None,
+    resetter: LocalRuntimeResetter | None = None,
 ) -> FastAPI:
     config = settings.monitor_runtime
     runtime = runtime or TelemetryRuntime()
     service = ObservabilityService(runtime)
     auth = auth or SameOriginSessionAuth.from_config(config)
+    resetter = resetter or LocalRuntimeResetter(runtime)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -169,6 +173,10 @@ def create_monitor_app(
         await asyncio.to_thread(runtime.repository.prune, trace_days, event_days)
         return runtime.health()
 
+    @app.post("/api/v1/observability/storage/reset", tags=["observability"])
+    async def reset(_identity: Principal, _write: WriteClaims):
+        return await resetter.reset()
+
     @app.websocket("/ws/observability")
     async def live_events(websocket: WebSocket):
         try:
@@ -181,20 +189,22 @@ def create_monitor_app(
         except (OriginRejectedError, AccessDeniedError):
             await websocket.close(code=4403, reason="access rejected"); return
         await websocket.accept()
-        seen: set[str] = set()
+        queue = service.subscribe(session.principal())
         try:
+            for row in reversed(await asyncio.to_thread(runtime.repository.recent_events, limit=100)):
+                await asyncio.wait_for(websocket.send_json({"type": "telemetry.event", "payload": row}), timeout=5)
             while True:
-                rows = await asyncio.to_thread(runtime.repository.recent_events, limit=100)
-                fresh = [row for row in reversed(rows) if row["event_id"] not in seen]
-                for row in fresh:
-                    await asyncio.wait_for(websocket.send_json({"type": "telemetry.event", "payload": row}), timeout=5)
-                    seen.add(row["event_id"])
-                if len(seen) > 2000:
-                    seen = {row["event_id"] for row in rows}
-                await asyncio.wait_for(websocket.send_json({"type": "monitor.heartbeat", "payload": runtime.health()}), timeout=5)
-                await asyncio.sleep(1)
-        except (asyncio.CancelledError, asyncio.TimeoutError, RuntimeError):
+                try:
+                    envelope = await asyncio.wait_for(queue.get(), timeout=1)
+                except asyncio.TimeoutError:
+                    await asyncio.wait_for(websocket.send_json({"type": "monitor.heartbeat", "payload": runtime.health()}), timeout=5)
+                    continue
+                if envelope["kind"] == "event":
+                    await asyncio.wait_for(websocket.send_json({"type": "telemetry.event", "payload": envelope["payload"]}), timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError, RuntimeError, WebSocketDisconnect):
             return
+        finally:
+            service.unsubscribe(queue)
 
     static_value = str(config.get("static_dir", "")).strip()
     static_dir = Path(static_value).expanduser() if static_value else None

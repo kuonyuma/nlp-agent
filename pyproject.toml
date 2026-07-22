@@ -1,6 +1,6 @@
 [project]
 name = "nlp-agent"
-version = "0.19.0"
+version = "1.0.0"
 description = "A generic Coordinator/Worker NLP agent derived from Agentic-Travel"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,3 +33,4 @@ package = false
 testpaths = ["scripts", "tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+pythonpath = ["."]

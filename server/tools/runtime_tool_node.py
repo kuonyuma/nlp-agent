@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -17,6 +18,20 @@ from server.agent.compression.tool_persistence import persist_tool_messages
 class RuntimeToolNode:
     def __init__(self, toolset_provider: Callable[[RunnableConfig], ToolSet]) -> None:
         self._toolset_provider = toolset_provider
+
+    @staticmethod
+    def _started_joined_worker(call: dict[str, Any], result: Any) -> bool:
+        if call.get("name") != "spawn_worker" or not result.ok:
+            return False
+        payload = result.output
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return False
+        if not isinstance(payload, dict) or payload.get("status") != "started":
+            return False
+        return bool(payload.get("join", call.get("args", {}).get("join", True)))
 
     async def __call__(self, state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
         messages = state.get("messages", [])
@@ -49,6 +64,10 @@ class RuntimeToolNode:
                 [(call.get("name", ""), call.get("args", {})) for call in tool_calls],
                 config,
             )
+        wait_for_workers = any(
+            self._started_joined_worker(call, result)
+            for call, result in zip(tool_calls, results, strict=True)
+        )
         output = [
             ToolMessage(
                 content=result.to_model_content(),
@@ -91,11 +110,13 @@ class RuntimeToolNode:
                 "role": "coordinator",
                 "count": len(tool_calls),
                 "over_budget": over_budget,
+                "worker_barrier_armed": wait_for_workers,
             },
         )
         return {
             "messages": output,
             "runtime_tool_calls": used_tool_calls + len(tool_calls),
             "runtime_injections": injections_used + len(follow_ups),
+            "runtime_wait_for_workers": wait_for_workers,
             "runtime_stop_reason": "tool_budget" if over_budget else None,
         }

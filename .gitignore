@@ -12,6 +12,17 @@ venv/
 
 # ── 环境变量 & 密钥 ──
 .env
+.env.*
+!.env-example
+!.env.example
+
+# 私钥、证书与本地数据库的兜底保护
+*.pem
+*.key
+*.p12
+*.sqlite
+*.sqlite3
+*.db
 
 # ── 数据 & 持久化（可重建） ──
 .data/
@@ -24,7 +35,11 @@ logs/
 .claude/
 .idea/
 .vscode/
-.jbeval/
+.jbeval/*
+!.jbeval/datasets/
+!.jbeval/datasets/**
+!.jbeval/suites/
+!.jbeval/suites/**
 *.swp
 *.swo
 
@@ -35,3 +50,9 @@ Thumbs.db
 # 鏈湴 uv / 宸ュ叿缂撳瓨
 .uv-cache/
 nano.md
+
+# ── 测试与评测生成物 ──
+.coverage
+coverage/
+htmlcov/
+evaluation/result/

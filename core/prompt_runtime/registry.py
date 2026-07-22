@@ -30,6 +30,20 @@ DEFAULT_SPECS: tuple[PromptSpec, ...] = (
     PromptSpec("compression.auto_summary", "1.0", "compression/auto_summary.md", frozenset({"conversation"})),
     PromptSpec("compression.collapse_summary", "1.0", "compression/collapse_summary.md", frozenset({"conversation"})),
     PromptSpec("tool.contract", "1.0", "tool/tool_contract.md"),
+    PromptSpec(
+        "learning.policy",
+        "1.0",
+        "learning/policy.md",
+        frozenset({"topic_policy", "progress_policy"}),
+    ),
+    PromptSpec("learning.topic", "1.0", "learning/topic.md", frozenset({"topic_name", "topic_description", "knowledge_points"})),
+    PromptSpec("learning.level.beginner", "1.0", "learning/levels/beginner.md"),
+    PromptSpec("learning.level.intermediate", "1.0", "learning/levels/intermediate.md"),
+    PromptSpec("learning.level.advanced", "1.0", "learning/levels/advanced.md"),
+    PromptSpec("learning.mode.explain", "1.0", "learning/modes/explain.md"),
+    PromptSpec("learning.mode.socratic", "1.0", "learning/modes/socratic.md", frozenset({"guided_session", "guided_blueprint"})),
+    PromptSpec("learning.mode.practice", "1.0", "learning/modes/practice.md", frozenset({"exercise_session", "exercise_blueprint"})),
+    PromptSpec("learning.mode.review", "1.0", "learning/modes/review.md", frozenset({"review_blueprint", "exercise_session"})),
 )
 
 

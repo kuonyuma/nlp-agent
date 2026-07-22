@@ -1,11 +1,13 @@
 """Coordinator 节点：负责任务拆解、Worker 编排和结果综合。"""
 
 from contextlib import asynccontextmanager
+import json
 
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from core.session_context import SessionContext
+from core.learning import ExerciseState, LearningContext, LearningProgress
 from core.agent_runtime import (
     AgentRunSnapshot,
     configured_budget,
@@ -14,6 +16,7 @@ from core.agent_runtime import (
     global_agent_injections,
     usage_total,
 )
+from core.coordinator_runtime import invoke_model_with_telemetry
 from core.observability.context import TelemetryContext, current_telemetry_context
 from core.observability.models import SpanKind
 from core.observability.runtime import global_telemetry
@@ -34,6 +37,33 @@ _CACHED_LLM_WITH_TOOLS = None
 _CACHED_TOOLSET_KEY = None
 _CACHED_SNIP_TOOL = None
 _SNIP_APP_REF = None
+
+
+def _format_knowledge_points(points: object) -> str:
+    """Render teacher-authored Markdown as clearly delimited curriculum data."""
+    if not isinstance(points, list) or not points:
+        return "（该主题暂未配置启用的知识点。）"
+    rendered = []
+    for index, point in enumerate(points, start=1):
+        content = str(point).strip()
+        if content:
+            rendered.append(f"### 知识点 {index}\n{content}")
+    return "\n\n".join(rendered) or "（该主题暂未配置启用的知识点。）"
+
+
+def _format_blueprint(blueprint: object, *, label: str) -> str:
+    """Keep blueprint fields machine-readable and separated from instructions."""
+    if not isinstance(blueprint, dict) or not blueprint:
+        return f"（当前未分配{label}蓝图。）"
+    return "```json\n" + json.dumps(blueprint, ensure_ascii=False, indent=2, sort_keys=True) + "\n```"
+
+
+def invalidate_coordinator_caches() -> None:
+    """Clear bindings derived from editable prompts, profiles, and tool policy."""
+    global _CACHED_SYSTEM_MESSAGE, _CACHED_LLM_WITH_TOOLS, _CACHED_TOOLSET_KEY
+    _CACHED_SYSTEM_MESSAGE = None
+    _CACHED_LLM_WITH_TOOLS = None
+    _CACHED_TOOLSET_KEY = None
 
 
 @asynccontextmanager
@@ -62,7 +92,7 @@ def _get_system_message() -> SystemMessage:
 def init_snip_tool(app) -> None:
     """绑定依赖当前 LangGraph 实例的 SnipTool。"""
 
-    global _SNIP_APP_REF, _CACHED_SNIP_TOOL, _CACHED_LLM_WITH_TOOLS, _CACHED_TOOLSET_KEY
+    global _SNIP_APP_REF, _CACHED_SNIP_TOOL
     _SNIP_APP_REF = app
     from server.tools.snip_tool import make_snip_tool
 
@@ -70,8 +100,7 @@ def init_snip_tool(app) -> None:
     physical_tool_manager.register_orchestration_tool(
         _CACHED_SNIP_TOOL, capability="context.manage", replace=True
     )
-    _CACHED_LLM_WITH_TOOLS = None
-    _CACHED_TOOLSET_KEY = None
+    invalidate_coordinator_caches()
 
 
 def get_coordinator_toolset(config: RunnableConfig | None = None):
@@ -119,6 +148,48 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         if memory_span is not None:
             memory_span.annotate(injected=memory_message is not None)
     messages = [system_message]
+    configurable = config.get("configurable", {})
+    raw_learning = configurable.get("learning_context")
+    if raw_learning:
+        learning_context = LearningContext.model_validate(raw_learning)
+        learning_progress = LearningProgress.model_validate(configurable.get("learning_progress") or {})
+        exercise_state = ExerciseState.model_validate(configurable.get("exercise_state") or {})
+        topic = configurable.get("learning_topic") or {}
+        topic_policy = global_prompt_runtime.render(
+            "learning.topic",
+            topic_name=str(topic.get("name") or learning_context.topic),
+            topic_description=str(topic.get("description") or "未配置主题说明。"),
+            knowledge_points=_format_knowledge_points(topic.get("knowledge_points")),
+        )
+        mode_values = {
+            "guided_session": json.dumps(configurable.get("guided_session") or {}, ensure_ascii=False, indent=2),
+            "guided_blueprint": _format_blueprint(configurable.get("guided_blueprint"), label="引导"),
+            "exercise_session": exercise_state.model_dump_json(indent=2),
+            "exercise_blueprint": _format_blueprint(
+                configurable.get("exercise_blueprint"), label="练习"
+            ),
+            "review_blueprint": _format_blueprint(
+                configurable.get("review_blueprint"), label="复习"
+            ),
+        }
+        mode_policy = global_prompt_runtime.render(f"learning.mode.{learning_context.mode}", **{
+            key: value for key, value in mode_values.items()
+            if key in {"guided_session", "guided_blueprint"} if learning_context.mode == "socratic"
+        }) if learning_context.mode == "socratic" else (
+            global_prompt_runtime.render("learning.mode.explain") if learning_context.mode == "explain" else
+            global_prompt_runtime.render("learning.mode.practice", exercise_session=mode_values["exercise_session"], exercise_blueprint=mode_values["exercise_blueprint"]) if learning_context.mode == "practice" else
+            global_prompt_runtime.render("learning.mode.review", review_blueprint=mode_values["review_blueprint"], exercise_session=mode_values["exercise_session"])
+        )
+        progress_sections = [
+            global_prompt_runtime.render(f"learning.level.{learning_context.level}"),
+            mode_policy,
+        ]
+        if learning_context.mode != "socratic":
+            progress_sections.append(f"当前学习进度：{learning_progress.model_dump_json(indent=2)}")
+        progress_policy = "\n\n".join(progress_sections)
+        messages.append(SystemMessage(content=global_prompt_runtime.render(
+            "learning.policy", topic_policy=topic_policy, progress_policy=progress_policy
+        )))
     if memory_message is not None:
         messages.append(memory_message)
     messages.extend(state.get("messages", []))
@@ -183,9 +254,11 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
             payload={"role": "coordinator", "reason": stop_reason.value},
         )
         try:
-            response = await get_planner_llm().ainvoke(
+            response = await invoke_model_with_telemetry(
+                get_planner_llm(),
                 [*messages, SystemMessage(content=exhaustion_prompt(stop_reason))],
-                config=config,
+                config,
+                name="coordinator.finalize_model",
             )
             runtime.tokens += usage_total(response)
             if not str(getattr(response, "content", "") or "").strip():
@@ -206,6 +279,7 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
             "runtime_tool_calls": runtime.tool_calls,
             "runtime_injections": runtime.injections,
             "runtime_continue": False,
+            "runtime_wait_for_workers": False,
             "runtime_stop_reason": stop_reason.value,
         }
 
@@ -215,7 +289,9 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         payload={"role": "coordinator", "iteration": runtime.iterations},
     )
     try:
-        response = await active_model.ainvoke(messages, config=config)
+        response = await invoke_model_with_telemetry(
+            active_model, messages, config, name="coordinator.model"
+        )
     except Exception as error:
         logger.exception("Coordinator model runtime exhausted", error=str(error))
         global_telemetry.event(
@@ -240,6 +316,7 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
             "runtime_tool_calls": runtime.tool_calls,
             "runtime_injections": runtime.injections,
             "runtime_continue": False,
+            "runtime_wait_for_workers": False,
             "runtime_stop_reason": "model_error",
         }
     runtime.tokens += usage_total(response)
@@ -302,5 +379,6 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         "runtime_tool_calls": runtime.tool_calls,
         "runtime_injections": runtime.injections,
         "runtime_continue": should_continue,
+        "runtime_wait_for_workers": False,
         "runtime_stop_reason": None,
     }

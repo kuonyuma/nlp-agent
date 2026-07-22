@@ -72,6 +72,24 @@ async def test_error_aggregation_and_live_subscription(tmp_path):
     await runtime.close()
 
 
+async def test_telemetry_repository_clear_removes_traces_events_and_daily_usage(tmp_path):
+    runtime = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+    context = TelemetryContext.create(session_id="reset-session", turn_id="reset-turn")
+    runtime.start_trace(context)
+    with bind_telemetry_context(context):
+        async with runtime.span(SpanKind.MODEL, "reset.model"):
+            runtime.event("reset.event")
+    runtime.complete_trace(context)
+    await runtime.flush()
+
+    assert runtime.repository.clear() == {"traces": 1, "spans": 1, "events": 1, "daily_metrics": 1}
+    assert runtime.repository.health()["traces"] == 0
+    assert runtime.repository.health()["spans"] == 0
+    assert runtime.repository.health()["events"] == 0
+    assert runtime.repository.usage() == []
+    await runtime.close()
+
+
 async def test_observability_queries_are_scoped_to_principal(tmp_path):
     runtime = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
     service = ObservabilityService(runtime)

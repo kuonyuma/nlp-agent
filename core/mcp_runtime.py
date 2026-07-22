@@ -272,6 +272,9 @@ class MCPRuntime:
                 description=definition.description or definition.name,
                 source=ToolSource.MCP,
                 provider=server,
+                version="mcp",
+                category="mcp",
+                prompt_priority=10,
                 scopes=frozenset(config.scopes),
                 capabilities=frozenset({f"mcp.{server}.{definition.name}"}),
                 risk=(

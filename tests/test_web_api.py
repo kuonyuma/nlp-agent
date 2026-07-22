@@ -153,19 +153,17 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
         assert teacher.status_code == 200
         assert teacher.json()["summary"]["questions"] == 0
         goals = client.put(
-            "/api/v1/teacher/goals/default",
+            "/api/v1/teacher/catalog/default",
             json={
-                "course_title": "NLP 入门",
-                "description": "课程目标",
-                "objectives": ["理解分词", "掌握文本分类"],
-                "focus_topics": ["分词", "文本分类"],
-                "target_level": "beginner",
+                "topics": [{"id": "topic-1", "name": "NLP 入门", "description": "", "knowledge_points": []}],
+                "exercise_blueprints": [],
+                "review_blueprints": [],
             },
             headers=write_headers(csrf),
         )
         assert goals.status_code == 200
-        assert client.get("/api/v1/teacher/goals/default").json()["goals"]["course_title"] == "NLP 入门"
-        assert client.get("/api/v1/teacher/courses").json()["status"] == "interface_reserved"
+        assert client.get("/api/v1/teacher/catalog/default").json()["catalog"]["topics"][0]["name"] == "NLP 入门"
+        assert client.get("/api/v1/learning/catalog/default").json()["catalog"]["topics"][0]["id"] == "topic-1"
 
         rejected = client.post("/api/v1/sessions", json={"workspace_id": "default"})
         assert rejected.status_code == 403
@@ -205,7 +203,8 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
             json={"theme": "dark", "show_reasoning": True},
             headers=write_headers(csrf),
         )
-        assert updated.json()["revision"] == goals.json()["revision"] + 1
+        # Teaching catalog revisions are isolated from per-user UI settings.
+        assert updated.json()["revision"] == 1
         assert client.get("/api/v1/settings").json()["preferences"]["settings"]["theme"] == "dark"
 
         deleted = client.delete(
@@ -214,6 +213,167 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
         )
         assert deleted.status_code == 204
     assert engine.closed is True
+
+
+def test_teacher_goals_and_reserved_resources_follow_the_public_http_contract(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        default_goals = client.get("/api/v1/teacher/goals/default")
+        assert default_goals.status_code == 200
+        assert default_goals.json()["goals"] == {
+            "workspace_id": "default",
+            "course_title": "NLP 基础课程",
+            "description": "",
+            "objectives": [],
+            "focus_topics": [],
+            "target_level": "beginner",
+        }
+
+        updated = client.put(
+            "/api/v1/teacher/goals/default",
+            json={
+                "course_title": "Transformer 专题",
+                "description": "注意力机制课程",
+                "objectives": ["解释自注意力"],
+                "focus_topics": ["Transformer"],
+                "target_level": "intermediate",
+            },
+            headers=write_headers(csrf),
+        )
+        assert updated.status_code == 200
+        assert updated.json()["goals"]["course_title"] == "Transformer 专题"
+        assert client.get("/api/v1/teacher/overview").json()["goals"] == updated.json()["goals"]
+
+        for resource in ("courses", "prompts", "reports"):
+            response = client.get(f"/api/v1/teacher/{resource}?workspace_id=default")
+            assert response.status_code == 200
+            assert response.json() == {
+                "items": [],
+                "resource": resource,
+                "workspace_id": "default",
+                "status": "interface_reserved",
+            }
+
+
+def test_learning_catalog_only_exposes_enabled_topics_and_enabled_knowledge_points(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        saved = client.put(
+            "/api/v1/teacher/catalog/default",
+            json={
+                "topics": [
+                    {
+                        "id": "topic-enabled",
+                        "name": "Transformer",
+                        "description": "模型结构",
+                        "status": "enabled",
+                        "knowledge_points": [
+                            {
+                                "id": "attention",
+                                "name": "注意力机制",
+                                "markdown": "## 注意力\n解释 Q、K、V。",
+                                "status": "enabled",
+                                "sort_order": 1,
+                            },
+                            {
+                                "id": "legacy",
+                                "name": "旧知识点",
+                                "markdown": "不再使用",
+                                "status": "disabled",
+                                "sort_order": 2,
+                            },
+                        ],
+                    },
+                    {
+                        "id": "topic-disabled",
+                        "name": "停用课程",
+                        "description": "",
+                        "status": "disabled",
+                        "knowledge_points": [],
+                    },
+                ],
+                "exercise_blueprints": [],
+                "review_blueprints": [],
+            },
+            headers=write_headers(csrf),
+        )
+
+        assert saved.status_code == 200
+        student_catalog = client.get("/api/v1/learning/catalog/default")
+        assert student_catalog.status_code == 200
+        assert student_catalog.json()["catalog"]["topics"] == [
+            {
+                "id": "topic-enabled",
+                "name": "Transformer",
+                "description": "模型结构",
+                "status": "enabled",
+                "knowledge_points": [
+                    {
+                        "id": "attention",
+                        "name": "注意力机制",
+                        "markdown": "## 注意力\n解释 Q、K、V。",
+                        "status": "enabled",
+                        "sort_order": 1,
+                    }
+                ],
+            }
+        ]
+
+
+def test_teacher_blueprint_resource_requires_one_knowledge_point_and_persists_it(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        client.put("/api/v1/teacher/catalog/default", json={
+            "topics": [{"id": "transformer", "name": "Transformer", "description": "", "knowledge_points": [{"id": "attention", "name": "注意力", "markdown": "", "status": "enabled", "sort_order": 0}]}],
+            "exercise_blueprints": [], "review_blueprints": [],
+        }, headers=write_headers(csrf))
+        blueprint = {
+            "id": "attention-qkv", "name": "QKV 角色", "topic_id": "transformer", "knowledge_point_id": "attention",
+            "level": "beginner", "instructions": "只出一道 QKV 题", "question_type": "简答", "status": "enabled",
+            "rubric": [{"criterion": "角色正确", "weight": 100}],
+        }
+        saved = client.put("/api/v1/teacher/catalog/default/exercise-blueprints/attention-qkv", json=blueprint, headers=write_headers(csrf))
+        assert saved.status_code == 200
+        catalog = client.get("/api/v1/teacher/catalog/default").json()["catalog"]
+        assert catalog["exercise_blueprints"] == [{key: value for key, value in blueprint.items() if key != "level"}]
+        invalid = client.put("/api/v1/teacher/catalog/default/exercise-blueprints/bad", json={**blueprint, "id": "bad", "knowledge_point_id": "other"}, headers=write_headers(csrf))
+        assert invalid.status_code == 422
+        missing_rubric = client.put("/api/v1/teacher/catalog/default/exercise-blueprints/no-rubric", json={**blueprint, "id": "no-rubric", "rubric": []}, headers=write_headers(csrf))
+        assert missing_rubric.status_code == 422
+
+
+def test_teacher_guided_blueprint_resource_persists_direction_and_validates_knowledge_point(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        client.put("/api/v1/teacher/catalog/default", json={
+            "topics": [{"id": "transformer", "name": "Transformer", "description": "", "knowledge_points": [{"id": "attention", "name": "注意力", "markdown": "", "status": "enabled", "sort_order": 0}]}],
+            "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+        }, headers=write_headers(csrf))
+        blueprint = {"id": "attention-guide", "name": "从权重开始", "topic_id": "transformer", "knowledge_point_id": "attention", "guidance": "先让学生解释权重为何需要归一化。", "status": "enabled"}
+        saved = client.put("/api/v1/teacher/catalog/default/guided-blueprints/attention-guide", json=blueprint, headers=write_headers(csrf))
+        assert saved.status_code == 200
+        catalog = client.get("/api/v1/teacher/catalog/default").json()["catalog"]
+        assert catalog["guided_blueprints"] == [blueprint]
+        invalid = client.put("/api/v1/teacher/catalog/default/guided-blueprints/bad", json={**blueprint, "id": "bad", "knowledge_point_id": "other"}, headers=write_headers(csrf))
+        assert invalid.status_code == 422
+
+
+def test_teacher_nlp_curriculum_import_post_is_not_available(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        result = client.post(
+            "/api/v1/teacher/catalog/default/imports/nlp-foundations",
+            headers=write_headers(csrf),
+        )
+
+        # The generic blueprint resource route still matches this URL shape,
+        # but no POST import handler is registered.
+        assert result.status_code == 405
 
 
 def _receive_until(websocket, required_types: set[str], limit: int = 30):
@@ -297,6 +457,28 @@ def test_websocket_rejects_cross_origin(web_app):
             ) as websocket:
                 websocket.receive_json()
         assert exc.value.code == 4403
+
+
+def test_websocket_reports_deleted_session_subscription_without_crashing(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        authenticate(client)
+        with client.websocket_connect("/ws/v1", headers={"Origin": "http://testserver"}) as websocket:
+            assert websocket.receive_json()["type"] == "connection.ready"
+            websocket.send_json({
+                "v": "1",
+                "type": "session.subscribe",
+                "request_id": "deleted-session",
+                "payload": {"session_id": "session_deleted_by_monitor"},
+            })
+            error = websocket.receive_json()
+            assert error["type"] == "command.error"
+            assert error["request_id"] == "deleted-session"
+            assert error["session_id"] == "session_deleted_by_monitor"
+            assert error["payload"]["code"] == "not_found"
+
+            websocket.send_json({"v": "1", "type": "ping", "request_id": "still-open", "payload": {}})
+            assert websocket.receive_json()["type"] == "pong"
 
 
 class SlowWebSocket:

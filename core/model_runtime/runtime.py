@@ -143,6 +143,8 @@ async def _attempt_span(candidate: ModelCandidate, attempt: int, fallback_index:
 class ResilientChatModel:
     """LangChain-compatible facade over a capability-compatible candidate chain."""
 
+    emits_model_telemetry = True
+
     def __init__(self, candidates: list[ModelCandidate], *, normalize_response: bool = True) -> None:
         if not candidates:
             raise ValueError("At least one model candidate is required")

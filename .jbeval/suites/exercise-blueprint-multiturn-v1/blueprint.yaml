@@ -1,0 +1,19 @@
+id: exercise-tfidf-retrieval-v1
+name: TF-IDF FAQ 检索单题练习
+topic_id: tfidf-faq-retrieval
+topic_name: TF-IDF 与 FAQ 检索
+knowledge_point_id: tfidf-term-weighting
+knowledge_point_name: TF-IDF 词项权重与检索
+knowledge_markdown: |
+  TF 表示词在单篇文档中的出现频率；IDF 表示词在文档集合中的稀有程度；TF-IDF 用两者乘积给查询词在文档中的匹配信号赋权。FAQ 检索时，累加查询词在候选 FAQ 中的 TF-IDF 得分并排序。
+instructions: |
+  只生成一道初学者简答题，考查 TF、IDF、TF-IDF 与 FAQ 排序的关系。题干必须自洽、可独立作答，不生成选择题或第二问。收到学生答案后，逐项按 rubric 给出简洁反馈和正确答案要点。
+question_type: 简答题
+rubric:
+  - criterion: 区分 TF 的局部词频含义
+    weight: 0.3
+  - criterion: 区分 IDF 的全局稀有度含义
+    weight: 0.3
+  - criterion: 说明 TF-IDF 可用于 FAQ 相关度排序
+    weight: 0.4
+status: enabled

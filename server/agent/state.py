@@ -16,4 +16,5 @@ class AgentState(TypedDict):
     runtime_tool_calls: int
     runtime_injections: int
     runtime_continue: bool
+    runtime_wait_for_workers: bool
     runtime_stop_reason: str | None

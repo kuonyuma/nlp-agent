@@ -1,4 +1,4 @@
-import type { AuthSession, DeveloperSnapshot, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings } from "./types";
+import type { AuthSession, DeveloperSnapshot, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings } from "./types";
 
 const API_ROOT = "/api/v1";
 
@@ -87,6 +87,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(goals),
     }),
+  getTeacherCatalog: (workspaceId = "default") => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}`),
+  updateTeacherCatalog: (workspaceId: string, catalog: Omit<TeacherCatalog, "workspace_id">) => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}`, { method: "PUT", body: JSON.stringify(catalog) }),
+  saveExerciseBlueprint: (workspaceId: string, blueprint: TeacherCatalog["exercise_blueprints"][number]) => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/exercise-blueprints/${encodeURIComponent(blueprint.id)}`, { method: "PUT", body: JSON.stringify(blueprint) }),
+  saveReviewBlueprint: (workspaceId: string, blueprint: TeacherCatalog["review_blueprints"][number]) => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/review-blueprints/${encodeURIComponent(blueprint.id)}`, { method: "PUT", body: JSON.stringify(blueprint) }),
+  saveGuidedBlueprint: (workspaceId: string, blueprint: TeacherCatalog["guided_blueprints"][number]) => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/guided-blueprints/${encodeURIComponent(blueprint.id)}`, { method: "PUT", body: JSON.stringify(blueprint) }),
+  deleteBlueprint: (workspaceId: string, kind: "exercise" | "review", blueprintId: string) => request<void>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/${kind}-blueprints/${encodeURIComponent(blueprintId)}`, { method: "DELETE" }),
+  getLearningCatalog: (workspaceId = "default") => request<{ catalog: TeacherCatalog }>(`/learning/catalog/${encodeURIComponent(workspaceId)}`),
   getTeacherResource: (resource: "courses" | "prompts" | "reports", workspaceId = "default") =>
     request<{ items: unknown[]; status: string }>(`/teacher/${resource}?workspace_id=${encodeURIComponent(workspaceId)}`),
 };

@@ -38,8 +38,13 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   return <section className="developer-section"><header><div><h2>{title}</h2>{hint && <p>{hint}</p>}</div></header>{children}</section>;
 }
 
-function JsonEditor({ value, onSave, label = "保存" }: { value: unknown; onSave: (value: Record<string, unknown>) => Promise<void>; label?: string }) {
-  const [text, setText] = useState(() => JSON.stringify(value, null, 2));
+export function JsonEditor({ value, onSave, label = "保存" }: { value: unknown; onSave: (value: Record<string, unknown>) => Promise<void>; label?: string }) {
+  const serialized = JSON.stringify(value, null, 2);
+  return <JsonEditorState key={serialized} serialized={serialized} onSave={onSave} label={label} />;
+}
+
+function JsonEditorState({ serialized, onSave, label }: { serialized: string; onSave: (value: Record<string, unknown>) => Promise<void>; label: string }) {
+  const [text, setText] = useState(serialized);
   const [message, setMessage] = useState("");
   const save = async () => {
     try { const parsed = JSON.parse(text) as Record<string, unknown>; await onSave(parsed); setMessage("已保存并应用"); }
@@ -71,7 +76,7 @@ function Agents({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: (
 }
 
 function Tools({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
-  return <><Section title="工具目录" hint={`${snapshot.tools.items.length} 个已注册工具；工具实现仍由后端代码或已安装扩展提供。`}><div className="developer-table-wrap"><table><thead><tr><th>工具</th><th>来源</th><th>作用域</th><th>风险</th><th>超时</th></tr></thead><tbody>{snapshot.tools.items.map((tool) => <tr key={String(tool.name)}><td><strong>{String(tool.name)}</strong><small>{String(tool.description ?? "")}</small></td><td>{String(tool.source)} / {String(tool.provider)}</td><td>{Array.isArray(tool.scopes) ? tool.scopes.join(", ") : "-"}</td><td>{String(tool.risk)}</td><td>{String(tool.timeout_s)}s</td></tr>)}</tbody></table></div></Section><Section title="角色权限策略" hint="保存后新建的 Coordinator/Worker 立即按新策略生成 ToolSet；已启动 Worker 的授权快照不会被扩大。"><JsonEditor value={snapshot.tools.policies} label="保存权限策略" onSave={async (value) => { await api.updateToolPolicies(value); await refresh(); }} /></Section><Section title="自定义 Tool" hint="可通过 Python modules 或 entry point 安装。修改来源已持久化，但必须重启 Runtime 才会安全加载或卸载 Python 模块。"><JsonEditor value={snapshot.tools.custom} label="保存自定义 Tool 配置" onSave={async (value) => { const result = await api.updateCustomTools(value); await refresh(); alert(result.reason); }} /></Section></>;
+  return <><Section title="工具目录" hint={`${snapshot.tools.items.length} 个已注册工具；高优先级工具会更靠前展示给模型，展示顺序不改变权限。`}><div className="developer-table-wrap"><table><thead><tr><th>工具</th><th>来源</th><th>类别 / 版本</th><th>优先级</th><th>作用域</th><th>风险</th><th>超时</th></tr></thead><tbody>{snapshot.tools.items.map((tool) => <tr key={String(tool.name)}><td><strong>{String(tool.name)}</strong><small>{String(tool.description ?? "")}</small></td><td>{String(tool.source)} / {String(tool.provider)}</td><td>{String(tool.category ?? "general")} / {String(tool.version ?? "1.0")}</td><td>{String(tool.prompt_priority ?? 100)}</td><td>{Array.isArray(tool.scopes) ? tool.scopes.join(", ") : "-"}</td><td>{String(tool.risk)}</td><td>{String(tool.timeout_s)}s</td></tr>)}</tbody></table></div></Section><Section title="角色权限策略" hint="保存后新建的 Coordinator/Worker 立即按新策略生成 ToolSet；已启动 Worker 的授权快照不会被扩大。"><JsonEditor value={snapshot.tools.policies} label="保存权限策略" onSave={async (value) => { await api.updateToolPolicies(value); await refresh(); }} /></Section><Section title="自定义 Tool" hint="每个 Provider 都需要 Manifest，声明版本、类别、优先级、作用域、能力与风险。修改来源已持久化，但必须重启 Runtime 才会安全加载或卸载 Python 模块。"><JsonEditor value={snapshot.tools.custom} label="保存自定义 Tool 配置" onSave={async (value) => { const result = await api.updateCustomTools(value); await refresh(); alert(result.reason); }} /></Section></>;
 }
 
 function Models({ snapshot }: { snapshot: DeveloperSnapshot }) {

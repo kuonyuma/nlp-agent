@@ -364,6 +364,8 @@ def _command_error(error: Exception) -> tuple[str, str]:
     name = type(error).__name__
     if isinstance(error, ValidationError):
         return "validation_error", "command payload is invalid"
+    if name == "TeachingConfigurationError":
+        return "teaching_configuration_error", str(error)
     if isinstance(error, ValueError):
         return "invalid_command", str(error)
     if isinstance(error, FileNotFoundError):
@@ -392,6 +394,7 @@ async def _dispatch_command(
                 session_id=payload.session_id,
                 content=payload.content,
                 idempotency_key=payload.idempotency_key,
+                learning_context=payload.learning_context,
             ),
         )
         await connection.send(
@@ -542,16 +545,19 @@ async def _receive_commands(
                 await connection.close(code=1009, reason="message too large")
                 return
             request_id: str | None = None
+            command: CommandEnvelope | None = None
             try:
                 command = CommandEnvelope.model_validate(json.loads(raw))
                 request_id = command.request_id
                 await _dispatch_command(connection, command)
-            except (json.JSONDecodeError, ValidationError, ValueError, PermissionError, RuntimeError, LookupError) as error:
+            except (json.JSONDecodeError, ValidationError, ValueError, PermissionError, RuntimeError, LookupError, FileNotFoundError) as error:
                 code, message = _command_error(error)
+                session_id = command.payload.get("session_id") if command is not None else None
                 await connection.send(
                     control_event(
                         "command.error",
                         request_id=request_id,
+                        session_id=session_id if isinstance(session_id, str) else None,
                         payload={"code": code, "message": message},
                     )
                 )

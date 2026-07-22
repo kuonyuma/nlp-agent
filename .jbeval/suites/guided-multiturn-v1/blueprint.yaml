@@ -1,0 +1,16 @@
+id: guided-tfidf-retrieval-v1
+name: TF-IDF 词项权重与 FAQ 检索引导
+topic_id: tfidf-faq-retrieval
+topic_name: TF-IDF 与 FAQ 检索
+knowledge_point_id: tfidf-term-weighting
+knowledge_point_name: TF-IDF 词项权重与检索
+knowledge_markdown: |
+  TF（词频）描述词在当前文档中出现得多不多；IDF（逆文档频率）描述词在整个
+  语料中稀不稀有。TF-IDF 将二者相乘，用于给查询词和 FAQ 文档中的关键词赋权，
+  再据此比较查询与候选 FAQ 的相关度。
+guidance: |
+  先让学生区分 TF 与 IDF 各自回答的问题；再用“退款时间”与三条 FAQ 的小例子
+  引导其预测哪个 FAQ 更相关。学生若说“出现次数最多的词一定最重要”，要通过
+  常见词与罕见词的对比帮助其修正。每次只追问一个关键推理步骤，最后要求学生
+  用自己的话说明 TF-IDF 为什么适合 FAQ 排序。
+status: enabled

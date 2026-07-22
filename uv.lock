@@ -765,7 +765,7 @@ wheels = [
 
 [[package]]
 name = "nlp-agent"
-version = "0.15.0"
+version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiosqlite" },

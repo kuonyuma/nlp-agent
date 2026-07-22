@@ -1,0 +1,32 @@
+schema_version: '1.0'
+suite:
+  id: review-blueprint-multiturn-v1
+  name: 复习蓝图多轮稳定性测评
+  description: 固定 TF-IDF 复习蓝图，验证回顾、单题、作答和评分闭环。
+blueprint_path: blueprint.yaml
+cases:
+  - id: review-ideal-recall
+    tags: [baseline, correct]
+    student_profile: {id: ideal, role: 复习充分的学生, behavior_rules: [完整回顾 TF、IDF 和 FAQ 排序]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: review}
+    start_message: 请带我复习 TF-IDF，并出一道复习题。
+  - id: review-partial-recall
+    tags: [partial, rubric]
+    student_profile: {id: partial, role: 只记得 TF 的学生, behavior_rules: [说明 TF，但对 IDF 和排序回答不完整]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: review}
+    start_message: 我想复习一下 TF-IDF。
+  - id: review-misconception-repair
+    tags: [misconception, correction]
+    student_profile: {id: misconception, role: 容易混淆概念的学生, behavior_rules: [先混淆 IDF 与 TF，再尝试自我纠正]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: review}
+    start_message: 请开始一次知识点复习。
+  - id: review-terse-recall
+    tags: [terse, completion]
+    student_profile: {id: terse, role: 回答很简短的学生, behavior_rules: [只用一两句话作答，不请求下一题]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: review}
+    start_message: 开始复习。
+  - id: review-transfer-recall
+    tags: [transfer, faq-ranking]
+    student_profile: {id: transfer, role: 能联系应用场景的学生, behavior_rules: [用 FAQ 排序场景解释复习答案]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: review}
+    start_message: 请通过 FAQ 检索场景带我复习 TF-IDF。

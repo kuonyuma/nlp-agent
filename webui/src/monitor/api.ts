@@ -25,4 +25,5 @@ export const monitorApi = {
   errors: (days: number) => request<{ items: ErrorRow[] }>(`/observability/errors?days=${days}&limit=200`),
   storage: () => request<Record<string, unknown>>("/observability/storage"),
   prune: (traceDays: number, eventDays: number) => request<Record<string, unknown>>(`/observability/storage/prune?trace_days=${traceDays}&event_days=${eventDays}`, { method: "POST" }),
+  reset: () => request<Record<string, unknown>>("/observability/storage/reset", { method: "POST" }),
 };
