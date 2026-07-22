@@ -53,6 +53,13 @@ def _route_after_coordinator(state: AgentState):
     return END
 
 
+def _route_after_tools(state: AgentState):
+    """Joined Workers form a runtime barrier, not a prompt-level suggestion."""
+    if state.get("runtime_wait_for_workers"):
+        return END
+    return "coordinator"
+
+
 async def build_agent():
     """
     构建并编译 Agentic 状态图。
@@ -72,7 +79,11 @@ async def build_agent():
         _route_after_coordinator,
         {"coordinator": "coordinator", "tools": "tools", END: END}
     )
-    workflow.add_edge("tools", "coordinator")
+    workflow.add_conditional_edges(
+        "tools",
+        _route_after_tools,
+        {"coordinator": "coordinator", END: END},
+    )
 
     # 挂载本地 SQLite 作为 Coordinator 的主脑记忆
     os.makedirs(DATA_DIR, exist_ok=True)

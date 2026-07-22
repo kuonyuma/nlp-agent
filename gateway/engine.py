@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from core.coordinator_runtime import CoordinatorRuntime
 from core.session_context import SessionContext
+from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
 from core.task_manager import global_task_manager
 from core.worker_events import global_worker_event_bus
 from gateway.contracts import GatewayEventType
@@ -22,7 +23,7 @@ EngineEventSink = Callable[
 
 class AgentEngine(Protocol):
     async def start(self, event_sink: EngineEventSink) -> None: ...
-    async def run_turn(self, context: SessionContext, turn_id: str, content: str) -> str: ...
+    async def run_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None) -> str: ...
     async def inject(self, context: SessionContext, content: str) -> str | None: ...
     async def cancel_turn(self, context: SessionContext, turn_id: str) -> None: ...
     async def delete_session(self, context: SessionContext) -> None: ...
@@ -67,6 +68,10 @@ class LangGraphAgentEngine:
         context: SessionContext,
         background: bool,
         turn_id: str,
+        learning_context: LearningContext | None = None,
+        learning_progress: LearningProgress | None = None,
+        exercise_state: ExerciseState | None = None,
+        teaching_materials: TeachingMaterials | None = None,
     ) -> None:
         if self._app is None:
             raise RuntimeError("Agent engine is not started")
@@ -78,6 +83,14 @@ class LangGraphAgentEngine:
                 "user_id": context.user_id,
                 "workspace_id": context.workspace_id,
                 "channel": context.channel,
+                "learning_context": learning_context.model_dump(mode="json") if learning_context else None,
+                "learning_progress": learning_progress.model_dump(mode="json") if learning_progress else None,
+                "exercise_state": exercise_state.model_dump(mode="json") if exercise_state else None,
+                "learning_topic": teaching_materials.learning_topic if teaching_materials else {},
+                "exercise_blueprint": teaching_materials.exercise_blueprint if teaching_materials else {},
+                "review_blueprint": teaching_materials.review_blueprint if teaching_materials else {},
+                "guided_session": teaching_materials.guided_session if teaching_materials else {},
+                "guided_blueprint": teaching_materials.guided_blueprint if teaching_materials else {},
             },
         }
         if background:
@@ -88,6 +101,8 @@ class LangGraphAgentEngine:
                 {"phase": "coordinator_resume"},
             )
         active_tool_node = False
+        observed_tool_events = False
+        active_tools: dict[str, str] = {}
         async for event in self._app.astream_events(
             {"messages": messages}, config=config, version="v2"
         ):
@@ -115,27 +130,57 @@ class LangGraphAgentEngine:
                     )
             elif event_name == "on_chain_start" and node == "tools" and not active_tool_node:
                 active_tool_node = True
+                observed_tool_events = False
+            elif event_name == "on_tool_start":
+                observed_tool_events = True
+                tool_id = str(event.get("run_id") or event.get("name") or uuid.uuid4())
+                tool_name = str(event.get("name") or "工具")
+                active_tools[tool_id] = tool_name
                 await self._emit(
                     turn_id,
                     context.session_id,
                     GatewayEventType.TOOL_STARTED,
-                    {"node": "tools"},
+                    {"name": tool_name},
                 )
-            elif event_name == "on_chain_end" and node == "tools" and active_tool_node:
-                active_tool_node = False
+            elif event_name == "on_tool_end":
+                observed_tool_events = True
+                tool_id = str(event.get("run_id") or event.get("name") or "")
+                tool_name = active_tools.pop(tool_id, str(event.get("name") or "工具"))
                 await self._emit(
                     turn_id,
                     context.session_id,
                     GatewayEventType.TOOL_COMPLETED,
-                    {"node": "tools"},
+                    {"name": tool_name},
                 )
+            elif event_name == "on_tool_error":
+                observed_tool_events = True
+                tool_id = str(event.get("run_id") or event.get("name") or "")
+                tool_name = active_tools.pop(tool_id, str(event.get("name") or "工具"))
+                await self._emit(
+                    turn_id,
+                    context.session_id,
+                    GatewayEventType.TOOL_FAILED,
+                    {"name": tool_name},
+                )
+            elif event_name == "on_chain_end" and node == "tools" and active_tool_node:
+                active_tool_node = False
+                if not observed_tool_events:
+                    await self._emit(
+                        turn_id,
+                        context.session_id,
+                        GatewayEventType.TOOL_COMPLETED,
+                        {"name": "tool"},
+                    )
         await self._apply_pending_snips(context.session_id)
 
-    async def run_turn(self, context: SessionContext, turn_id: str, content: str) -> str:
+    async def run_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None) -> str:
         if self._runtime is None or self._app is None:
             raise RuntimeError("Agent engine is not started")
         message = HumanMessage(content=content, id=turn_id)
-        await self._runtime.submit_user_turn(context, message)
+        await self._runtime.submit_user_turn(
+            context, message, learning_context, learning_progress, exercise_state,
+            teaching_materials,
+        )
         config = {"configurable": {"thread_id": context.session_id}}
         state = await self._app.aget_state(config)
         state_messages = state.values.get("messages", [])

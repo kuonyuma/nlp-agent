@@ -43,7 +43,8 @@ from server.web.contracts import (
     WorkerProfileBody,
 )
 from server.web.protocol import control_event
-from server.web.developer import developer_snapshot, require_admin
+from server.web.authorization import require_admin
+from server.web.developer import developer_snapshot
 from server.web.developer_runtime import (
     DeveloperConfigurationError,
     delete_mcp_server,
@@ -57,7 +58,7 @@ from server.web.developer_runtime import (
     upsert_skill,
     upsert_worker_profile,
 )
-from server.teacher.models import UpdateTeachingGoals
+from server.teacher.models import ExerciseBlueprint, GuidedBlueprint, ReviewBlueprint, UpdateTeacherCatalog, UpdateTeachingGoals
 from server.teacher.service import teacher_service
 from server.web.websocket import WebSocketHub, websocket_endpoint
 
@@ -591,12 +592,8 @@ def create_app(
         return {**analytics, **goals}
 
     @app.get("/api/v1/teacher/goals/{workspace_id}", tags=["teacher"])
-    async def get_teacher_goals(
-        workspace_id: str, request: Request, principal: Principal
-    ):
-        return await teacher_service.goals(
-            principal, request.app.state.gateway, workspace_id
-        )
+    async def get_teacher_goals(workspace_id: str, request: Request, principal: Principal):
+        return await teacher_service.goals(principal, request.app.state.gateway, workspace_id)
 
     @app.put("/api/v1/teacher/goals/{workspace_id}", tags=["teacher"])
     async def put_teacher_goals(
@@ -609,6 +606,82 @@ def create_app(
         return await teacher_service.update_goals(
             principal, request.app.state.gateway, workspace_id, body
         )
+
+    @app.get("/api/v1/teacher/catalog/{workspace_id}", tags=["teacher"])
+    async def get_teacher_catalog(workspace_id: str, request: Request, principal: Principal):
+        return await teacher_service.catalog(principal, request.app.state.gateway, workspace_id)
+
+    @app.get("/api/v1/learning/catalog/{workspace_id}", tags=["learning"])
+    async def get_learning_catalog(workspace_id: str, request: Request, principal: Principal):
+        principal.require_workspace(workspace_id)
+        catalog = (await request.app.state.gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        catalog["topics"] = [
+            {
+                **topic,
+                "knowledge_points": [
+                    point
+                    for point in topic.get("knowledge_points", [])
+                    if point.get("status", "enabled") == "enabled"
+                ],
+            }
+            for topic in catalog.get("topics", [])
+            if topic.get("status", "enabled") == "enabled"
+        ]
+        enabled_topic_ids = {topic["id"] for topic in catalog["topics"]}
+        catalog["exercise_blueprints"] = [
+            item
+            for item in catalog.get("exercise_blueprints", [])
+            if item.get("status") == "enabled" and item.get("topic_id") in enabled_topic_ids
+        ]
+        catalog["review_blueprints"] = [
+            item
+            for item in catalog.get("review_blueprints", [])
+            if item.get("status") == "enabled" and item.get("topic_id") in enabled_topic_ids
+        ]
+        catalog["guided_blueprints"] = [
+            item
+            for item in catalog.get("guided_blueprints", [])
+            if item.get("status") == "enabled" and item.get("topic_id") in enabled_topic_ids
+        ]
+        return {"catalog": catalog}
+
+    @app.put("/api/v1/teacher/catalog/{workspace_id}", tags=["teacher"])
+    async def put_teacher_catalog(workspace_id: str, body: UpdateTeacherCatalog, request: Request, principal: Principal, _claims: WriteClaims):
+        return await teacher_service.update_catalog(principal, request.app.state.gateway, workspace_id, body)
+
+    @app.put("/api/v1/teacher/catalog/{workspace_id}/exercise-blueprints/{blueprint_id}", tags=["teacher"])
+    async def put_exercise_blueprint(workspace_id: str, blueprint_id: str, body: ExerciseBlueprint, request: Request, principal: Principal, _claims: WriteClaims):
+        if body.id != blueprint_id:
+            return _problem(request, status_code=422, code="blueprint_id_mismatch", title="蓝图 ID 不匹配")
+        try:
+            return await teacher_service.upsert_exercise_blueprint(principal, request.app.state.gateway, workspace_id, body)
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_blueprint", title="出题蓝图无效", detail=str(error))
+
+    @app.put("/api/v1/teacher/catalog/{workspace_id}/review-blueprints/{blueprint_id}", tags=["teacher"])
+    async def put_review_blueprint(workspace_id: str, blueprint_id: str, body: ReviewBlueprint, request: Request, principal: Principal, _claims: WriteClaims):
+        if body.id != blueprint_id:
+            return _problem(request, status_code=422, code="blueprint_id_mismatch", title="蓝图 ID 不匹配")
+        try:
+            return await teacher_service.upsert_review_blueprint(principal, request.app.state.gateway, workspace_id, body)
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_blueprint", title="复习蓝图无效", detail=str(error))
+
+    @app.put("/api/v1/teacher/catalog/{workspace_id}/guided-blueprints/{blueprint_id}", tags=["teacher"])
+    async def put_guided_blueprint(workspace_id: str, blueprint_id: str, body: GuidedBlueprint, request: Request, principal: Principal, _claims: WriteClaims):
+        if body.id != blueprint_id:
+            return _problem(request, status_code=422, code="blueprint_id_mismatch", title="蓝图 ID 不匹配")
+        try:
+            return await teacher_service.upsert_guided_blueprint(principal, request.app.state.gateway, workspace_id, body)
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_blueprint", title="引导蓝图无效", detail=str(error))
+
+    @app.delete("/api/v1/teacher/catalog/{workspace_id}/{kind}-blueprints/{blueprint_id}", status_code=204, tags=["teacher"])
+    async def delete_blueprint(workspace_id: str, kind: str, blueprint_id: str, request: Request, principal: Principal, _claims: WriteClaims):
+        if kind not in {"exercise", "review", "guided"}:
+            return _problem(request, status_code=404, code="not_found", title="蓝图类型不存在")
+        await teacher_service.delete_blueprint(principal, request.app.state.gateway, workspace_id, blueprint_id, kind=kind)
+        return Response(status_code=204)
 
     @app.get("/api/v1/teacher/questions", tags=["teacher"])
     async def teacher_questions(

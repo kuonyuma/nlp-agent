@@ -1,6 +1,11 @@
+import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from core.learning import ExerciseState, LearningContext, LearningProgress
 from gateway.contracts import GatewayEventType, TurnStatus
+from gateway.contracts import TeachingConfigurationError
 from gateway.repository import GatewayRepository
 
 
@@ -106,4 +111,226 @@ def test_event_retention_compacts_terminal_turns_caps_sessions_and_keeps_active(
         len(repository.events_after(turn_id)) for turn_id in terminal_ids
     )
     assert terminal_events == 3
+    repository.close()
+
+
+def test_learning_state_and_teaching_catalog_are_isolated_from_turn_history(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    context = LearningContext(topic="Transformer", level="intermediate", mode="practice")
+    progress = LearningProgress(objective="理解注意力机制", stage="practice")
+    exercise = ExerciseState(question="解释 Q、K、V 的作用", rubric=["说明三个向量"], status="awaiting_answer")
+    turn, _ = repository.create_turn(
+        turn_id="turn-learning", session_id="session-learning", workspace_id="workspace-1",
+        user_id="alice", input_text="开始练习", idempotency_key=None,
+        learning_context=context, learning_progress=progress, exercise_state=exercise,
+    )
+    restored = repository.get_turn(turn.turn_id)
+    assert restored is not None
+    assert restored.learning_context == context
+    assert restored.learning_progress == progress
+    assert restored.exercise_state == exercise
+
+    saved_catalog = repository.update_teaching_catalog("workspace-1", {
+        "workspace_id": "workspace-1",
+        "topics": [{"id": "transformer", "name": "Transformer", "description": "", "knowledge_points": []}],
+        "exercise_blueprints": [], "review_blueprints": [],
+    })
+    assert saved_catalog["revision"] == 1
+    assert repository.get_turn(turn.turn_id).input_text == "开始练习"
+    assert repository.list_turns("session-learning")[0].turn_id == "turn-learning"
+    assert repository.get_teaching_catalog("workspace-1")["catalog"]["topics"][0]["name"] == "Transformer"
+    repository.close()
+
+
+def test_turn_persists_the_real_guided_session_and_blueprint_snapshot_reference(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    turn, _ = repository.create_turn(
+        turn_id="guided-turn", session_id="chat-1", workspace_id="workspace-1",
+        user_id="alice", input_text="带我理解 TF-IDF", idempotency_key=None,
+        guided_session_id="guided-1", guided_blueprint_id="tfidf-guide",
+        guided_blueprint_snapshot_sha256="a" * 64,
+    )
+
+    restored = repository.get_turn(turn.turn_id)
+
+    assert restored is not None
+    assert restored.guided_session is not None
+    assert restored.guided_session.id == "guided-1"
+    assert restored.guided_session.blueprint_id == "tfidf-guide"
+    assert restored.guided_session.blueprint_snapshot_sha256 == "a" * 64
+    repository.close()
+
+
+def test_clear_learning_sessions_keeps_teacher_catalog_and_user_settings(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    repository.update_teaching_catalog("workspace-1", {"workspace_id": "workspace-1", "topics": [{"id": "attention"}], "exercise_blueprints": [], "review_blueprints": []})
+    turn, _ = repository.create_turn(turn_id="turn-reset", session_id="session-reset", workspace_id="workspace-1", user_id="alice", input_text="reset", idempotency_key=None)
+    repository.append_event(turn_id=turn.turn_id, session_id=turn.session_id, event_type=GatewayEventType.TURN_STARTED)
+    repository._conn.execute(
+        """INSERT INTO gateway_exercise_sessions(
+           id,session_id,workspace_id,user_id,topic_id,mode,status,blueprint_snapshot_json,created_at,updated_at,completed_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        ("exercise-reset", "session-reset", "workspace-1", "alice", "attention", "practice", "active", "{}", "now", "now", None),
+    )
+
+    assert repository.clear_learning_sessions() == {
+        "gateway_turns": 1, "gateway_events": 1, "gateway_exercise_sessions": 1,
+        "gateway_exercise_questions": 0, "gateway_exercise_attempts": 0, "gateway_learning_evidence": 0,
+    }
+    assert repository.list_turns("session-reset") == []
+    assert repository.get_teaching_catalog("workspace-1")["catalog"]["topics"] == [{"id": "attention"}]
+    repository.close()
+
+
+def test_exercise_session_uses_an_enabled_blueprint_snapshot_and_keeps_it_immutable(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    repository.update_teaching_catalog("workspace-1", {
+        "workspace_id": "workspace-1",
+        "topics": [{"id": "transformer", "name": "Transformer", "description": "", "status": "enabled", "knowledge_points": []}],
+        "exercise_blueprints": [
+            {"id": "draft", "name": "草稿", "topic_id": "transformer", "level": "beginner", "instructions": "不要使用", "question_types": [], "question_count": 1, "status": "draft", "knowledge_point_ids": [], "rubric": []},
+            {"id": "enabled", "name": "注意力练习", "topic_id": "transformer", "level": "beginner", "instructions": "解释 QKV", "question_types": ["填空"], "question_count": 1, "status": "enabled", "knowledge_point_ids": [], "rubric": []},
+        ],
+        "review_blueprints": [],
+    })
+
+    session = repository.start_exercise_session(
+        session_id="chat-1", workspace_id="workspace-1", user_id="alice", topic_id="transformer", mode="practice",
+    )
+
+    assert session is not None
+    assert session["blueprint_snapshot"]["id"] == "enabled"
+    repository.update_teaching_catalog("workspace-1", {
+        "workspace_id": "workspace-1", "topics": [], "exercise_blueprints": [], "review_blueprints": [],
+    })
+    assert repository.get_exercise_session(session["id"])["blueprint_snapshot"]["instructions"] == "解释 QKV"
+    assert repository.start_exercise_session(
+        session_id="chat-2", workspace_id="workspace-1", user_id="alice", topic_id="transformer", mode="practice",
+    ) is None
+    repository.close()
+
+
+def test_teaching_topic_rejects_knowledge_points_over_the_configured_prompt_budget(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3", knowledge_point_prompt_budget=10)
+    repository.update_teaching_catalog("workspace-1", {
+        "workspace_id": "workspace-1",
+        "topics": [{
+            "id": "attention", "name": "Attention", "description": "", "status": "enabled",
+            "knowledge_points": [
+                {"id": "one", "name": "one", "markdown": "12345", "status": "enabled", "sort_order": 1},
+                {"id": "two", "name": "two", "markdown": "678901", "status": "enabled", "sort_order": 2},
+            ],
+        }],
+        "exercise_blueprints": [], "review_blueprints": [],
+    })
+
+    with pytest.raises(TeachingConfigurationError, match="知识点内容超过提示词预算"):
+        repository.teaching_topic("workspace-1", "attention")
+
+    repository.close()
+
+
+def test_guided_session_expires_after_its_idle_window(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    guided = repository.start_or_resume_guided_session(
+        session_id="chat-1", workspace_id="workspace-1", user_id="alice",
+        topic_id="attention", first_message="带我理解注意力机制",
+    )
+    repository._conn.execute(
+        "UPDATE gateway_guided_sessions SET updated_at=? WHERE id=?",
+        ((datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat(), guided["id"]),
+    )
+
+    assert repository.expire_guided_sessions(session_id="chat-1") == 1
+    assert repository.active_guided_session(session_id="chat-1", topic_id="attention") is None
+    repository.close()
+
+
+def test_guided_session_can_persist_learning_summary_and_complete(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    guided = repository.start_or_resume_guided_session(
+        session_id="chat-1", workspace_id="workspace-1", user_id="alice",
+        topic_id="attention", first_message="带我理解注意力机制",
+    )
+
+    repository.advance_guided_session(
+        guided["id"], tutor_message="你已经掌握了 QKV。", completed=True,
+        known_concepts=["Q、K、V 的角色"], misconceptions=["softmax 不是可省略步骤"],
+    )
+
+    assert repository.active_guided_session(session_id="chat-1", topic_id="attention") is None
+    row = repository._conn.execute("SELECT * FROM gateway_guided_sessions WHERE id=?", (guided["id"],)).fetchone()
+    assert row["status"] == "completed"
+    assert json.loads(row["known_concepts_json"]) == ["Q、K、V 的角色"]
+    assert json.loads(row["misconceptions_json"]) == ["softmax 不是可省略步骤"]
+    repository.close()
+
+
+def test_guided_session_keeps_its_assigned_blueprint_snapshot(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    blueprint = {"id": "guided-qkv", "name": "QKV 引导", "topic_id": "attention", "knowledge_point_id": "qkv", "guidance": "先比较 Q 与 K。", "status": "enabled"}
+    guided = repository.start_or_resume_guided_session(
+        session_id="chat-1", workspace_id="workspace-1", user_id="alice", topic_id="attention",
+        first_message="带我理解注意力机制", guided_blueprint=blueprint,
+    )
+    assert guided["guided_blueprint"] == blueprint
+
+    resumed = repository.start_or_resume_guided_session(
+        session_id="chat-1", workspace_id="workspace-1", user_id="alice", topic_id="attention",
+        first_message="我先回答一下", guided_blueprint={"id": "new", "guidance": "不应替换"},
+    )
+    assert resumed["guided_blueprint"] == blueprint
+    repository.close()
+
+
+def test_exercise_session_expires_and_rejects_incomplete_rubric_grading(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    repository.update_teaching_catalog("workspace-1", {
+        "workspace_id": "workspace-1",
+        "topics": [{"id": "attention", "name": "Attention", "status": "enabled", "knowledge_points": [{"id": "qkv", "name": "QKV", "markdown": "QKV", "status": "enabled", "sort_order": 0}]}],
+        "exercise_blueprints": [{
+            "id": "bp", "name": "练习", "topic_id": "attention", "level": "beginner", "status": "enabled",
+            "instructions": "", "question_types": ["简答"], "question_count": 1, "knowledge_point_ids": [],
+            "rubric": [{"criterion": "说明用途", "weight": 1}, {"criterion": "准确", "weight": 1}],
+        }], "review_blueprints": [],
+    })
+    exercise = repository.start_exercise_session(
+        session_id="chat-1", workspace_id="workspace-1", user_id="alice", topic_id="attention", mode="practice"
+    )
+    assert exercise is not None
+    repository.record_exercise_question(exercise["id"], "解释 attention")
+
+    with pytest.raises(ValueError, match="does not match blueprint rubric"):
+        repository.grade_exercise_answer(
+            exercise["id"], answer="我的回答", matches=[{"criterion_index": 0, "achieved": True}],
+            feedback="",
+        )
+    assert repository.exercise_attempts(exercise["id"]) == []
+
+    repository._conn.execute(
+        "UPDATE gateway_exercise_sessions SET updated_at=? WHERE id=?",
+        ((datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat(), exercise["id"]),
+    )
+    assert repository.expire_exercise_sessions(session_id="chat-1") == 1
+    assert repository.get_exercise_session(exercise["id"])["status"] == "expired"
+    repository.close()
+
+
+def test_completed_exercise_state_exposes_the_real_attempt_count(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    repository.update_teaching_catalog("workspace-1", {
+        "workspace_id": "workspace-1",
+        "topics": [{"id": "attention", "name": "Attention", "status": "enabled", "knowledge_points": [{"id": "qkv", "name": "QKV", "markdown": "QKV", "status": "enabled", "sort_order": 0}]}],
+        "exercise_blueprints": [{"id": "enabled", "name": "练习", "topic_id": "attention", "knowledge_point_id": "qkv", "instructions": "解释 QKV", "question_type": "简答", "status": "enabled", "rubric": [{"criterion": "说明 Q"}]}],
+        "review_blueprints": [],
+    })
+    exercise = repository.start_exercise_session(session_id="chat-1", workspace_id="workspace-1", user_id="alice", topic_id="attention", mode="practice")
+    assert exercise is not None
+    repository.record_exercise_question(exercise["id"], "解释 Q 的作用")
+    repository.grade_exercise_answer(exercise["id"], answer="Q 是查询", matches=[{"criterion_index": 0, "achieved": True, "evidence": "Q 是查询"}], feedback="正确")
+
+    state = repository.exercise_state(exercise["id"])
+
+    assert state.status == "completed"
+    assert state.attempt == 1
     repository.close()

@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.runtime_config import load_runtime_config
-from core.tool_runtime import ToolScope
+from core.tool_runtime import ToolRisk, ToolScope
 
 
 class StrictConfigModel(BaseModel):
@@ -43,9 +43,30 @@ class ToolPoliciesConfig(StrictConfigModel):
     )
 
 
+class CustomToolManifest(StrictConfigModel):
+    """Required metadata contract for one custom-tool provider."""
+
+    id: str
+    version: str
+    category: str = "general"
+    prompt_priority: int = Field(default=100, ge=-1000, le=1000)
+    scopes: set[ToolScope] = Field(default_factory=lambda: {ToolScope.WORKER})
+    capabilities: set[str] = Field(default_factory=set)
+    risk: ToolRisk = ToolRisk.MEDIUM
+    enabled: bool = True
+
+    @field_validator("id", "version")
+    @classmethod
+    def validate_required_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("manifest id and version cannot be blank")
+        return value
+
+
 class CustomToolsConfig(StrictConfigModel):
     modules: list[str] = Field(default_factory=list)
     entrypoint_group: str = "nlp_agent.tools"
+    manifests: dict[str, CustomToolManifest] = Field(default_factory=dict)
 
 
 class MCPServerConfig(StrictConfigModel):

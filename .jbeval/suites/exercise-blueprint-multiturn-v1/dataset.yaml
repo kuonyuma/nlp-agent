@@ -1,0 +1,32 @@
+schema_version: '1.0'
+suite:
+  id: exercise-blueprint-multiturn-v1
+  name: 出题蓝图多轮稳定性测评
+  description: 固定 TF-IDF 单题蓝图，验证出题、学生作答与评分闭环。
+blueprint_path: blueprint.yaml
+cases:
+  - id: exercise-ideal-answer
+    tags: [baseline, correct]
+    student_profile: {id: ideal, role: 理解基础概念的学生, behavior_rules: [完整回答 TF、IDF 与排序用途]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: practice}
+    start_message: 请开始一次 TF-IDF 练习。
+  - id: exercise-partial-answer
+    tags: [partial, rubric]
+    student_profile: {id: partial, role: 只掌握 TF 的学生, behavior_rules: [说明 TF，但对 IDF 和排序回答不完整]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: practice}
+    start_message: 我想做一道关于 TF-IDF 的题。
+  - id: exercise-misconception
+    tags: [misconception, grading]
+    student_profile: {id: misconception, role: 容易混淆概念的学生, behavior_rules: [把 IDF 误认为单篇文档中的词频，再尝试作答]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: practice}
+    start_message: 请给我一题练习。
+  - id: exercise-terse-answer
+    tags: [terse, completion]
+    student_profile: {id: terse, role: 回答很简短的学生, behavior_rules: [仅用一两句话作答，不请求下一题]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: practice}
+    start_message: 开始练习。
+  - id: exercise-transfer-answer
+    tags: [transfer, faq-ranking]
+    student_profile: {id: transfer, role: 能联系应用场景的学生, behavior_rules: [联系 FAQ 相关度排序解释答案]}
+    learning_context: {topic_id: tfidf-faq-retrieval, topic_name: TF-IDF 与 FAQ 检索, level: beginner, mode: practice}
+    start_message: 请出一道能联系 FAQ 检索的练习题。

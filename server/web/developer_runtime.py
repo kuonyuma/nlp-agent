@@ -39,6 +39,7 @@ async def reload_runtime(*, reload_mcp: bool = False, reload_skills: bool = Fals
     from configs.settings import settings
     from core.skill_loader import skill_loader
     from core.tool_registry import physical_tool_manager
+    from server.agent.node.coordinator import invalidate_coordinator_caches
 
     settings._config = __import__("core.runtime_config", fromlist=["load_runtime_config"]).load_runtime_config()
     physical_tool_manager.refresh_config()
@@ -47,6 +48,7 @@ async def reload_runtime(*, reload_mcp: bool = False, reload_skills: bool = Fals
         skill_loader.reload()
     if reload_mcp:
         await physical_tool_manager.runtime.start_mcp(physical_tool_manager.config.tools.mcp_servers)
+    invalidate_coordinator_caches()
     return {
         "catalog_revision": physical_tool_manager.catalog_revision,
         "mcp_reloaded": reload_mcp,

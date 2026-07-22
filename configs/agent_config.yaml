@@ -13,6 +13,7 @@ gateway:
   event_retention_days: 7
   max_events_per_session: 50000
   retention_cleanup_interval_s: 3600
+  knowledge_point_prompt_budget: 12000
 
 # FastAPI is a same-origin network adapter. It owns HTTP/WebSocket concerns,
 # while BackendGateway remains the only owner of Agent runtime state.
@@ -133,8 +134,9 @@ memory:
 # is introduced; undeclared or missing template variables fail before an LLM call.
 prompts:
   versions:
-    coordinator: "1.1"
-    worker: "1.1"
+    coordinator: "1.3"
+    worker: "1.2"
+    learning.policy: "1.2"
 
 # One logical Agent turn is bounded independently from provider-level retries
 # and timeouts. Coordinator and Worker consume the same runtime contract.
@@ -166,18 +168,32 @@ tools:
         - get_current_time
       allowed_capabilities:
         - context.manage
+        - nlp.analyze
       denied_capabilities:
         - business.write
     worker:
       allowed_tools: []
-      allowed_capabilities: []
+      allowed_capabilities:
+        - nlp.analyze
       denied_tools: []
       denied_capabilities:
         - runtime.control
         - worker.manage
   custom:
-    modules: []
+    modules:
+      - core.nlp_tools
     entrypoint_group: nlp_agent.tools
+    manifests: {}
+    # 自定义 NLP 工具建议在模块内声明 TOOL_MANIFEST；也可在此集中声明：
+    # manifests:
+    #   my_project.nlp_tools:
+    #     id: nlp-tools
+    #     version: "1.0"
+    #     category: nlp
+    #     prompt_priority: 200
+    #     scopes: [worker]
+    #     capabilities: [nlp.analyze]
+    #     risk: low
   mcp_servers: {}
   # 示例：
   # mcp_servers:
@@ -197,7 +213,16 @@ tools:
   #     scopes: [worker]
 
 # Profile 只组合 Skill、能力与工具授权；Skill 本身负责 SOP 指令。
-worker_profiles: {}
+worker_profiles:
+  nlp_calculator:
+    description: "执行独立、确定性的 NLP 教学计算（TF-IDF、PR 曲线、Precision@N、N-gram、BLEU）。"
+    capabilities: [nlp.analyze]
+    allowed_tools:
+      - nlp_tfidf_analyzer
+      - nlp_precision_recall_curve
+      - nlp_precision_at_n
+      - nlp_ngram_analyzer
+      - nlp_bleu_score
 
 # 可按智能体名称覆盖 Worker 模型。
 # agents:

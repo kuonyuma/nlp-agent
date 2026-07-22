@@ -28,6 +28,9 @@ class SessionContext(BaseModel):
     workspace_id: str = "default"
     channel: str = "local"
     agent_id: str = "coordinator"
+    # Runtime-only labels for observability.  They deliberately do not affect
+    # the storage key, so evaluation cases retain the same session semantics.
+    observability_attributes: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("session_id", "user_id", "workspace_id", "channel", "agent_id")
     @classmethod

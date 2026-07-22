@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import random
+import hashlib
 import sqlite3
 import threading
 import uuid
@@ -10,7 +12,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from gateway.contracts import GatewayEvent, GatewayEventType, TurnRecord, TurnStatus
+from gateway.contracts import (
+    GatewayEvent,
+    GatewayEventType,
+    TeachingConfigurationError,
+    GuidedSessionRef,
+    TurnRecord,
+    TurnStatus,
+)
+from core.learning import ExerciseState, LearningContext, LearningProgress
 
 
 def _now() -> str:
@@ -18,8 +28,9 @@ def _now() -> str:
 
 
 class GatewayRepository:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, knowledge_point_prompt_budget: int = 12_000) -> None:
         self.path = Path(path)
+        self.knowledge_point_prompt_budget = max(1, knowledge_point_prompt_budget)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -41,6 +52,14 @@ class GatewayRepository:
                     user_id TEXT NOT NULL,
                     status TEXT NOT NULL,
                     input_text TEXT NOT NULL,
+                    learning_context_json TEXT,
+                    learning_progress_json TEXT,
+                    guided_session_id TEXT,
+                    guided_blueprint_id TEXT,
+                    guided_blueprint_snapshot_sha256 TEXT,
+                    guided_session_attempts INTEGER,
+                    guided_session_status TEXT,
+                    exercise_state_json TEXT,
                     final_text TEXT,
                     error_kind TEXT,
                     error_message TEXT,
@@ -73,9 +92,102 @@ class GatewayRepository:
                     settings_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+                -- Teaching assets are deliberately independent from chat sessions,
+                -- turns, and user UI settings.  Editing a course cannot mutate a
+                -- learner transcript or LangGraph checkpoint.
+                CREATE TABLE IF NOT EXISTS gateway_teaching_catalogs (
+                    workspace_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    catalog_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS gateway_blueprints (
+                    workspace_id TEXT NOT NULL, blueprint_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    topic_id TEXT NOT NULL, knowledge_point_id TEXT NOT NULL, level TEXT,
+                    status TEXT NOT NULL, blueprint_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, blueprint_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_gateway_blueprints_assignment
+                    ON gateway_blueprints(workspace_id, kind, topic_id, knowledge_point_id, level, status);
+                CREATE TABLE IF NOT EXISTS gateway_exercise_sessions (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    topic_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    blueprint_snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_gateway_exercise_sessions_chat
+                    ON gateway_exercise_sessions(session_id, topic_id, mode, status);
+                CREATE TABLE IF NOT EXISTS gateway_exercise_questions (
+                    id TEXT PRIMARY KEY,
+                    exercise_session_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    question TEXT NOT NULL,
+                    rubric_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    UNIQUE(exercise_session_id, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS gateway_exercise_attempts (
+                    id TEXT PRIMARY KEY,
+                    exercise_question_id TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    rubric_matches_json TEXT NOT NULL,
+                    normalized_score INTEGER NOT NULL,
+                    passed INTEGER NOT NULL,
+                    feedback TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS gateway_learning_evidence (
+                    id TEXT PRIMARY KEY,
+                    exercise_session_id TEXT NOT NULL,
+                    exercise_question_id TEXT NOT NULL,
+                    blueprint_snapshot_json TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    learner_answer TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    rubric_matches_json TEXT NOT NULL,
+                    normalized_score INTEGER NOT NULL,
+                    passed INTEGER NOT NULL,
+                    knowledge_point_ids_json TEXT NOT NULL,
+                    completed_at TEXT NOT NULL,
+                    UNIQUE(exercise_question_id, attempt_number)
+                );
+                CREATE TABLE IF NOT EXISTS gateway_guided_sessions (
+                    id TEXT PRIMARY KEY, session_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL, topic_id TEXT NOT NULL, status TEXT NOT NULL,
+                    objective TEXT NOT NULL, stage TEXT NOT NULL, learner_responses_json TEXT NOT NULL,
+                    known_concepts_json TEXT NOT NULL, misconceptions_json TEXT NOT NULL,
+                    last_question TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    guided_blueprint_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_guided_sessions_active
+                    ON gateway_guided_sessions(session_id, topic_id) WHERE status='active';
                 DROP TABLE IF EXISTS gateway_outbox;
                 """
             )
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(gateway_turns)")}
+            for name in (
+                "learning_context_json", "learning_progress_json", "exercise_state_json",
+                "guided_session_id", "guided_blueprint_id", "guided_blueprint_snapshot_sha256",
+                "guided_session_attempts", "guided_session_status",
+            ):
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE gateway_turns ADD COLUMN {name} TEXT")
+            exercise_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(gateway_exercise_sessions)")}
+            if "completed_at" not in exercise_columns:
+                self._conn.execute("ALTER TABLE gateway_exercise_sessions ADD COLUMN completed_at TEXT")
+            guided_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(gateway_guided_sessions)")}
+            if "guided_blueprint_json" not in guided_columns:
+                self._conn.execute("ALTER TABLE gateway_guided_sessions ADD COLUMN guided_blueprint_json TEXT NOT NULL DEFAULT '{}'")
 
     def create_turn(
         self,
@@ -86,6 +198,14 @@ class GatewayRepository:
         user_id: str,
         input_text: str,
         idempotency_key: str | None,
+        learning_context: LearningContext | None = None,
+        learning_progress: LearningProgress | None = None,
+        guided_session_id: str | None = None,
+        guided_blueprint_id: str | None = None,
+        guided_blueprint_snapshot_sha256: str | None = None,
+        guided_session_attempts: int | None = None,
+        guided_session_status: str | None = None,
+        exercise_state: ExerciseState | None = None,
     ) -> tuple[TurnRecord, bool]:
         with self._lock, self._conn:
             if idempotency_key:
@@ -100,8 +220,10 @@ class GatewayRepository:
             self._conn.execute(
                 """INSERT INTO gateway_turns (
                    turn_id,session_id,workspace_id,user_id,status,input_text,
-                   idempotency_key,created_at
-                   ) VALUES (?,?,?,?,?,?,?,?)""",
+                   learning_context_json,learning_progress_json,guided_session_id,guided_blueprint_id,
+                   guided_blueprint_snapshot_sha256,guided_session_attempts,guided_session_status,
+                   exercise_state_json,idempotency_key,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     turn_id,
                     session_id,
@@ -109,6 +231,14 @@ class GatewayRepository:
                     user_id,
                     TurnStatus.ACCEPTED.value,
                     input_text,
+                    learning_context.model_dump_json() if learning_context else None,
+                    learning_progress.model_dump_json() if learning_progress else None,
+                    guided_session_id,
+                    guided_blueprint_id,
+                    guided_blueprint_snapshot_sha256,
+                    guided_session_attempts,
+                    guided_session_status,
+                    exercise_state.model_dump_json() if exercise_state else None,
                     idempotency_key,
                     created_at,
                 ),
@@ -126,6 +256,7 @@ class GatewayRepository:
         final_text: str | None = None,
         error_kind: str | None = None,
         error_message: str | None = None,
+        exercise_state: ExerciseState | None = None,
     ) -> TurnRecord:
         fields: dict[str, Any] = {
             "status": status.value,
@@ -142,6 +273,8 @@ class GatewayRepository:
             TurnStatus.INTERRUPTED,
         }:
             fields["completed_at"] = _now()
+        if exercise_state is not None:
+            fields["exercise_state_json"] = exercise_state.model_dump_json()
         assignments = ",".join(f"{key}=?" for key in fields)
         with self._lock, self._conn:
             cursor = self._conn.execute(
@@ -154,6 +287,13 @@ class GatewayRepository:
                 "SELECT * FROM gateway_turns WHERE turn_id=?", (turn_id,)
             ).fetchone()
             return self._turn(row)
+
+    def update_turn_guided_status(self, turn_id: str, *, status: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE gateway_turns SET guided_session_status=? WHERE turn_id=?",
+                (status, turn_id),
+            )
 
     def get_turn(self, turn_id: str) -> TurnRecord | None:
         with self._lock:
@@ -237,6 +377,173 @@ class GatewayRepository:
             ).fetchall()
         return [self._turn(row) for row in rows]
 
+    def latest_learning_state(
+        self, session_id: str
+    ) -> tuple[LearningContext | None, LearningProgress | None, ExerciseState | None]:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM gateway_turns
+                   WHERE session_id=? AND NOT (status=? AND error_kind='turn_conflict')
+                   ORDER BY created_at DESC LIMIT 1""",
+                (session_id, TurnStatus.FAILED.value),
+            ).fetchone()
+        if row is None:
+            return None, None, None
+        turn = self._turn(row)
+        return turn.learning_context, turn.learning_progress, turn.exercise_state
+
+    def turn_for_idempotency(
+        self, *, user_id: str, session_id: str, idempotency_key: str
+    ) -> TurnRecord | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM gateway_turns WHERE user_id=? AND session_id=? AND idempotency_key=?",
+                (user_id, session_id, idempotency_key),
+            ).fetchone()
+        return self._turn(row) if row else None
+
+    def teaching_topic(self, workspace_id: str, topic_id: str) -> dict[str, Any] | None:
+        catalog = self.get_teaching_catalog(workspace_id)["catalog"]
+        topic = next(
+            (
+                item for item in catalog.get("topics", [])
+                if item.get("id") == topic_id and item.get("status", "enabled") == "enabled"
+            ),
+            None,
+        )
+        if topic is None:
+            return None
+        enabled_points = sorted(
+            (
+                point for point in topic.get("knowledge_points", [])
+                if point.get("status", "enabled") == "enabled"
+            ),
+            key=lambda point: int(point.get("sort_order", 0)),
+        )
+        knowledge_points = [
+            str(point.get("markdown") or point.get("name") or "")
+            for point in enabled_points
+        ]
+        total_characters = sum(len(point) for point in knowledge_points)
+        if total_characters > self.knowledge_point_prompt_budget:
+            raise TeachingConfigurationError(
+                f"主题“{topic.get('name', topic_id)}”的知识点内容超过提示词预算"
+            )
+        return {
+            "id": topic.get("id"),
+            "name": topic.get("name", ""),
+            "description": topic.get("description", ""),
+            "knowledge_points": knowledge_points,
+        }
+
+    def active_exercise_session(
+        self, *, session_id: str, topic_id: str, mode: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM gateway_exercise_sessions
+                   WHERE session_id=? AND topic_id=? AND mode=? AND status='active'
+                   ORDER BY created_at DESC LIMIT 1""",
+                (session_id, topic_id, mode),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["blueprint_snapshot"] = json.loads(value.pop("blueprint_snapshot_json"))
+        return value
+
+    def _guided_session(self, row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        for field in ("learner_responses", "known_concepts", "misconceptions"):
+            value[field] = json.loads(value.pop(f"{field}_json"))
+        value["guided_blueprint"] = json.loads(value.pop("guided_blueprint_json") or "{}")
+        return value
+
+    def expire_guided_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=idle_minutes)).isoformat()
+        now = _now()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """UPDATE gateway_guided_sessions SET status='expired', completed_at=?, updated_at=?
+                   WHERE session_id=? AND status='active' AND updated_at<?""",
+                (now, now, session_id, cutoff),
+            )
+        return cursor.rowcount
+
+    def active_guided_session(self, *, session_id: str, topic_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM gateway_guided_sessions WHERE session_id=? AND topic_id=?
+                   AND status='active' ORDER BY created_at DESC LIMIT 1""",
+                (session_id, topic_id),
+            ).fetchone()
+        return self._guided_session(row) if row is not None else None
+
+    def start_or_resume_guided_session(
+        self, *, session_id: str, workspace_id: str, user_id: str, topic_id: str, first_message: str,
+        guided_blueprint: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        active = self.active_guided_session(session_id=session_id, topic_id=topic_id)
+        if active is not None:
+            responses = [*active["learner_responses"], first_message][:20]
+            with self._lock, self._conn:
+                self._conn.execute(
+                    """UPDATE gateway_guided_sessions SET learner_responses_json=?, attempts=?,
+                       stage='reasoning', updated_at=? WHERE id=?""",
+                    (json.dumps(responses, ensure_ascii=False), int(active["attempts"]) + 1, _now(), active["id"]),
+                )
+            return self.active_guided_session(session_id=session_id, topic_id=topic_id) or active
+        now = _now()
+        record = {
+            "id": str(uuid.uuid4()), "session_id": session_id, "workspace_id": workspace_id,
+            "user_id": user_id, "topic_id": topic_id, "status": "active", "objective": first_message,
+            "stage": "opening", "learner_responses": [], "known_concepts": [], "misconceptions": [],
+            "last_question": "", "attempts": 0, "created_at": now, "updated_at": now, "completed_at": None,
+            "guided_blueprint": guided_blueprint or {},
+        }
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO gateway_guided_sessions(
+                   id,session_id,workspace_id,user_id,topic_id,status,objective,stage,
+                   learner_responses_json,known_concepts_json,misconceptions_json,last_question,
+                   attempts,guided_blueprint_json,created_at,updated_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (record["id"], session_id, workspace_id, user_id, topic_id, "active", first_message,
+                 "opening", "[]", "[]", "[]", "", 0, json.dumps(record["guided_blueprint"], ensure_ascii=False), now, now, None),
+            )
+        return record
+
+    def advance_guided_session(
+        self, guided_session_id: str, *, tutor_message: str, known_concepts: object = None,
+        misconceptions: object = None, completed: bool = False,
+    ) -> None:
+        known = [str(item)[:300] for item in known_concepts if str(item).strip()][:30] if isinstance(known_concepts, list) else []
+        mistakes = [str(item)[:300] for item in misconceptions if str(item).strip()][:20] if isinstance(misconceptions, list) else []
+        now = _now()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """UPDATE gateway_guided_sessions SET stage=?, status=?, known_concepts_json=?,
+                   misconceptions_json=?, last_question=?, updated_at=?, completed_at=?
+                   WHERE id=? AND status='active'""",
+                (
+                    "completed" if completed else "awaiting_learner_response",
+                    "completed" if completed else "active", json.dumps(known, ensure_ascii=False),
+                    json.dumps(mistakes, ensure_ascii=False), tutor_message[:2_000], now,
+                    now if completed else None, guided_session_id,
+                ),
+            )
+
+    def end_guided_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
+        if status not in {"completed", "cancelled", "expired"}:
+            raise ValueError("invalid guided session terminal status")
+        now = _now()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """UPDATE gateway_guided_sessions SET status=?, completed_at=?, updated_at=?
+                   WHERE session_id=? AND status='active'""",
+                (status, now, now, session_id),
+            )
+        return cursor.rowcount
+
     def list_questions(
         self,
         *,
@@ -248,7 +555,7 @@ class GatewayRepository:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT turn_id,session_id,workspace_id,user_id,status,input_text,
-                          final_text,error_kind,created_at,completed_at
+                          final_text,error_kind,created_at,completed_at,learning_context_json,learning_progress_json,exercise_state_json
                    FROM gateway_turns
                    WHERE workspace_id=? AND created_at>=?
                    ORDER BY created_at DESC LIMIT ?""",
@@ -304,6 +611,287 @@ class GatewayRepository:
                 ),
             )
         return {"revision": revision, "settings": merged, "updated_at": updated_at}
+
+    def get_teaching_catalog(self, workspace_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT revision,catalog_json,updated_at FROM gateway_teaching_catalogs WHERE workspace_id=?",
+                (workspace_id,),
+            ).fetchone()
+        if row is None:
+            return {"revision": 0, "catalog": {"workspace_id": workspace_id, "topics": [], "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": []}, "updated_at": None}
+        return {"revision": int(row["revision"]), "catalog": json.loads(row["catalog_json"]), "updated_at": row["updated_at"]}
+
+    def update_teaching_catalog(self, workspace_id: str, catalog: dict[str, Any]) -> dict[str, Any]:
+        with self._lock, self._conn:
+            current = self.get_teaching_catalog(workspace_id)
+            revision = int(current["revision"]) + 1
+            updated_at = _now()
+            self._conn.execute(
+                """INSERT INTO gateway_teaching_catalogs(workspace_id,revision,catalog_json,updated_at)
+                   VALUES (?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET
+                   revision=excluded.revision,catalog_json=excluded.catalog_json,updated_at=excluded.updated_at""",
+                (workspace_id, revision, json.dumps(catalog, ensure_ascii=False, separators=(",", ":")), updated_at),
+            )
+            self._conn.execute("DELETE FROM gateway_blueprints WHERE workspace_id=?", (workspace_id,))
+            for kind, field in (("exercise", "exercise_blueprints"), ("review", "review_blueprints"), ("guided", "guided_blueprints")):
+                for blueprint in catalog.get(field, []):
+                    self._conn.execute(
+                        """INSERT INTO gateway_blueprints(workspace_id,blueprint_id,kind,topic_id,knowledge_point_id,level,status,blueprint_json,updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (workspace_id, str(blueprint["id"]), kind, str(blueprint["topic_id"]),
+                         str(blueprint.get("knowledge_point_id", "legacy_unassigned")), None,
+                         str(blueprint.get("status", "draft")),
+                         json.dumps(blueprint, ensure_ascii=False, separators=(",", ":")), updated_at),
+                    )
+        return {"revision": revision, "catalog": catalog, "updated_at": updated_at}
+
+    def select_guided_blueprint(self, *, workspace_id: str, topic_id: str) -> dict[str, Any] | None:
+        catalog = self.get_teaching_catalog(workspace_id)["catalog"]
+        topic = next((item for item in catalog.get("topics", []) if item.get("id") == topic_id), None)
+        if topic is None or topic.get("status", "enabled") != "enabled":
+            return None
+        enabled_points = {point.get("id") for point in topic.get("knowledge_points", []) if point.get("status", "enabled") == "enabled"}
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT blueprint_json FROM gateway_blueprints
+                   WHERE workspace_id=? AND kind='guided' AND topic_id=? AND status='enabled'""",
+                (workspace_id, topic_id),
+            ).fetchall()
+        candidates = [item for item in (json.loads(row["blueprint_json"]) for row in rows) if item.get("knowledge_point_id") in enabled_points]
+        return random.choice(candidates) if candidates else None
+
+    def start_exercise_session(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+        user_id: str,
+        topic_id: str,
+        mode: str,
+    ) -> dict[str, Any] | None:
+        if mode not in {"practice", "review"}:
+            raise ValueError("exercise session mode must be practice or review")
+        catalog = self.get_teaching_catalog(workspace_id)["catalog"]
+        topic = next((item for item in catalog.get("topics", []) if item.get("id") == topic_id), None)
+        if topic is None or topic.get("status", "enabled") != "enabled":
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT blueprint_json FROM gateway_blueprints
+                   WHERE workspace_id=? AND kind=? AND topic_id=? AND status='enabled'""",
+                (workspace_id, "exercise" if mode == "practice" else "review", topic_id),
+            ).fetchall()
+        enabled_points = {point.get("id") for point in topic.get("knowledge_points", []) if point.get("status", "enabled") == "enabled"}
+        candidates = [
+            item for item in (json.loads(row["blueprint_json"]) for row in rows)
+            if item.get("knowledge_point_id", "legacy_unassigned") == "legacy_unassigned"
+            or item.get("knowledge_point_id") in enabled_points
+        ]
+        if not candidates:
+            return None
+        now = _now()
+        record = {
+            "id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "mode": mode,
+            "status": "active",
+            "blueprint_snapshot": random.choice(candidates),
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO gateway_exercise_sessions(
+                    id,session_id,workspace_id,user_id,topic_id,mode,status,blueprint_snapshot_json,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record["id"], record["session_id"], record["workspace_id"], record["user_id"],
+                    record["topic_id"], record["mode"], record["status"],
+                    json.dumps(record["blueprint_snapshot"], ensure_ascii=False, separators=(",", ":")),
+                    now, now,
+                ),
+            )
+        return record
+
+    def get_exercise_session(self, exercise_session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM gateway_exercise_sessions WHERE id=?", (exercise_session_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["blueprint_snapshot"] = json.loads(value.pop("blueprint_snapshot_json"))
+        return value
+
+    def active_or_latest_exercise_session(
+        self, *, session_id: str, topic_id: str, mode: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM gateway_exercise_sessions
+                   WHERE session_id=? AND topic_id=? AND mode=?
+                   ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at DESC LIMIT 1""",
+                (session_id, topic_id, mode),
+            ).fetchone()
+        return self.get_exercise_session(str(row["id"])) if row is not None else None
+
+    def _exercise_question(self, row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["rubric"] = json.loads(value.pop("rubric_json"))
+        return value
+
+    def exercise_questions(self, exercise_session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM gateway_exercise_questions WHERE exercise_session_id=? ORDER BY sequence",
+                (exercise_session_id,),
+            ).fetchall()
+        return [self._exercise_question(row) for row in rows]
+
+    def exercise_attempts(self, exercise_session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT a.* FROM gateway_exercise_attempts a
+                   JOIN gateway_exercise_questions q ON q.id=a.exercise_question_id
+                   WHERE q.exercise_session_id=? ORDER BY q.sequence, a.attempt_number""",
+                (exercise_session_id,),
+            ).fetchall()
+        values = []
+        for row in rows:
+            value = dict(row)
+            value["rubric_matches"] = json.loads(value.pop("rubric_matches_json"))
+            value["passed"] = bool(value["passed"])
+            values.append(value)
+        return values
+
+    def learning_evidence(self, exercise_session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM gateway_learning_evidence WHERE exercise_session_id=? ORDER BY completed_at, id",
+                (exercise_session_id,),
+            ).fetchall()
+        values = []
+        for row in rows:
+            value = dict(row)
+            value["blueprint_snapshot"] = json.loads(value.pop("blueprint_snapshot_json"))
+            value["rubric_matches"] = json.loads(value.pop("rubric_matches_json"))
+            value["knowledge_point_ids"] = json.loads(value.pop("knowledge_point_ids_json"))
+            value["passed"] = bool(value["passed"])
+            values.append(value)
+        return values
+
+    def exercise_state(self, exercise_session_id: str) -> ExerciseState:
+        session = self.get_exercise_session(exercise_session_id)
+        if session is None:
+            return ExerciseState()
+        blueprint = session["blueprint_snapshot"]
+        questions = self.exercise_questions(exercise_session_id)
+        current = next((item for item in reversed(questions) if item["status"] == "awaiting_answer"), None)
+        count = 1
+        rubric = [str(point.get("criterion", point)) if isinstance(point, dict) else str(point) for point in blueprint.get("rubric", [])]
+        if session["status"] != "active":
+            attempts = len(self.exercise_attempts(exercise_session_id))
+            return ExerciseState(blueprint_id=blueprint.get("id"), exercise_session_id=exercise_session_id,
+                                 rubric=rubric, question_number=len(questions), question_count=count,
+                                 attempt=attempts, status="completed")
+        if current is None:
+            return ExerciseState(blueprint_id=blueprint.get("id"), exercise_session_id=exercise_session_id,
+                                 rubric=rubric, question_number=len(questions) + 1, question_count=count, status="idle")
+        attempts = sum(1 for attempt in self.exercise_attempts(exercise_session_id) if attempt["exercise_question_id"] == current["id"])
+        return ExerciseState(blueprint_id=blueprint.get("id"), exercise_session_id=exercise_session_id,
+                             question=current["question"], rubric=rubric, attempt=attempts,
+                             question_number=int(current["sequence"]), question_count=count, status="awaiting_answer")
+
+    def record_exercise_question(self, exercise_session_id: str, question: str) -> dict[str, Any]:
+        question = question.strip()
+        if not question:
+            raise ValueError("exercise question must not be empty")
+        session = self.get_exercise_session(exercise_session_id)
+        if session is None or session["status"] != "active":
+            raise ValueError("exercise session is not active")
+        existing = self.exercise_questions(exercise_session_id)
+        if any(item["status"] == "awaiting_answer" for item in existing):
+            raise ValueError("exercise already has an unanswered question")
+        limit = 1
+        if len(existing) >= limit:
+            raise ValueError("exercise question count is complete")
+        now = _now()
+        record = {"id": str(uuid.uuid4()), "exercise_session_id": exercise_session_id,
+                  "sequence": len(existing) + 1, "question": question,
+                  "rubric": session["blueprint_snapshot"].get("rubric", []), "status": "awaiting_answer",
+                  "created_at": now, "completed_at": None}
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO gateway_exercise_questions(id,exercise_session_id,sequence,question,rubric_json,status,created_at,completed_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (record["id"], exercise_session_id, record["sequence"], question,
+                 json.dumps(record["rubric"], ensure_ascii=False), "awaiting_answer", now, None),
+            )
+            self._conn.execute("UPDATE gateway_exercise_sessions SET updated_at=? WHERE id=?", (now, exercise_session_id))
+        return record
+
+    def grade_exercise_answer(
+        self, exercise_session_id: str, *, answer: str, matches: list[dict[str, Any]], feedback: str,
+    ) -> ExerciseState:
+        session = self.get_exercise_session(exercise_session_id)
+        if session is None or session["status"] != "active":
+            raise ValueError("exercise session is not active")
+        questions = self.exercise_questions(exercise_session_id)
+        question = next((item for item in reversed(questions) if item["status"] == "awaiting_answer"), None)
+        if question is None:
+            raise ValueError("exercise has no unanswered question")
+        rubric = question["rubric"]
+        indexes = {item.get("criterion_index") for item in matches if isinstance(item, dict)}
+        if indexes != set(range(len(rubric))) or len(matches) != len(rubric):
+            raise ValueError("grading result does not match blueprint rubric")
+        weights = [max(0.0, float(point.get("weight", 1) if isinstance(point, dict) else 1)) for point in rubric]
+        total_weight = sum(weights) or float(len(weights) or 1)
+        normalized_score = round(sum(weights[int(item["criterion_index"])] for item in matches if bool(item.get("achieved"))) / total_weight * 100)
+        passed = normalized_score >= 60
+        normalized_matches = [
+            {"criterion_index": int(item["criterion_index"]), "criterion": str(rubric[int(item["criterion_index"])].get("criterion", "") if isinstance(rubric[int(item["criterion_index"])], dict) else rubric[int(item["criterion_index"])]),
+             "weight": weights[int(item["criterion_index"])], "achieved": bool(item.get("achieved")), "evidence": str(item.get("evidence", ""))[:1000]}
+            for item in sorted(matches, key=lambda value: int(value["criterion_index"]))
+        ]
+        attempt_number = sum(1 for item in self.exercise_attempts(exercise_session_id) if item["exercise_question_id"] == question["id"]) + 1
+        is_last = True
+        now = _now()
+        with self._lock, self._conn:
+            self._conn.execute("""INSERT INTO gateway_exercise_attempts(id,exercise_question_id,answer,attempt_number,rubric_matches_json,normalized_score,passed,feedback,created_at)
+                                VALUES (?,?,?,?,?,?,?,?,?)""",
+                               (str(uuid.uuid4()), question["id"], answer, attempt_number, json.dumps(normalized_matches, ensure_ascii=False), normalized_score, int(passed), feedback[:4000], now))
+            self._conn.execute("UPDATE gateway_exercise_questions SET status='completed', completed_at=? WHERE id=?", (now, question["id"]))
+            self._conn.execute("""INSERT INTO gateway_learning_evidence(id,exercise_session_id,exercise_question_id,blueprint_snapshot_json,question,learner_answer,attempt_number,rubric_matches_json,normalized_score,passed,knowledge_point_ids_json,completed_at)
+                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (str(uuid.uuid4()), exercise_session_id, question["id"], json.dumps(session["blueprint_snapshot"], ensure_ascii=False), question["question"], answer, attempt_number, json.dumps(normalized_matches, ensure_ascii=False), normalized_score, int(passed), json.dumps([session["blueprint_snapshot"]["knowledge_point_id"]] if session["blueprint_snapshot"].get("knowledge_point_id") else session["blueprint_snapshot"].get("knowledge_point_ids", []), ensure_ascii=False), now))
+            self._conn.execute("UPDATE gateway_exercise_sessions SET status='completed', updated_at=?, completed_at=? WHERE id=?", (now, now, exercise_session_id))
+        return self.exercise_state(exercise_session_id)
+
+    def end_exercise_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
+        if status not in {"completed", "cancelled", "expired"}:
+            raise ValueError("invalid exercise session terminal status")
+        now = _now()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """UPDATE gateway_exercise_sessions SET status=?, updated_at=?, completed_at=?
+                   WHERE session_id=? AND status='active'""", (status, now, now, session_id)
+            )
+        return cursor.rowcount
+
+    def expire_exercise_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=idle_minutes)).isoformat()
+        now = _now()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """UPDATE gateway_exercise_sessions SET status='expired', updated_at=?, completed_at=?
+                   WHERE session_id=? AND status='active' AND updated_at<?""", (now, now, session_id, cutoff)
+            )
+        return cursor.rowcount
 
     def prune_events(
         self,
@@ -387,7 +975,40 @@ class GatewayRepository:
 
     def delete_session(self, session_id: str) -> None:
         with self._lock, self._conn:
+            self._conn.execute(
+                """DELETE FROM gateway_learning_evidence WHERE exercise_session_id IN (
+                   SELECT id FROM gateway_exercise_sessions WHERE session_id=?)""", (session_id,)
+            )
+            self._conn.execute(
+                """DELETE FROM gateway_exercise_attempts WHERE exercise_question_id IN (
+                   SELECT q.id FROM gateway_exercise_questions q
+                   JOIN gateway_exercise_sessions s ON s.id=q.exercise_session_id WHERE s.session_id=?)""", (session_id,)
+            )
+            self._conn.execute(
+                """DELETE FROM gateway_exercise_questions WHERE exercise_session_id IN (
+                   SELECT id FROM gateway_exercise_sessions WHERE session_id=?)""", (session_id,)
+            )
+            self._conn.execute("DELETE FROM gateway_exercise_sessions WHERE session_id=?", (session_id,))
+            self._conn.execute("DELETE FROM gateway_guided_sessions WHERE session_id=?", (session_id,))
             self._conn.execute("DELETE FROM gateway_turns WHERE session_id=?", (session_id,))
+
+    def clear_learning_sessions(self) -> dict[str, int]:
+        """Clear learner runtime data without touching settings or teacher catalogues."""
+        with self._lock, self._conn:
+            counts = {
+                table: int(self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in (
+                    "gateway_turns", "gateway_events", "gateway_exercise_sessions",
+                    "gateway_exercise_questions", "gateway_exercise_attempts", "gateway_learning_evidence",
+                )
+            }
+            self._conn.execute("DELETE FROM gateway_learning_evidence")
+            self._conn.execute("DELETE FROM gateway_exercise_attempts")
+            self._conn.execute("DELETE FROM gateway_exercise_questions")
+            self._conn.execute("DELETE FROM gateway_exercise_sessions")
+            self._conn.execute("DELETE FROM gateway_events")
+            self._conn.execute("DELETE FROM gateway_turns")
+        return counts
 
     def health(self) -> dict[str, Any]:
         with self._lock:
@@ -412,6 +1033,19 @@ class GatewayRepository:
             user_id=row["user_id"],
             status=row["status"],
             input_text=row["input_text"],
+            learning_context=(LearningContext.model_validate_json(row["learning_context_json"])
+                              if row["learning_context_json"] else None),
+            learning_progress=(LearningProgress.model_validate_json(row["learning_progress_json"])
+                               if row["learning_progress_json"] else None),
+            guided_session=(GuidedSessionRef(
+                id=row["guided_session_id"],
+                blueprint_id=row["guided_blueprint_id"],
+                blueprint_snapshot_sha256=row["guided_blueprint_snapshot_sha256"],
+                attempts=int(row["guided_session_attempts"] or 0),
+                status=str(row["guided_session_status"] or "active"),
+            ) if row["guided_session_id"] else None),
+            exercise_state=(ExerciseState.model_validate_json(row["exercise_state_json"])
+                            if row["exercise_state_json"] else None),
             final_text=row["final_text"],
             error_kind=row["error_kind"],
             error_message=row["error_message"],

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from core.learning import LearningContext
+from gateway.contracts import EvaluationContext
 
 
 API_VERSION = "1"
@@ -23,6 +25,8 @@ class SubmitChatBody(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)
     idempotency_key: str | None = Field(default=None, max_length=128)
+    learning_context: LearningContext | None = None
+    evaluation: EvaluationContext | None = None
 
 
 class InjectChatBody(StrictModel):
@@ -76,6 +80,7 @@ class ChatSendPayload(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)
     idempotency_key: str | None = Field(default=None, max_length=128)
+    learning_context: LearningContext | None = None
 
 
 class ChatInjectPayload(StrictModel):

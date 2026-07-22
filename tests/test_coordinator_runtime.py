@@ -5,7 +5,10 @@ import time
 import pytest
 from langchain_core.messages import HumanMessage
 
-from core.coordinator_runtime import CoordinatorRuntime
+from core.coordinator_runtime import CoordinatorRuntime, invoke_model_with_telemetry
+from core.observability.context import TelemetryContext, bind_telemetry_context
+from core.observability.models import SpanKind
+from core.observability.runtime import TelemetryRuntime
 from core.session_context import SessionContext
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
@@ -120,6 +123,44 @@ async def test_wait_barrier_reports_timeout_without_worker_result():
 
 
 @pytest.mark.asyncio
+async def test_wait_barrier_keeps_other_turn_worker_results_out_of_current_turn():
+    bus = WorkerEventBus()
+    calls = []
+
+    async def invoke(messages, context, background, turn_id):
+        calls.append((messages, turn_id))
+
+    runtime = CoordinatorRuntime(bus, invoke)
+    future = register_worker("current", "turn-current")
+    turn = asyncio.create_task(
+        runtime.submit_user_turn(
+            "session-a", HumanMessage(content="question", id="turn-current")
+        )
+    )
+    await asyncio.sleep(0)
+
+    await bus.publish(event("detached", "turn-previous"))
+    global_task_manager.transition_task("current", "running", "test_started")
+    global_task_manager.complete_task("current", "completed")
+    await bus.publish(event("current", "turn-current"))
+    await asyncio.wait_for(turn, 1)
+
+    barrier_messages, barrier_turn_id = next(
+        (messages, turn_id)
+        for messages, turn_id in calls
+        if turn_id == "turn-current"
+        and str(messages[0].content).startswith("[INTERNAL_WORKER_RESULTS]")
+    )
+    payload = json.loads(barrier_messages[0].content.splitlines()[2])
+    assert barrier_turn_id == "turn-current"
+    assert [item["worker_id"] for item in payload["events"]] == ["current"]
+
+    future.cancel()
+    await asyncio.gather(future, return_exceptions=True)
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_detached_result_is_serialized_through_runtime():
     bus = WorkerEventBus()
     calls = []
@@ -151,6 +192,28 @@ async def test_detached_result_is_serialized_through_runtime():
     await asyncio.sleep(0.02)
     assert calls[-1][0] is True
     assert calls[-1][1] == "turn-detached"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_detached_results_from_different_turns_resume_separately():
+    bus = WorkerEventBus()
+    calls = []
+
+    async def invoke(messages, _context, background, turn_id):
+        if background:
+            payload = json.loads(messages[0].content.splitlines()[2])
+            calls.append((turn_id, payload))
+
+    runtime = CoordinatorRuntime(bus, invoke)
+    await bus.publish(event("worker-first", "turn-first"))
+    await bus.publish(event("worker-second", "turn-second"))
+    await asyncio.sleep(0.05)
+
+    assert [(turn_id, [item["worker_id"] for item in payload["events"]]) for turn_id, payload in calls] == [
+        ("turn-first", ["worker-first"]),
+        ("turn-second", ["worker-second"]),
+    ]
     await runtime.close()
 
 
@@ -211,3 +274,85 @@ async def test_new_message_is_injected_into_active_coordinator_turn():
     assert len(calls) == 2
     assert global_agent_injections.pending("session-inject") == 0
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_model_invocation_records_usage_in_a_model_span(monkeypatch, tmp_path):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+
+    class Model:
+        async def ainvoke(self, _messages, config=None):
+            return type("Response", (), {"usage_metadata": {
+                "input_tokens": 11, "output_tokens": 4, "total_tokens": 15,
+            }})()
+
+    monkeypatch.setattr("core.coordinator_runtime.global_telemetry", telemetry)
+    context = TelemetryContext.create(session_id="session-model", turn_id="turn-model")
+    telemetry.start_trace(context)
+    with bind_telemetry_context(context):
+        await invoke_model_with_telemetry(Model(), [], {}, name="coordinator.model")
+    telemetry.complete_trace(context)
+    await telemetry.flush()
+
+    detail = telemetry.repository.trace_detail(context.trace_id)
+    assert detail is not None
+    assert detail["trace"]["total_tokens"] == 15
+    assert detail["spans"][0]["kind"] == SpanKind.MODEL.value
+    await telemetry.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_stores_evaluation_batch_labels_on_the_root_trace(monkeypatch, tmp_path):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+
+    async def invoke(_messages, _context, _background, _turn_id):
+        return None
+
+    monkeypatch.setattr("core.coordinator_runtime.global_telemetry", telemetry)
+    runtime = CoordinatorRuntime(WorkerEventBus(), invoke)
+    await runtime.submit_user_turn(
+        SessionContext(
+            session_id="evaluation-session",
+            observability_attributes={
+                "evaluation_run_id": "run-1",
+                "evaluation_suite_id": "suite-1",
+                "evaluation_case_id": "case-1",
+            },
+        ),
+        HumanMessage(content="case input", id="evaluation-turn"),
+    )
+    await telemetry.flush()
+
+    trace = telemetry.repository.list_traces(limit=1)[0]
+    assert trace["attributes"] == {
+        "evaluation_run_id": "run-1",
+        "evaluation_suite_id": "suite-1",
+        "evaluation_case_id": "case-1",
+    }
+    await runtime.close()
+    await telemetry.close()
+
+
+@pytest.mark.asyncio
+async def test_model_invocation_does_not_duplicate_usage_for_model_runtime(monkeypatch, tmp_path):
+    telemetry = TelemetryRuntime(tmp_path / "telemetry.sqlite3", flush_interval_s=0.01)
+
+    class Model:
+        emits_model_telemetry = True
+
+        async def ainvoke(self, _messages, config=None):
+            return type("Response", (), {"usage_metadata": {"total_tokens": 15}})()
+
+    monkeypatch.setattr("core.coordinator_runtime.global_telemetry", telemetry)
+    context = TelemetryContext.create(session_id="session-model", turn_id="turn-model")
+    telemetry.start_trace(context)
+    with bind_telemetry_context(context):
+        await invoke_model_with_telemetry(Model(), [], {}, name="coordinator.model")
+    telemetry.complete_trace(context)
+    await telemetry.flush()
+
+    detail = telemetry.repository.trace_detail(context.trace_id)
+    assert detail is not None
+    assert detail["trace"]["total_tokens"] == 0
+    assert detail["spans"] == []
+    await telemetry.close()

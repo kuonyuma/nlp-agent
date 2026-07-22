@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -11,7 +12,12 @@ from typing import Awaitable, Callable
 from langchain_core.messages import BaseMessage, SystemMessage
 
 from core.session_context import SessionContext
-from core.observability.context import TelemetryContext, bind_telemetry_context
+from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
+from core.observability.context import (
+    TelemetryContext,
+    bind_telemetry_context,
+    current_telemetry_context,
+)
 from core.observability.models import SpanKind, SpanStatus
 from core.observability.runtime import global_telemetry
 from core.task_manager import global_task_manager
@@ -21,8 +27,26 @@ from core.agent_runtime import global_agent_injections
 
 
 InvokeCoordinator = Callable[
-    [list[BaseMessage], SessionContext, bool, str], Awaitable[None]
+    [list[BaseMessage], SessionContext, bool, str, LearningContext | None, LearningProgress | None, ExerciseState | None, TeachingMaterials | None], Awaitable[None]
 ]
+
+
+async def invoke_model_with_telemetry(
+    model: object, messages: list[BaseMessage], config: object, *, name: str
+) -> object:
+    """Invoke an LLM while recording response usage in the active trace."""
+    telemetry = current_telemetry_context()
+    if telemetry is None:
+        return await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
+    if getattr(model, "emits_model_telemetry", False):
+        response = await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
+        global_telemetry.mark_ttft(telemetry)
+        return response
+    async with global_telemetry.span(SpanKind.MODEL, name, context=telemetry) as span:
+        response = await model.ainvoke(messages, config=config)  # type: ignore[attr-defined]
+        span.set_usage(getattr(response, "usage_metadata", None))
+        global_telemetry.mark_ttft(telemetry)
+        return response
 
 
 @dataclass(slots=True)
@@ -33,18 +57,40 @@ class SessionRuntime:
     resume_task: asyncio.Task[None] | None = None
     context: SessionContext | None = None
     telemetry_context: TelemetryContext | None = None
+    learning_context: LearningContext | None = None
+    learning_progress: LearningProgress | None = None
+    exercise_state: ExerciseState | None = None
+    teaching_materials: TeachingMaterials | None = None
 
 
 class CoordinatorRuntime:
     def __init__(self, event_bus: WorkerEventBus, invoke: InvokeCoordinator) -> None:
         self._event_bus = event_bus
         self._invoke = invoke
+        self._invoke_accepts_learning = len(inspect.signature(invoke).parameters) >= 7
         self._sessions: dict[str, SessionRuntime] = {}
         self._closed = False
         self._subscription_id = self._event_bus.subscribe(self.notify_worker_event)
 
     def _session(self, session_id: str) -> SessionRuntime:
         return self._sessions.setdefault(session_id, SessionRuntime())
+
+    async def _invoke_coordinator(
+        self, messages: list[BaseMessage], context: SessionContext, background: bool, turn_id: str,
+        learning_context: LearningContext | None = None,
+        learning_progress: LearningProgress | None = None,
+        exercise_state: ExerciseState | None = None,
+        teaching_materials: TeachingMaterials | None = None,
+    ) -> None:
+        if len(inspect.signature(self._invoke).parameters) >= 8:
+            await self._invoke(
+                messages, context, background, turn_id, learning_context,
+                learning_progress, exercise_state, teaching_materials,
+            )
+        elif self._invoke_accepts_learning:
+            await self._invoke(messages, context, background, turn_id, learning_context, learning_progress, exercise_state)
+        else:
+            await self._invoke(messages, context, background, turn_id)
 
     def active_turn_id(self, session_id: str) -> str | None:
         runtime = self._sessions.get(session_id)
@@ -72,6 +118,10 @@ class CoordinatorRuntime:
         self,
         context: SessionContext | str,
         message: BaseMessage,
+        learning_context: LearningContext | None = None,
+        learning_progress: LearningProgress | None = None,
+        exercise_state: ExerciseState | None = None,
+        teaching_materials: TeachingMaterials | None = None,
     ) -> None:
         context = (
             context if isinstance(context, SessionContext) else SessionContext(session_id=context)
@@ -88,6 +138,10 @@ class CoordinatorRuntime:
             return
         async with runtime.lock:
             runtime.context = context
+            runtime.learning_context = learning_context
+            runtime.learning_progress = learning_progress
+            runtime.exercise_state = exercise_state
+            runtime.teaching_materials = teaching_materials
             runtime.foreground_active = True
             runtime.active_turn_id = message.id or str(uuid.uuid4())
             telemetry = TelemetryContext.create(
@@ -98,7 +152,11 @@ class CoordinatorRuntime:
                 channel=context.channel,
             )
             runtime.telemetry_context = telemetry
-            global_telemetry.start_trace(telemetry, source="user")
+            global_telemetry.start_trace(
+                telemetry,
+                source="user",
+                attributes=context.observability_attributes,
+            )
             global_telemetry.event(
                 "agent.run.started",
                 payload={"role": "coordinator", "background": False},
@@ -109,13 +167,13 @@ class CoordinatorRuntime:
                     async with global_telemetry.span(
                         SpanKind.COORDINATOR, "coordinator.turn", context=telemetry
                     ):
-                        await self._invoke([message], context, False, runtime.active_turn_id)
+                        await self._invoke_coordinator([message], context, False, runtime.active_turn_id, learning_context, learning_progress, exercise_state, teaching_materials)
                         # Close the small race between the graph's final safe-point
                         # drain and releasing the session lock.
                         injection_cycles = 0
                         while global_agent_injections.pending(session_id) and injection_cycles < 5:
                             pending_before = global_agent_injections.pending(session_id)
-                            await self._invoke([], context, False, runtime.active_turn_id)
+                            await self._invoke_coordinator([], context, False, runtime.active_turn_id, learning_context, learning_progress, exercise_state, teaching_materials)
                             injection_cycles += 1
                             if global_agent_injections.pending(session_id) >= pending_before:
                                 break
@@ -163,11 +221,15 @@ class CoordinatorRuntime:
                     reason=f"barrier_timeout:{parent_turn_id}",
                 )
             global_task_manager.mark_wait_consumed(plan.worker_ids)
-            await self._invoke(
+            await self._invoke_coordinator(
                 [self._worker_results_message(events, plan=plan, timed_out=timed_out)],
                 self._session(session_id).context or SessionContext(session_id=session_id),
                 background,
                 parent_turn_id,
+                self._session(session_id).learning_context,
+                self._session(session_id).learning_progress,
+                self._session(session_id).exercise_state,
+                self._session(session_id).teaching_materials,
             )
 
     async def _collect_barrier_events(
@@ -207,17 +269,20 @@ class CoordinatorRuntime:
             if remaining <= 0:
                 return collected, True
             try:
-                event = await self._event_bus.get(plan.session_id, timeout_s=remaining)
+                event = await self._event_bus.get_for_turn(
+                    plan.session_id, plan.parent_turn_id, timeout_s=remaining
+                )
             except asyncio.TimeoutError:
                 return collected, True
             collected.append(event)
             if event.worker_id in plan.worker_ids:
                 completed.add(event.worker_id)
 
-        # Drain events already queued in the same scheduler tick without an
-        # arbitrary latency window. Unrelated/detached results are still
-        # delivered in the same serialized Coordinator resume.
-        collected.extend(self._event_bus.drain(plan.session_id))
+        # Drain only this turn's events already queued in the same scheduler
+        # tick. Other turns remain available for their own Coordinator resume.
+        collected.extend(
+            self._event_bus.drain_for_turn(plan.session_id, plan.parent_turn_id)
+        )
         return collected, False
 
     @staticmethod
@@ -234,40 +299,41 @@ class CoordinatorRuntime:
         async with runtime.lock:
             if runtime.foreground_active or self._closed:
                 return
-            events = self._event_bus.drain(session_id)
-            if not events:
-                return
-            parent_turn_id = next(
-                (event.parent_turn_id for event in events if event.parent_turn_id),
-                str(uuid.uuid4()),
-            )
             session_context = runtime.context or SessionContext(session_id=session_id)
-            telemetry = TelemetryContext.create(
-                session_id=session_id, turn_id=parent_turn_id,
-                workspace_id=session_context.workspace_id, user_id=session_context.user_id,
-                channel=session_context.channel,
-            )
-            runtime.telemetry_context = telemetry
-            global_telemetry.start_trace(
-                telemetry, source="worker_resume",
-                attributes={"worker_events": len(events)},
-            )
-            try:
-                with bind_telemetry_context(telemetry):
-                    async with global_telemetry.span(
-                        SpanKind.COORDINATOR, "coordinator.worker_resume", context=telemetry
-                    ):
-                        await self._invoke(
-                            [self._worker_results_message(events)], session_context,
-                            True, parent_turn_id,
-                        )
-                        await self._process_wait_plans(session_id, parent_turn_id, background=True)
-            except BaseException as error:
-                status = SpanStatus.CANCELLED if isinstance(error, asyncio.CancelledError) else SpanStatus.ERROR
-                global_telemetry.complete_trace(telemetry, status=status, error=error)
-                raise
-            else:
-                global_telemetry.complete_trace(telemetry)
+            while events := self._event_bus.drain(session_id):
+                events_by_turn: dict[str, list[WorkerCompletedEvent]] = {}
+                for event in events:
+                    parent_turn_id = event.parent_turn_id or str(uuid.uuid4())
+                    events_by_turn.setdefault(parent_turn_id, []).append(event)
+                for parent_turn_id, turn_events in events_by_turn.items():
+                    telemetry = TelemetryContext.create(
+                        session_id=session_id, turn_id=parent_turn_id,
+                        workspace_id=session_context.workspace_id, user_id=session_context.user_id,
+                        channel=session_context.channel,
+                    )
+                    runtime.telemetry_context = telemetry
+                    global_telemetry.start_trace(
+                        telemetry, source="worker_resume",
+                        attributes={"worker_events": len(turn_events)},
+                    )
+                    try:
+                        with bind_telemetry_context(telemetry):
+                            async with global_telemetry.span(
+                                SpanKind.COORDINATOR, "coordinator.worker_resume", context=telemetry
+                            ):
+                                await self._invoke_coordinator(
+                                    [self._worker_results_message(turn_events)], session_context,
+                                    True, parent_turn_id, runtime.learning_context,
+                                    runtime.learning_progress, runtime.exercise_state,
+                                    runtime.teaching_materials,
+                                )
+                                await self._process_wait_plans(session_id, parent_turn_id, background=True)
+                    except BaseException as error:
+                        status = SpanStatus.CANCELLED if isinstance(error, asyncio.CancelledError) else SpanStatus.ERROR
+                        global_telemetry.complete_trace(telemetry, status=status, error=error)
+                        raise
+                    else:
+                        global_telemetry.complete_trace(telemetry)
 
     @staticmethod
     def _worker_results_message(

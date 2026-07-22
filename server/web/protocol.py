@@ -19,6 +19,7 @@ _EVENT_TYPES: dict[GatewayEventType, str] = {
     GatewayEventType.MESSAGE_INJECTED: "chat.injected",
     GatewayEventType.TOOL_STARTED: "tool.started",
     GatewayEventType.TOOL_COMPLETED: "tool.completed",
+    GatewayEventType.TOOL_FAILED: "tool.error",
     GatewayEventType.WORKER_UPDATE: "worker.progress",
     GatewayEventType.GAP: "stream.gap",
 }

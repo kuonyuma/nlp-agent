@@ -28,6 +28,7 @@ from core.tool_safety import (
 
 logger = get_logger("nlp_agent.tool_runtime")
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+_TOOL_CATEGORY = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class ToolSource(str, Enum):
@@ -96,6 +97,10 @@ class ToolDescriptor(BaseModel):
     description: str
     source: ToolSource
     provider: str = "core"
+    provider_id: str = ""
+    version: str = "1.0"
+    category: str = "general"
+    prompt_priority: int = Field(default=100, ge=-1000, le=1000)
     scopes: frozenset[ToolScope]
     capabilities: frozenset[str] = Field(default_factory=frozenset)
     risk: ToolRisk = ToolRisk.LOW
@@ -128,8 +133,26 @@ class ToolDescriptor(BaseModel):
                 raise ValueError(f"invalid capability: {value!r}")
         return values
 
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("tool version cannot be blank")
+        return value
+
+    @field_validator("category")
+    @classmethod
+    def validate_category(cls, value: str) -> str:
+        if not _TOOL_CATEGORY.fullmatch(value):
+            raise ValueError("tool category must be lowercase letters, digits, _ or -")
+        return value
+
     @model_validator(mode="after")
     def validate_concurrency_contract(self) -> "ToolDescriptor":
+        if self.source == ToolSource.CUSTOM and self.category == "nlp" and not self.name.startswith("nlp_"):
+            raise ValueError("NLP custom tools must use the nlp_ namespace")
+        if self.source == ToolSource.MCP and not self.name.startswith("mcp_"):
+            raise ValueError("MCP tools must use the mcp_ namespace")
         if self.exclusive and self.concurrency_safe:
             raise ValueError("exclusive tools cannot be concurrency_safe")
         if self.exclusive and self.lock_scope == ToolLockScope.NONE:
@@ -273,10 +296,16 @@ class ToolCatalog:
         return self._descriptors.get(name)
 
     def descriptors(self) -> tuple[ToolDescriptor, ...]:
+        source_order = {
+            ToolSource.ORCHESTRATION: 0,
+            ToolSource.BUILTIN: 1,
+            ToolSource.CUSTOM: 2,
+            ToolSource.MCP: 3,
+        }
         return tuple(
             sorted(
                 self._descriptors.values(),
-                key=lambda item: (item.source == ToolSource.MCP, item.name),
+                key=lambda item: (-item.prompt_priority, source_order[item.source], item.name),
             )
         )
 

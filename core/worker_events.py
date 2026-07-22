@@ -80,6 +80,9 @@ class WorkerEventBus:
             lambda: asyncio.Queue(maxsize=self._max_events_per_session)
         )
         self._overflow: dict[str, deque[WorkerCompletedEvent]] = defaultdict(deque)
+        # Events removed while another turn is waiting stay available for the
+        # matching turn instead of being injected into the wrong Coordinator run.
+        self._deferred: dict[str, deque[WorkerCompletedEvent]] = defaultdict(deque)
         self._subscribers: dict[str, tuple[str | None, SessionNotifier]] = {}
         self._seen_ids: dict[str, set[str]] = defaultdict(set)
         self._seen_order: dict[str, deque[str]] = defaultdict(deque)
@@ -119,12 +122,43 @@ class WorkerEventBus:
         self.metrics.consumed += 1
         return event
 
+    async def get_for_turn(
+        self, session_id: str, parent_turn_id: str, timeout_s: float | None = None,
+    ) -> WorkerCompletedEvent:
+        """Return one completion for a turn without consuming other turns' events."""
+        deferred = self._deferred[session_id]
+        for index, event in enumerate(deferred):
+            if event.parent_turn_id == parent_turn_id:
+                del deferred[index]
+                self.metrics.consumed += 1
+                return event
+
+        queue = self._queues[session_id]
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout_s is None else loop.time() + timeout_s
+        while True:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                raise asyncio.TimeoutError
+            event = await queue.get() if remaining is None else await asyncio.wait_for(
+                queue.get(), remaining
+            )
+            self._refill(session_id)
+            if event.parent_turn_id == parent_turn_id:
+                self.metrics.consumed += 1
+                return event
+            deferred.append(event)
+
     def drain(self, session_id: str, limit: int = 100) -> list[WorkerCompletedEvent]:
         queue = self._queues[session_id]
         events: list[WorkerCompletedEvent] = []
+        deferred = self._deferred[session_id]
+        while len(events) < limit and deferred:
+            events.append(deferred.popleft())
         while len(events) < limit:
             try:
                 events.append(queue.get_nowait())
+                self._refill(session_id)
             except asyncio.QueueEmpty:
                 break
         overflow = self._overflow[session_id]
@@ -133,8 +167,41 @@ class WorkerEventBus:
         self.metrics.consumed += len(events)
         return events
 
+    def drain_for_turn(
+        self, session_id: str, parent_turn_id: str, limit: int = 100,
+    ) -> list[WorkerCompletedEvent]:
+        """Drain only one turn while retaining completions for other turns."""
+        events: list[WorkerCompletedEvent] = []
+        deferred = self._deferred[session_id]
+        retained: deque[WorkerCompletedEvent] = deque()
+        while deferred:
+            event = deferred.popleft()
+            if event.parent_turn_id == parent_turn_id and len(events) < limit:
+                events.append(event)
+            else:
+                retained.append(event)
+        deferred.extend(retained)
+
+        queue = self._queues[session_id]
+        while len(events) < limit:
+            try:
+                event = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._refill(session_id)
+            if event.parent_turn_id == parent_turn_id:
+                events.append(event)
+            else:
+                deferred.append(event)
+        self.metrics.consumed += len(events)
+        return events
+
     def has_pending(self, session_id: str) -> bool:
-        return not self._queues[session_id].empty() or bool(self._overflow[session_id])
+        return (
+            not self._queues[session_id].empty()
+            or bool(self._overflow[session_id])
+            or bool(self._deferred[session_id])
+        )
 
     def metrics_snapshot(self) -> dict[str, int]:
         return {

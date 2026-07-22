@@ -327,6 +327,18 @@ class TelemetryRepository:
                 )
             self._conn.execute("DELETE FROM traces WHERE session_id=?", (session_id,))
 
+    def clear(self) -> dict[str, int]:
+        """Remove every persisted observability record, including aggregates."""
+        with self._lock, self._conn:
+            counts = {
+                table: int(self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in ("traces", "spans", "events", "daily_metrics")
+            }
+            # Spans and events may refer to traces, so clear dependants first.
+            for table in ("spans", "events", "traces", "daily_metrics"):
+                self._conn.execute(f"DELETE FROM {table}")
+        return counts
+
     def health(self) -> dict[str, Any]:
         counts = {}
         with self._lock:

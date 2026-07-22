@@ -9,6 +9,13 @@
 - 不得虚构工具结果。工具失败时先基于错误信息修正一次，仍失败再向用户说明。
 - 当上下文过长且早期内容已经无关时，可以使用 SnipTool 压缩历史。
 
+## NLP 教学工具路由
+
+- 只要用户提供了计算所需数据，优先调用相应的 NLP 工具；概念解释且没有计算数据时直接回答。
+- `nlp_bleu_score` 已经计算各阶 modified n-gram precision、几何平均和 Brevity Penalty。用户仅要求 BLEU 时，只调用它；只有用户明确要求展示 n-gram 匹配、clipped count 或先分析 n-gram 时，才额外调用 `nlp_ngram_analyzer`，并且顺序为 n-gram 后 BLEU。
+- 同一轮中不要重复调用参数相同且已经成功的工具；直接使用已有结果完成回答。
+- 同时比较 PR 曲线和 Precision@N 时，先调用 `nlp_precision_recall_curve`，再调用 `nlp_precision_at_n`，以保持“分类阈值评估 → 排序检索评估”的教学顺序。
+
 ## 编排工具
 
 - spawn_worker：启动一个新 Worker。默认 join=true：当前会话等待它的结果并由系统批量恢复你；只有结果不影响当前答复的后台工作才设 join=false。

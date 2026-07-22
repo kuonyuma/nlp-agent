@@ -1,11 +1,15 @@
 import asyncio
+import sys
+from types import ModuleType
 
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from core.custom_tools import load_custom_tools
 from core.mcp_runtime import mcp_tool_name, validate_mcp_url
+from core.tool_config import CustomToolsConfig
 from core.tool_runtime import (
     ToolCatalog,
     ToolDescriptor,
@@ -140,3 +144,58 @@ def test_persisted_grant_restores_exact_tools_without_policy_expansion():
     )
     restored = runtime.restore_toolset(original.snapshot)
     assert restored.names == ("add",)
+
+
+def test_catalog_uses_prompt_priority_without_changing_grant_rules():
+    runtime = ToolRuntime()
+    runtime.catalog.register(descriptor(name="general_tool"))
+    runtime.catalog.register(
+        descriptor(name="nlp_ranked", capabilities={"nlp.analyze"}).model_copy(
+            update={"source": ToolSource.CUSTOM, "category": "nlp", "prompt_priority": 200}
+        )
+    )
+
+    worker = runtime.build_toolset(
+        ToolGrantRequest(role=ToolScope.WORKER, allowed_capabilities={"math.read", "nlp.analyze"})
+    )
+
+    assert worker.names == ("nlp_ranked", "general_tool")
+
+
+def test_custom_provider_requires_manifest_and_applies_nlp_contract(monkeypatch):
+    module_name = "test_nlp_custom_provider"
+    module = ModuleType(module_name)
+    module.TOOL_MANIFEST = {
+        "id": "test-nlp-tools",
+        "version": "2.0",
+        "category": "nlp",
+        "prompt_priority": 250,
+        "scopes": ["worker"],
+        "capabilities": ["nlp.extract"],
+        "risk": "low",
+    }
+    module.TOOLS = [descriptor(name="nlp_extract_terms").instantiate()]
+    monkeypatch.setitem(sys.modules, module_name, module)
+    catalog = ToolCatalog()
+
+    assert load_custom_tools(CustomToolsConfig(modules=[module_name]), catalog) == ["nlp_extract_terms"]
+    registered = catalog.get("nlp_extract_terms")
+    assert registered is not None
+    assert registered.provider_id == "test-nlp-tools"
+    assert registered.version == "2.0"
+    assert registered.prompt_priority == 250
+    assert registered.category == "nlp"
+    assert registered.capabilities == frozenset({"custom.nlp_extract_terms", "nlp.extract"})
+
+
+def test_nlp_custom_tool_without_namespace_is_rejected(monkeypatch):
+    module_name = "test_invalid_nlp_custom_provider"
+    module = ModuleType(module_name)
+    module.TOOL_MANIFEST = {
+        "id": "invalid-nlp-tools", "version": "1.0", "category": "nlp",
+    }
+    module.TOOLS = [descriptor(name="extract_terms").instantiate()]
+    monkeypatch.setitem(sys.modules, module_name, module)
+
+    with pytest.raises(ValueError, match="nlp_ namespace"):
+        load_custom_tools(CustomToolsConfig(modules=[module_name]), ToolCatalog())
