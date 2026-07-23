@@ -80,7 +80,9 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
     const port = await freePort();
     origin = `http://127.0.0.1:${port}`;
     const repositoryRoot = path.resolve(process.cwd(), "..");
-    const virtualEnvironmentPython = path.join(repositoryRoot, ".venv", "Scripts", "python.exe");
+    const virtualEnvironmentPython = process.platform === "win32"
+      ? path.join(repositoryRoot, ".venv", "Scripts", "python.exe")
+      : path.join(repositoryRoot, ".venv", "bin", "python");
     const python = process.env.PRO_NLP_PYTHON ?? (existsSync(virtualEnvironmentPython) ? virtualEnvironmentPython : "python");
     const script = path.join(repositoryRoot, "tests", "support", "run_web_api_server.py");
     serverProcess = spawn(python, [script, String(port)], { cwd: repositoryRoot, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });

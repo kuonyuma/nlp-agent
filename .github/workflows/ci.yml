@@ -34,17 +34,26 @@ jobs:
   frontend:
     name: Frontend tests, lint and build
     runs-on: ubuntu-latest
+    env:
+      PRO_NLP_PYTHON: ${{ github.workspace }}/.venv/bin/python
     defaults:
       run:
         working-directory: webui
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: webui/package-lock.json
       - run: npm ci
+      - run: uv sync --frozen --group dev
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
