@@ -1,0 +1,43 @@
+services:
+  nova-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${NOVA_IMAGE:-nova-agent}:${NOVA_TAG:-local}
+    pull_policy: ${NOVA_PULL_POLICY:-build}
+    command: [".venv/bin/python", "main.py", "serve"]
+    env_file:
+      - ${NOVA_ENV_FILE:-.env}
+    environment:
+      NLP_AGENT_WEB_HOST: 0.0.0.0
+      NLP_AGENT_WEB_PORT: 8765
+    ports:
+      - "${NOVA_WEB_HOST_PORT:-8765}:8765"
+    volumes:
+      - nova-data:/app/.data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", ".venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health/ready')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  nova-monitor:
+    image: ${NOVA_IMAGE:-nova-agent}:${NOVA_TAG:-local}
+    pull_policy: ${NOVA_PULL_POLICY:-build}
+    command: [".venv/bin/python", "main.py", "monitor"]
+    env_file:
+      - ${NOVA_ENV_FILE:-.env}
+    environment:
+      NLP_AGENT_MONITOR_HOST: 0.0.0.0
+      NLP_AGENT_MONITOR_PORT: 8766
+    ports:
+      - "${NOVA_MONITOR_HOST_PORT:-8766}:8766"
+    volumes:
+      - nova-data:/app/.data
+    restart: unless-stopped
+    profiles: ["monitor"]
+
+volumes:
+  nova-data:

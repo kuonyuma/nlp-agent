@@ -137,7 +137,15 @@ class ExerciseProtocolEngine(LearningEngine):
         if content == "将分数归一化为注意力权重":
             return ('回答正确，练习完成。'
                     '<!-- exercise-result: {"kind":"grading","matches":[{"criterion_index":0,"achieved":true,"evidence":"说明了归一化作用"}],"feedback":"掌握良好。"} -->')
-        return await super().run_turn(context, turn_id, content, **kwargs)
+        return await super().run_turn(
+            context,
+            turn_id,
+            content,
+            learning_context=learning_context,
+            learning_progress=learning_progress,
+            exercise_state=exercise_state,
+            teaching_materials=teaching_materials,
+        )
 
 
 @pytest.fixture
