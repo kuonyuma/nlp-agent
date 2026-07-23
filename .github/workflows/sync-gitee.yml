@@ -27,7 +27,10 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
       - name: Mirror main and release tags
         run: |
-          git fetch origin main --tags
+          # actions/checkout may create a lightweight local tag for the release
+          # commit.  Force the canonical annotated tags from GitHub into this
+          # disposable runner checkout before mirroring them to Gitee.
+          git fetch --force origin main --tags
           git remote add gitee git@gitee.com:futurepang/nlp-agent.git
           git push gitee refs/remotes/origin/main:refs/heads/main
           git push gitee --tags
