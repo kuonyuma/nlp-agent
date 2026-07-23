@@ -20,18 +20,22 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
-async function waitForServer(origin: string, process: ChildProcess): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitForServer(origin: string, process: ChildProcess, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "health check was not attempted";
+  while (Date.now() < deadline) {
     if (process.exitCode != null) throw new Error(`FastAPI integration server exited with ${process.exitCode}`);
     try {
       const response = await networkFetch(`${origin}/health/live`);
       if (response.ok) return;
-    } catch {
+      lastError = `health endpoint returned ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
       // Server startup is asynchronous; retry on the next short interval.
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error("FastAPI integration server did not become ready");
+  throw new Error(`FastAPI integration server did not become ready within ${timeoutMs}ms: ${lastError}`);
 }
 
 function networkFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
@@ -58,6 +62,7 @@ function networkFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise
       });
     });
     request.once("error", reject);
+    request.setTimeout(1_000, () => request.destroy(new Error("HTTP request timed out")));
     if (typeof init.body === "string") request.write(init.body);
     request.end();
   });
@@ -74,21 +79,26 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
   let serverProcess: ChildProcess;
   let origin = "";
   let cookie = "";
+  let serverStdout = "";
   let serverStderr = "";
 
   beforeAll(async () => {
     const port = await freePort();
     origin = `http://127.0.0.1:${port}`;
     const repositoryRoot = path.resolve(process.cwd(), "..");
-    const virtualEnvironmentPython = path.join(repositoryRoot, ".venv", "Scripts", "python.exe");
+    const virtualEnvironmentPython = process.platform === "win32"
+      ? path.join(repositoryRoot, ".venv", "Scripts", "python.exe")
+      : path.join(repositoryRoot, ".venv", "bin", "python");
     const python = process.env.PRO_NLP_PYTHON ?? (existsSync(virtualEnvironmentPython) ? virtualEnvironmentPython : "python");
     const script = path.join(repositoryRoot, "tests", "support", "run_web_api_server.py");
-    serverProcess = spawn(python, [script, String(port)], { cwd: repositoryRoot, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+    serverProcess = spawn(python, [script, String(port)], { cwd: repositoryRoot, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    serverProcess.stdout?.on("data", (chunk: Buffer) => { serverStdout += chunk.toString(); });
     serverProcess.stderr?.on("data", (chunk: Buffer) => { serverStderr += chunk.toString(); });
     try {
       await waitForServer(origin, serverProcess);
     } catch (error) {
-      throw new Error(`${error instanceof Error ? error.message : String(error)}${serverStderr ? `\n${serverStderr}` : ""}`, { cause: error });
+      const serverOutput = [serverStdout, serverStderr].filter(Boolean).join("\n");
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${serverOutput ? `\n${serverOutput}` : ""}`, { cause: error });
     }
 
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -101,7 +111,7 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
       if (setCookie) cookie = setCookie.split(";", 1)[0];
       return response;
     });
-  }, 20_000);
+  }, 30_000);
 
   afterAll(async () => {
     vi.unstubAllGlobals();

@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""
     NLP_AGENT_WORKER_MODEL: str = ""
     NLP_AGENT_WEB_SECRET: str = ""
+    NLP_AGENT_WEB_HOST: str = ""
+    NLP_AGENT_WEB_PORT: int = 0
+    NLP_AGENT_WEB_ALLOWED_HOSTS: str = ""
+    NLP_AGENT_WEB_ALLOWED_ORIGINS: str = ""
+    NLP_AGENT_MONITOR_HOST: str = ""
+    NLP_AGENT_MONITOR_PORT: int = 0
+    NLP_AGENT_MONITOR_ALLOWED_HOSTS: str = ""
+    NLP_AGENT_MONITOR_ALLOWED_ORIGINS: str = ""
 
     _config: dict = {}
 
@@ -86,6 +94,13 @@ class Settings(BaseSettings):
         config = dict(self._config.get("web", {}))
         if self.NLP_AGENT_WEB_SECRET:
             config["auth_secret"] = self.NLP_AGENT_WEB_SECRET
+        self._apply_network_overrides(
+            config,
+            host=self.NLP_AGENT_WEB_HOST,
+            port=self.NLP_AGENT_WEB_PORT,
+            allowed_hosts=self.NLP_AGENT_WEB_ALLOWED_HOSTS,
+            allowed_origins=self.NLP_AGENT_WEB_ALLOWED_ORIGINS,
+        )
         return config
 
     @property
@@ -93,7 +108,32 @@ class Settings(BaseSettings):
         config = dict(self._config.get("monitor", {}))
         if self.NLP_AGENT_WEB_SECRET:
             config["auth_secret"] = self.NLP_AGENT_WEB_SECRET
+        self._apply_network_overrides(
+            config,
+            host=self.NLP_AGENT_MONITOR_HOST,
+            port=self.NLP_AGENT_MONITOR_PORT,
+            allowed_hosts=self.NLP_AGENT_MONITOR_ALLOWED_HOSTS,
+            allowed_origins=self.NLP_AGENT_MONITOR_ALLOWED_ORIGINS,
+        )
         return config
+
+    @staticmethod
+    def _apply_network_overrides(
+        config: dict,
+        *,
+        host: str,
+        port: int,
+        allowed_hosts: str,
+        allowed_origins: str,
+    ) -> None:
+        if host.strip():
+            config["host"] = host.strip()
+        if port > 0:
+            config["port"] = port
+        if values := [item.strip() for item in allowed_hosts.split(",") if item.strip()]:
+            config["allowed_hosts"] = values
+        if values := [item.strip() for item in allowed_origins.split(",") if item.strip()]:
+            config["allowed_origins"] = values
 
     def _resolve_worker_model(
         self,

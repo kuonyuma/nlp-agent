@@ -94,6 +94,40 @@ uv run python main.py monitor
 
 停止服务时，在对应 PowerShell 窗口按 `Ctrl+C` 即可。
 
+## Docker 部署（内网服务器）
+
+1. 复制并填写部署配置：
+
+```powershell
+Copy-Item .env-example .env
+notepad .env
+```
+
+至少替换 `DEEPSEEK_API_KEY`、`NLP_AGENT_WEB_SECRET`，并将
+`SERVER_IP_OR_DOMAIN` 替换为服务器实际内网 IP 或域名。
+
+2. 构建并启动主服务：
+
+```powershell
+docker compose up -d --build
+```
+
+3. 如需启动运行监控：
+
+```powershell
+docker compose --profile monitor up -d
+```
+
+主服务访问地址为 `http://服务器IP:8765`，监控地址为
+`http://服务器IP:8766`。数据会保存在 Docker 卷 `nova-data` 中，更新镜像不会丢失会话数据。
+
+查看运行状态和日志：
+
+```powershell
+docker compose ps
+docker compose logs -f nova-web
+```
+
 ## 项目定位
 
 Nova 当前主要用于内网演示、教学和自然语言处理学习实践。欢迎在使用过程中提出建议，一起把它变成更好用的学习伙伴。
