@@ -3,7 +3,7 @@
 ## 分支约定
 
 - `feature/*`：从 `develop` 创建，完成后以 Pull Request 合并回 `develop`。
-- `develop`：集成分支；CI 成功后构建并推送测试镜像。
+- `develop`：集成分支；CI 成功后构建、推送测试镜像并部署测试环境。
 - `main`：受保护的可发布分支；只接受来自 `develop` 的 Pull Request。
 
 ## 工作流
@@ -11,8 +11,7 @@
 | 工作流 | 触发条件 | 作用 |
 | --- | --- | --- |
 | `CI` | feature、develop、main 的 push / PR | Python 与前端检查、完整测试、Docker 构建验证 |
-| `Publish Test Image` | push 到 `develop` | 推送 `ghcr.io/liunor/nlp-agent:develop` 与不可变 SHA 标签 |
-| `Deploy Test Environment` | 测试镜像构建成功 | 在测试服务器拉取 GHCR 镜像并进行健康检查 |
+| `Publish Test Image` | push 到 `develop` | 推送 `ghcr.io/liunor/nlp-agent:develop` 与不可变 SHA 标签；成功后在测试服务器拉取镜像并进行健康检查 |
 | `Release Production` | push `vX.Y.Z` Tag | 校验 Tag 属于 main，构建正式镜像，部署生产环境 |
 | `Sync Gitee Mirror` | 生产发布完成或手动执行 | 同步 GitHub main 与所有 Tag 到 Gitee |
 
