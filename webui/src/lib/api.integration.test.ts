@@ -123,8 +123,9 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
   });
 
   it("executes the real HTTP client against real authenticated FastAPI routes", async () => {
-    const auth = await ensureAuth();
+    const auth = await api.login("nova", "test-password");
     expect(auth.roles).toContain("admin");
+    expect((await ensureAuth()).user_id).toBe("nova");
 
     const session = await api.createSession("default");
     expect(session.workspace_id).toBe("default");

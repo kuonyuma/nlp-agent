@@ -32,6 +32,7 @@ from server.web.auth import (
 )
 from server.web.contracts import (
     CreateSessionBody,
+    LoginBody,
     InjectChatBody,
     SubmitChatBody,
     ToolApprovalBody,
@@ -299,10 +300,15 @@ def create_app(
             status_code=200 if ready else 503,
         )
 
-    @app.post("/api/v1/auth/session", status_code=status.HTTP_201_CREATED, tags=["auth"])
-    async def create_auth_session(request: Request, response: Response):
+    @app.post("/api/v1/auth/login", status_code=status.HTTP_200_OK, tags=["auth"])
+    async def login(body: LoginBody, request: Request, response: Response):
         auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
-        token, claims = auth.issue()
+        token, claims = auth.login(
+            body.username,
+            body.password,
+            client_key=request.client.host if request.client else "unknown",
+            previous_token=request.cookies.get(auth.cookie_name),
+        )
         response.set_cookie(
             auth.cookie_name,
             token,
@@ -332,7 +338,15 @@ def create_app(
         }
 
     @app.delete("/api/v1/auth/session", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"])
-    async def delete_auth_session(response: Response, _claims: WriteClaims):
+    async def delete_auth_session(
+        request: Request,
+        response: Response,
+        _claims: WriteClaims,
+    ):
+        token = request.cookies.get(auth.cookie_name)
+        session_fingerprint = auth.token_fingerprint(token)
+        auth.revoke(token)
+        await hub.close_session(session_fingerprint)
         response.delete_cookie(auth.cookie_name, path="/", samesite="strict")
 
     @app.get("/api/v1/sessions", tags=["sessions"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,7 +16,12 @@ from core.identity import AuthenticatedPrincipal
 from gateway.contracts import GatewayEventType, InjectMessageRequest, SubmitTurnRequest
 from gateway.core import BackendGateway
 from gateway.events import GatewayEventSubscription
-from server.web.auth import AuthenticationError, OriginRejectedError, SameOriginSessionAuth
+from server.web.auth import (
+    AuthenticationError,
+    OriginRejectedError,
+    SameOriginSessionAuth,
+    SessionClaims,
+)
 from server.web.contracts import (
     ChatCancelPayload,
     ChatInjectPayload,
@@ -79,6 +85,26 @@ class WebSocketHub:
                 return_exceptions=True,
             )
 
+    async def close_session(
+        self,
+        session_fingerprint: bytes | None,
+        *,
+        code: int = 4401,
+        reason: str = "session revoked",
+    ) -> None:
+        if session_fingerprint is None:
+            return
+        targets = [
+            connection
+            for connection in tuple(self._connections)
+            if connection.session_fingerprint == session_fingerprint
+        ]
+        if targets:
+            await asyncio.gather(
+                *(connection.close(code=code, reason=reason) for connection in targets),
+                return_exceptions=True,
+            )
+
     async def close(self) -> None:
         connections = list(self._connections)
         self._connections.clear()
@@ -110,6 +136,10 @@ class WebSocketConnection:
         max_queue: int,
         send_queue_size: int,
         send_timeout_s: float,
+        session_fingerprint: bytes | None = None,
+        session_check: Callable[[], SessionClaims] | None = None,
+        session_touch: Callable[[], SessionClaims] | None = None,
+        session_check_interval_s: float = 20,
     ) -> None:
         self.websocket = websocket
         self.gateway = gateway
@@ -123,7 +153,12 @@ class WebSocketConnection:
             maxsize=max(1, send_queue_size)
         )
         self.send_timeout_s = max(0.1, send_timeout_s)
+        self.session_fingerprint = session_fingerprint
+        self._session_check = session_check
+        self._session_touch = session_touch
+        self._session_check_interval_s = max(1.0, session_check_interval_s)
         self._sender_task: asyncio.Task[None] | None = None
+        self._session_guard_task: asyncio.Task[None] | None = None
         self._closed_event = asyncio.Event()
         self._closed = False
 
@@ -133,6 +168,26 @@ class WebSocketConnection:
                 self._sender_loop(),
                 name=f"websocket-sender:{self.principal.user_id}",
             )
+        if self._session_guard_task is None and self._session_check is not None:
+            self._session_guard_task = asyncio.create_task(
+                self._session_guard_loop(),
+                name=f"websocket-session-guard:{self.principal.user_id}",
+            )
+
+    def require_active_session(self, *, touch: bool) -> None:
+        validator = self._session_touch if touch else self._session_check
+        if validator is not None:
+            validator()
+
+    async def _session_guard_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._session_check_interval_s)
+                self.require_active_session(touch=False)
+        except AuthenticationError:
+            await self._terminate(code=4401, reason="authentication expired")
+        except asyncio.CancelledError:
+            raise
 
     async def send(self, event: ServerEventEnvelope, *, wait: bool = False) -> bool:
         if self._closed:
@@ -347,6 +402,10 @@ class WebSocketConnection:
             if not self._sender_task.done():
                 self._sender_task.cancel()
             await asyncio.gather(self._sender_task, return_exceptions=True)
+        if self._session_guard_task is not None and self._session_guard_task is not current:
+            if not self._session_guard_task.done():
+                self._session_guard_task.cancel()
+            await asyncio.gather(self._session_guard_task, return_exceptions=True)
         try:
             await asyncio.wait_for(
                 self.websocket.close(code=code, reason=reason),
@@ -499,6 +558,7 @@ async def websocket_endpoint(
         await websocket.close(code=4403, reason="origin rejected")
         return
 
+    session_token = websocket.cookies.get(auth.cookie_name)
     connection = WebSocketConnection(
         websocket,
         gateway,
@@ -506,6 +566,13 @@ async def websocket_endpoint(
         max_queue=max_queue,
         send_queue_size=send_queue_size,
         send_timeout_s=send_timeout_s,
+        session_fingerprint=auth.token_fingerprint(session_token),
+        session_check=lambda: auth.authenticate(session_token, touch=False),
+        session_touch=lambda: auth.authenticate(session_token),
+        session_check_interval_s=min(
+            20.0,
+            float(getattr(auth, "idle_timeout_s", 900)),
+        ),
     )
     if not hub.try_add(connection):
         await websocket.close(code=4429, reason="connection limit reached")
@@ -549,7 +616,11 @@ async def _receive_commands(
             try:
                 command = CommandEnvelope.model_validate(json.loads(raw))
                 request_id = command.request_id
+                connection.require_active_session(touch=command.type != "ping")
                 await _dispatch_command(connection, command)
+            except AuthenticationError:
+                await connection.close(code=4401, reason="authentication expired")
+                return
             except (json.JSONDecodeError, ValidationError, ValueError, PermissionError, RuntimeError, LookupError, FileNotFoundError) as error:
                 code, message = _command_error(error)
                 session_id = command.payload.get("session_id") if command is not None else None

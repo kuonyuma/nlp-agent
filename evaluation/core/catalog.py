@@ -92,6 +92,10 @@ def resolve_suite_reference(reference: str, *, suites: dict[str, EvaluationSuite
 
 
 def latest_run_path(runs_dir: Path) -> Path | None:
-    """Return the most recently written report under one suite's run directory."""
+    """Return the newest timestamp-named report under one suite's run directory."""
     reports = [path for path in runs_dir.rglob("*.json") if path.is_file()]
-    return max(reports, key=lambda path: path.stat().st_mtime) if reports else None
+    # Run files are named ``YYYYMMDD-HHMMSS.json``.  Prefer that stable
+    # timestamp and use mtime only as a tie-breaker; Windows can give rapidly
+    # written files the same mtime, which otherwise makes catalog selection
+    # non-deterministic.
+    return max(reports, key=lambda path: (path.stem, path.stat().st_mtime_ns)) if reports else None

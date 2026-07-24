@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""
     NLP_AGENT_WORKER_MODEL: str = ""
     NLP_AGENT_WEB_SECRET: str = ""
+    NLP_AGENT_AUTH_USERNAME: str = ""
+    NLP_AGENT_AUTH_PASSWORD_HASH: str = ""
+    NLP_AGENT_AUTH_ROLES: str = "student"
+    NLP_AGENT_AUTH_SESSION_TTL_S: int = 1800
+    NLP_AGENT_AUTH_IDLE_TIMEOUT_S: int = 900
+    NLP_AGENT_AUTH_MAX_LOGIN_ATTEMPTS: int = 5
+    NLP_AGENT_AUTH_RATE_WINDOW_S: int = 300
+    NLP_AGENT_AUTH_COOKIE_SECURE: bool | None = None
     NLP_AGENT_WEB_HOST: str = ""
     NLP_AGENT_WEB_PORT: int = 0
     NLP_AGENT_WEB_ALLOWED_HOSTS: str = ""
@@ -94,6 +102,17 @@ class Settings(BaseSettings):
         config = dict(self._config.get("web", {}))
         if self.NLP_AGENT_WEB_SECRET:
             config["auth_secret"] = self.NLP_AGENT_WEB_SECRET
+        if self.NLP_AGENT_AUTH_USERNAME:
+            config["auth_username"] = self.NLP_AGENT_AUTH_USERNAME
+        if self.NLP_AGENT_AUTH_PASSWORD_HASH:
+            config["auth_password_hash"] = self.NLP_AGENT_AUTH_PASSWORD_HASH
+        config["auth_roles"] = self.NLP_AGENT_AUTH_ROLES
+        config["auth_session_ttl_s"] = self.NLP_AGENT_AUTH_SESSION_TTL_S
+        config["auth_idle_timeout_s"] = self.NLP_AGENT_AUTH_IDLE_TIMEOUT_S
+        config["auth_max_login_attempts"] = self.NLP_AGENT_AUTH_MAX_LOGIN_ATTEMPTS
+        config["auth_rate_window_s"] = self.NLP_AGENT_AUTH_RATE_WINDOW_S
+        if self.NLP_AGENT_AUTH_COOKIE_SECURE is not None:
+            config["cookie_secure"] = self.NLP_AGENT_AUTH_COOKIE_SECURE
         self._apply_network_overrides(
             config,
             host=self.NLP_AGENT_WEB_HOST,

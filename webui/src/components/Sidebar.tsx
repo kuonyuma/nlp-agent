@@ -1,4 +1,4 @@
-import { Archive, BookOpen, FolderPlus, Heart, Menu, MoreHorizontal, Pencil, Plus, Search, Settings, Trash2, X } from "lucide-react";
+import { Archive, BookOpen, FolderPlus, Heart, Menu, MoreHorizontal, Pencil, Plus, Search, Settings, Trash2, UserRound, X } from "lucide-react";
 import { useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import novaMarkUrl from "../../logo/nova-remove.png";
@@ -7,7 +7,7 @@ import { CategoryDialog } from "@/components/CategoryDialog";
 import { deriveTitle } from "@/lib/learning-preferences";
 import type { LearningPreferences, SessionLearningMeta, SessionSummary } from "@/lib/types";
 
-export function Sidebar({ sessions, preferences, activeId, open, collapsed, connected, onClose, onCollapse, onExpand, onSelect, onCreate, onMeta, onAddCategory, onRenameCategory, onDeleteCategory, onDelete, onSettings }: {
+export function Sidebar({ sessions, preferences, activeId, open, collapsed, connected, onClose, onCollapse, onExpand, onSelect, onCreate, onMeta, onAddCategory, onRenameCategory, onDeleteCategory, onDelete, onAccount, onSettings }: {
   sessions: SessionSummary[];
   preferences: LearningPreferences;
   activeId: string | null;
@@ -24,6 +24,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   onRenameCategory: (id: string, name: string) => void;
   onDeleteCategory: (id: string, name: string) => void;
   onDelete: (id: string, title: string) => void;
+  onAccount: () => void;
   onSettings: () => void;
 }) {
   const { t } = useTranslation();
@@ -105,7 +106,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
         </section>)}
         {!collapsed && !visible.length && <p className="sidebar-empty">{showArchived ? "暂无归档对话" : "还没有学习记录"}</p>}
       </div>
-      <div className="sidebar-footer"><SideAction collapsed={collapsed} label={t("settings")} icon={<Settings size={18} />} onClick={onSettings} /><i className={`connection-dot ${connected ? "online" : ""}`} title={connected ? "已连接" : "连接中"} /></div>
+      <div className="sidebar-footer"><SideAction collapsed={collapsed} label={t("settings")} icon={<Settings size={18} />} onClick={onSettings} /><SideAction collapsed={collapsed} label="账户管理" icon={<UserRound size={18} />} onClick={onAccount} /><i className={`connection-dot ${connected ? "online" : ""}`} title={connected ? "已连接" : "连接中"} /></div>
     </aside>
     <CategoryDialog open={categoryDialogOpen} onClose={() => setCategoryDialogOpen(false)} onConfirm={onAddCategory} />
   </>;

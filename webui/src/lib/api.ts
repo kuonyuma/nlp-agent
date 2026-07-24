@@ -35,19 +35,25 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export async function ensureAuth(): Promise<AuthSession> {
-  try {
-    const session = await request<AuthSession>("/auth/session");
-    csrfToken = session.csrf_token;
-    return session;
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 401) throw error;
-    const session = await request<AuthSession>("/auth/session", { method: "POST" });
-    csrfToken = session.csrf_token;
-    return session;
-  }
+  const session = await request<AuthSession>("/auth/session");
+  csrfToken = session.csrf_token;
+  return session;
 }
 
 export const api = {
+  login: async (username: string, password: string) => {
+    const session = await request<AuthSession>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    csrfToken = session.csrf_token;
+    return session;
+  },
+  logout: async () => {
+    await request<void>("/auth/session", { method: "DELETE" });
+    csrfToken = "";
+  },
+  getAuthSession: ensureAuth,
   listSessions: () => request<{ items: SessionSummary[] }>("/sessions"),
   createSession: (workspaceId = "default") =>
     request<SessionSummary>("/sessions", {

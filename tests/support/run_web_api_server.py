@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import uvicorn
+from argon2 import PasswordHasher
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +37,9 @@ def main() -> None:
     auth = SameOriginSessionAuth(
         secret="integration-test-secret-that-is-long-enough",
         allowed_origins=[origin],
+        username="nova",
+        password_hash=PasswordHasher().hash("test-password"),
+        roles=frozenset({"admin"}),
     )
     app = create_app(gateway_factory=gateway_factory, auth=auth)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
