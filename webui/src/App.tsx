@@ -93,7 +93,7 @@ function StudentApp() {
         {hasMessages ? <div className="thread-title"><strong>{activeTitle}</strong><span className={statusOnline ? "online" : ""}>{statusOnline ? <Wifi size={12} /> : <WifiOff size={12} />}{statusText}</span></div> : <div className="thread-title" />}
         <div className="thread-header-actions"><SchoolLogo /></div>
       </header>
-      {hasMessages ? <><div className="thread-scroll" ref={scrollRef} onScroll={onScroll}><MessageList messages={workspace.messages} loading={workspace.loadingMessages} showReasoning={workspace.settings.show_reasoning} onFollowUp={(text) => void workspace.send(text)} /></div>{composer()}</> : <div className="empty-thread-home"><div><h1>LSNU 自然语言处理智能体 欢迎您！</h1><p>从一个 NLP 概念、模型原理或练习问题开始。</p>{composer(true)}</div></div>}
+      {hasMessages ? <><div className="thread-scroll" ref={scrollRef} onScroll={onScroll}><MessageList messages={workspace.messages} loading={workspace.loadingMessages} showReasoning={workspace.settings.show_reasoning} onFollowUp={(text) => void workspace.send(text)} /></div>{composer()}</> : <div className="empty-thread-home"><div><h1>《自然语言处理》智能体 欢迎您！</h1><p>从一个 NLP 概念、模型原理或练习问题开始。</p>{composer(true)}</div></div>}
     </main>
     <div className={`learning-hover-zone ${learningOpen ? "open" : ""}`} onMouseEnter={() => setLearningOpen(true)} onMouseLeave={() => setLearningOpen(false)} onFocus={() => setLearningOpen(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setLearningOpen(false); }}>
       <button className="learning-rail-button" type="button" aria-label="学习记录" onClick={() => setLearningOpen((value) => !value)}><BookOpenCheck size={17} /><span>学习记录</span></button>

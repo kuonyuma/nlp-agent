@@ -41,7 +41,7 @@ describe("student authentication bootstrap", () => {
     expect(harness.getLearningCatalog).not.toHaveBeenCalled();
     await act(async () => { harness.releaseAuth(); });
 
-    await screen.findByText("LSNU 自然语言处理智能体 欢迎您！");
+    await screen.findByText("《自然语言处理》智能体 欢迎您！");
     await waitFor(() => expect(harness.getLearningCatalog).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole("button", { name: "学习设置" }));
