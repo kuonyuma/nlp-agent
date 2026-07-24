@@ -17,6 +17,16 @@ vi.mock("@/lib/api", () => {
 import { App } from "./App";
 
 describe("student authentication gate", () => {
+  it("keeps the normal full-width student shell and header while logged out", async () => {
+    const { container } = render(<App />);
+
+    await screen.findByLabelText("学习问题");
+
+    expect(container.querySelector(".unauthenticated-student-shell")).toHaveClass("thread-shell");
+    expect(container.querySelector(".unauthenticated-brand")).not.toBeInTheDocument();
+    expect(container.querySelector(".thread-header .school-logo")).toBeInTheDocument();
+  });
+
   it("opens the reusable login dialog when an unauthenticated student sends a question", async () => {
     render(<App />);
 
