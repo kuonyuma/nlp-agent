@@ -43,6 +43,32 @@ describe("StudentSocket", () => {
     client.close();
   });
 
+  it("subscribes to a newly created session when randomUUID is unavailable over HTTP", () => {
+    const instances: FakeWebSocket[] = [];
+    vi.stubGlobal("crypto", {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.fill(7);
+        return bytes;
+      },
+    });
+    vi.stubGlobal("WebSocket", class extends FakeWebSocket {
+      constructor(url: string) { super(url); instances.push(this); }
+    });
+
+    const client = new StudentSocket(vi.fn(), vi.fn());
+    client.setSession("session_http");
+    instances[0].open();
+
+    expect(() => instances[0].onmessage?.({
+      data: JSON.stringify({ v: "1", type: "connection.ready", timestamp: new Date().toISOString(), payload: {} }),
+    })).not.toThrow();
+    expect(instances[0].sent.map((value) => JSON.parse(value))).toContainEqual(expect.objectContaining({
+      type: "session.subscribe",
+      payload: { session_id: "session_http" },
+    }));
+    client.close();
+  });
+
   it("resends an idempotent chat command when the connection drops before its acknowledgement", () => {
     vi.useFakeTimers();
     const instances: FakeWebSocket[] = [];

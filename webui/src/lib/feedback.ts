@@ -1,3 +1,5 @@
+import { createUuid } from "./uuid";
+
 const FEEDBACK_STORAGE_KEY = "nlp-agent.feedback.v1";
 
 export type StoredFeedback = {
@@ -8,7 +10,7 @@ export type StoredFeedback = {
 
 export function saveFeedback(content: string): StoredFeedback {
   const item: StoredFeedback = {
-    id: crypto.randomUUID(),
+    id: createUuid(),
     content: content.trim(),
     createdAt: new Date().toISOString(),
   };
