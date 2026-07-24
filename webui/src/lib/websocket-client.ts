@@ -1,4 +1,5 @@
 import type { ServerEvent } from "./types";
+import { createUuid } from "./uuid";
 
 type EventHandler = (event: ServerEvent) => void;
 type StatusHandler = (status: "connecting" | "connected" | "reconnecting" | "offline") => void;
@@ -107,7 +108,7 @@ export class StudentSocket {
     this.command("chat.cancel", { turn_id: turnId });
   }
 
-  command(type: string, payload: Record<string, unknown>, requestId: string = crypto.randomUUID()): void {
+  command(type: string, payload: Record<string, unknown>, requestId: string = createUuid()): void {
     const command: Command = { v: "1", type, request_id: requestId, payload };
     if (this.isReady()) this.sendNow(command);
     else {

@@ -3,8 +3,9 @@ import { useState } from "react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import type { CourseTopic, ExerciseBlueprint, GuidedBlueprint, KnowledgePoint, ReviewBlueprint, RubricPoint } from "@/lib/types";
+import { createUuid } from "@/lib/uuid";
 
-const makeId = (kind: string) => `${kind}_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+const makeId = (kind: string) => `${kind}_${createUuid().replaceAll("-", "").slice(0, 12)}`;
 const statusText = (status: "draft" | "enabled" | "disabled") => status === "enabled" ? "已启用" : status === "disabled" ? "已停用" : "草稿";
 
 function RemoveButton({ label, onRemove }: { label: string; onRemove: () => void }) {
