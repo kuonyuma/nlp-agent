@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { api, ensureAuth } from "@/lib/api";
+import { ApiError, api, ensureAuth } from "@/lib/api";
 import { setAppLanguage } from "@/i18n";
 import { normalizeLocale } from "@/i18n/config";
 import {
@@ -103,7 +103,8 @@ export function useStudentWorkspace() {
   const settingsSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const [settingsError, setSettingsError] = useState("");
   const settingsErrorMutation = useRef(0);
-  const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "unauthenticated" | "error">("loading");
+  const [authRevision, setAuthRevision] = useState(0);
   const [error, setError] = useState("");
   const [requestError, setRequestError] = useState("");
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "offline">("connecting");
@@ -328,13 +329,17 @@ export function useStudentWorkspace() {
         setBootStatus("ready");
       } catch (reason) {
         if (!cancelled) {
+          if (reason instanceof ApiError && reason.status === 401) {
+            setBootStatus("unauthenticated");
+            return;
+          }
           setError(reason instanceof Error ? reason.message : String(reason));
           setBootStatus("error");
         }
       }
     })();
     return () => { cancelled = true; };
-  }, [loadSessions]);
+  }, [authRevision, loadSessions]);
 
   useEffect(() => {
     if (bootStatus !== "ready") return;
@@ -526,5 +531,10 @@ export function useStudentWorkspace() {
     deleteCategory,
     patchSettings,
     refresh: loadSessions,
+    retryAuthentication: () => {
+      setError("");
+      setBootStatus("loading");
+      setAuthRevision((current) => current + 1);
+    },
   };
 }

@@ -6,6 +6,7 @@ import { Composer } from "@/components/Composer";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { LearningContextBar } from "@/components/LearningContextBar";
 import { LearningPanel } from "@/components/LearningPanel";
+import { LoginDialog } from "@/components/LoginDialog";
 import { MessageList } from "@/components/MessageList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { SchoolLogo } from "@/components/SchoolLogo";
@@ -31,6 +32,7 @@ function StudentApp() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [learningOpen, setLearningOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
   const [courseTopics, setCourseTopics] = useState<CourseTopic[]>([]);
   const [learningCatalog, setLearningCatalog] = useState<TeacherCatalog | null>(null);
   const [modeNotice, setModeNotice] = useState<"practice" | "review" | null>(null);
@@ -68,6 +70,20 @@ function StudentApp() {
 
   if (workspace.bootStatus === "loading") return <div className="boot-screen"><span className="boot-orbit" /><strong>正在进入 NLP 学习空间</strong><p>连接教学 Agent 与学习记录……</p></div>;
   if (workspace.bootStatus === "error") return <div className="boot-screen error"><WifiOff size={28} /><strong>暂时无法连接后端</strong><p>{workspace.error}</p><button type="button" onClick={() => location.reload()}>重新连接</button></div>;
+  if (workspace.bootStatus === "unauthenticated") return <>
+    <main className="unauthenticated-student-shell">
+      <section>
+        <p className="unauthenticated-brand">Nova · LSNU NLP Learning Agent</p>
+        <h1>《自然语言处理》智能体 欢迎您！</h1>
+        <p>登录后可开始新的学习对话，并安全保存学习记录。</p>
+        <Composer centered disabled={false} running={false} onSend={() => setLoginOpen(true)} onCancel={() => undefined} />
+      </section>
+    </main>
+    <LoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} onAuthenticate={async (username, password) => {
+      await api.login(username, password);
+      workspace.retryAuthentication();
+    }} />
+  </>;
 
   const updateContext = (context: typeof workspace.preferences.context) => {
     if ((context.mode === "practice" || context.mode === "review") && context.topic_id) {
