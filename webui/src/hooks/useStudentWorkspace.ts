@@ -25,6 +25,7 @@ import type {
 } from "@/lib/types";
 import { StudentSocket } from "@/lib/websocket-client";
 import { resolveWorkspaceId } from "@/lib/workspace";
+import { createUuid } from "@/lib/uuid";
 
 const DEFAULT_SETTINGS: UserSettings = {
   locale: "zh-CN",
@@ -391,7 +392,7 @@ export function useStudentWorkspace() {
     setRequestError("");
     // Register before awaiting session creation so an early command.error can
     // still cancel this submission instead of leaving a later optimistic echo.
-    const requestId = crypto.randomUUID();
+    const requestId = createUuid();
     inFlightTurnIds.current.add(requestId);
     pendingRequests.current.set(requestId, "");
     let sessionId = activeSessionRef.current;
@@ -436,7 +437,7 @@ export function useStudentWorkspace() {
   }, [persistPreferences]);
 
   const addCategory = useCallback((name: string) => {
-    const category: LearningCategory = { id: crypto.randomUUID(), name: name.trim(), createdAt: Date.now() };
+    const category: LearningCategory = { id: createUuid(), name: name.trim(), createdAt: Date.now() };
     persistPreferences((current) => ({ ...current, categories: [...current.categories, category] }));
     return category.id;
   }, [persistPreferences]);
