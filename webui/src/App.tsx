@@ -3,9 +3,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 
 import { Composer } from "@/components/Composer";
+import { AccountDialog } from "@/components/AccountDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { LearningContextBar } from "@/components/LearningContextBar";
 import { LearningPanel } from "@/components/LearningPanel";
+import { LoginDialog } from "@/components/LoginDialog";
 import { MessageList } from "@/components/MessageList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { SchoolLogo } from "@/components/SchoolLogo";
@@ -31,6 +33,8 @@ function StudentApp() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [learningOpen, setLearningOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
   const [courseTopics, setCourseTopics] = useState<CourseTopic[]>([]);
   const [learningCatalog, setLearningCatalog] = useState<TeacherCatalog | null>(null);
   const [modeNotice, setModeNotice] = useState<"practice" | "review" | null>(null);
@@ -68,6 +72,21 @@ function StudentApp() {
 
   if (workspace.bootStatus === "loading") return <div className="boot-screen"><span className="boot-orbit" /><strong>正在进入 NLP 学习空间</strong><p>连接教学 Agent 与学习记录……</p></div>;
   if (workspace.bootStatus === "error") return <div className="boot-screen error"><WifiOff size={28} /><strong>暂时无法连接后端</strong><p>{workspace.error}</p><button type="button" onClick={() => location.reload()}>重新连接</button></div>;
+  if (workspace.bootStatus === "unauthenticated") return <div className="app-shell unauthenticated-app-shell">
+    <Sidebar sessions={[]} preferences={workspace.preferences} activeId={null} open={sidebarOpen} collapsed={sidebarCollapsed} connected={false} onClose={() => setSidebarOpen(false)} onCollapse={() => setCollapsed(true)} onExpand={() => setCollapsed(false)} onSelect={() => setLoginOpen(true)} onCreate={() => setLoginOpen(true)} onMeta={() => undefined} onAddCategory={() => ""} onRenameCategory={() => undefined} onDeleteCategory={() => undefined} onDelete={() => undefined} onAccount={() => setLoginOpen(true)} onSettings={() => setLoginOpen(true)} />
+    <main className="unauthenticated-student-shell">
+      <section>
+        <p className="unauthenticated-brand">Nova · LSNU NLP Learning Agent</p>
+        <h1>《自然语言处理》智能体 欢迎您！</h1>
+        <p>登录后可开始新的学习对话，并安全保存学习记录。</p>
+        <Composer centered disabled={false} running={false} onSend={() => setLoginOpen(true)} onCancel={() => undefined} />
+      </section>
+    </main>
+    <LoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} onAuthenticate={async (username, password) => {
+      await api.login(username, password);
+      workspace.retryAuthentication();
+    }} />
+  </div>;
 
   const updateContext = (context: typeof workspace.preferences.context) => {
     if ((context.mode === "practice" || context.mode === "review") && context.topic_id) {
@@ -86,7 +105,7 @@ function StudentApp() {
   return <div className="app-shell">
     {workspace.settingsError && <div className="error-card settings-save-error" role="alert">{workspace.settingsError}</div>}
     {(modeNotice || workspace.requestError) && <section className="learning-config-notice" role="alert"><div><strong>{modeNotice ? `${modeNotice === "practice" ? "练习" : "复习"}模式尚未配置蓝图` : "学习配置不可用"}</strong><p>{modeNotice ? `请先在教师空间创建、启用并保存该主题的${modeNotice === "practice" ? "出题" : "复习"}蓝图。` : workspace.requestError}</p></div><div><button type="button" className="teacher-primary-button" onClick={() => { location.href = modeNotice === "review" ? "/teacher/reviews" : "/teacher/exercises"; }}>去配置</button><button type="button" className="learning-notice-close" aria-label="关闭提示" onClick={() => { setModeNotice(null); workspace.clearRequestError(); }}><X size={16} /></button></div></section>}
-    <Sidebar sessions={workspace.sessions} preferences={workspace.preferences} activeId={workspace.activeSessionId} open={sidebarOpen} collapsed={sidebarCollapsed} connected={statusOnline} onClose={() => setSidebarOpen(false)} onCollapse={() => setCollapsed(true)} onExpand={() => setCollapsed(false)} onSelect={workspace.setActiveSessionId} onCreate={() => void workspace.createSession()} onMeta={workspace.updateSessionMeta} onAddCategory={workspace.addCategory} onRenameCategory={workspace.renameCategory} onDeleteCategory={(id, name) => setDeleteTarget({ kind: "category", id, label: name })} onDelete={(id, title) => setDeleteTarget({ kind: "session", id, label: title })} onSettings={() => setSettingsOpen(true)} />
+    <Sidebar sessions={workspace.sessions} preferences={workspace.preferences} activeId={workspace.activeSessionId} open={sidebarOpen} collapsed={sidebarCollapsed} connected={statusOnline} onClose={() => setSidebarOpen(false)} onCollapse={() => setCollapsed(true)} onExpand={() => setCollapsed(false)} onSelect={workspace.setActiveSessionId} onCreate={() => void workspace.createSession()} onMeta={workspace.updateSessionMeta} onAddCategory={workspace.addCategory} onRenameCategory={workspace.renameCategory} onDeleteCategory={(id, name) => setDeleteTarget({ kind: "category", id, label: name })} onDelete={(id, title) => setDeleteTarget({ kind: "session", id, label: title })} onAccount={() => setAccountOpen(true)} onSettings={() => setSettingsOpen(true)} />
     <main className="thread-shell">
       <header className="thread-header">
         <SidebarToggle onClick={() => { setCollapsed(false); setSidebarOpen(true); }} />
@@ -102,6 +121,7 @@ function StudentApp() {
     <div className="student-theme-control"><button className="icon-button theme-toggle" type="button" aria-label="切换主题" onClick={() => void workspace.patchSettings({ theme: workspace.settings.theme === "dark" ? "light" : "dark" })}>{workspace.settings.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}</button></div>
     {learningOpen && <button className="learning-backdrop" type="button" aria-label="关闭学习记录" onClick={() => setLearningOpen(false)} />}
     <SettingsDialog open={settingsOpen} settings={workspace.settings} learningContext={workspace.preferences.context} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} onLearningContextChange={workspace.setLearningContext} onOpenDeveloper={() => { location.href = "/developer"; }} onOpenTeacher={() => { location.href = "/teacher"; }} />
+    <AccountDialog open={accountOpen} session={workspace.authSession} onClose={() => setAccountOpen(false)} onLogout={async () => { await workspace.logout(); setAccountOpen(false); }} />
     <ConfirmDialog open={!!deleteTarget} title={deleteTarget?.kind === "session" ? `删除“${deleteTarget.label}”对话？` : `删除“${deleteTarget?.label ?? ""}”分类？`} description={deleteTarget?.kind === "session" ? "删除后将同时清除后端对话记录，此操作无法撤销。" : "分类中的对话会保留，并移回“未分类”。"} onClose={() => setDeleteTarget(null)} onConfirm={() => { if (!deleteTarget) return; if (deleteTarget.kind === "session") void workspace.deleteSession(deleteTarget.id); else workspace.deleteCategory(deleteTarget.id); setDeleteTarget(null); }} />
     {archived.length > 0 && <span className="sr-only">已归档 {archived.length} 个学习对话</span>}
   </div>;

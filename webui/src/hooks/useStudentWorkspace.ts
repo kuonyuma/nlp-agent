@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { api, ensureAuth } from "@/lib/api";
+import { ApiError, api, ensureAuth } from "@/lib/api";
 import { setAppLanguage } from "@/i18n";
 import { normalizeLocale } from "@/i18n/config";
 import {
@@ -13,6 +13,7 @@ import {
 } from "@/lib/learning-preferences";
 import type {
   ActivityItem,
+  AuthSession,
   ChatMessage,
   LearningContext,
   LearningCategory,
@@ -97,13 +98,15 @@ export function useStudentWorkspace() {
   const [preferences, setPreferences] = useState<LearningPreferences>(() => loadLearningPreferences());
   const preferencesRef = useRef(preferences);
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const confirmedSettingsRef = useRef(settings);
   const pendingSettingsPatches = useRef<Array<{ id: number; patch: Partial<UserSettings> }>>([]);
   const nextSettingsMutation = useRef(0);
   const settingsSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const [settingsError, setSettingsError] = useState("");
   const settingsErrorMutation = useRef(0);
-  const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "unauthenticated" | "error">("loading");
+  const [authRevision, setAuthRevision] = useState(0);
   const [error, setError] = useState("");
   const [requestError, setRequestError] = useState("");
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "offline">("connecting");
@@ -323,18 +326,23 @@ export function useStudentWorkspace() {
         confirmedSettingsRef.current = loadedSettings;
         setSettings(loadedSettings);
         setWorkspaceId(resolveWorkspaceId(auth, loadedSettings));
+        setAuthSession(auth);
         // Match nanobot's home behavior: boot into a clean composer instead of
         // forcing the most recent transcript open. History remains in Sidebar.
         setBootStatus("ready");
       } catch (reason) {
         if (!cancelled) {
+          if (reason instanceof ApiError && reason.status === 401) {
+            setBootStatus("unauthenticated");
+            return;
+          }
           setError(reason instanceof Error ? reason.message : String(reason));
           setBootStatus("error");
         }
       }
     })();
     return () => { cancelled = true; };
-  }, [loadSessions]);
+  }, [authRevision, loadSessions]);
 
   useEffect(() => {
     if (bootStatus !== "ready") return;
@@ -526,5 +534,20 @@ export function useStudentWorkspace() {
     deleteCategory,
     patchSettings,
     refresh: loadSessions,
+    retryAuthentication: () => {
+      setError("");
+      setBootStatus("loading");
+      setAuthRevision((current) => current + 1);
+    },
+    authSession,
+    logout: async () => {
+      await api.logout();
+      socketRef.current?.close();
+      setAuthSession(null);
+      setSessions([]);
+      setActiveSessionId(null);
+      setMessages([]);
+      setBootStatus("unauthenticated");
+    },
   };
 }

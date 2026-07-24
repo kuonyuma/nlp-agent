@@ -7,7 +7,7 @@ const props: ComponentProps<typeof Sidebar> = {
   sessions: [{ session_id: "session_1", user_id: "student", workspace_id: "default", channel: "web" }],
   preferences: { version: 2, context: { topic_id: null, topic_name: "", level: "beginner", mode: "explain" }, categories: [{ id: "category_1", name: "注意力机制", createdAt: 1 }], sessions: { session_1: { title: "Attention 入门", categoryId: "category_1" } } },
   activeId: "session_1", open: true, collapsed: false, connected: true,
-  onClose: vi.fn(), onCollapse: vi.fn(), onExpand: vi.fn(), onSelect: vi.fn(), onCreate: vi.fn(), onMeta: vi.fn(), onAddCategory: vi.fn(() => "category_2"), onRenameCategory: vi.fn(), onDeleteCategory: vi.fn(), onDelete: vi.fn(), onSettings: vi.fn(),
+  onClose: vi.fn(), onCollapse: vi.fn(), onExpand: vi.fn(), onSelect: vi.fn(), onCreate: vi.fn(), onMeta: vi.fn(), onAddCategory: vi.fn(() => "category_2"), onRenameCategory: vi.fn(), onDeleteCategory: vi.fn(), onDelete: vi.fn(), onAccount: vi.fn(), onSettings: vi.fn(),
 };
 
 describe("Sidebar delete requests", () => {
@@ -15,6 +15,13 @@ describe("Sidebar delete requests", () => {
     const { container } = render(<Sidebar {...props} />);
 
     expect(container.querySelector(".brand-mark img")).toHaveAttribute("src", expect.stringContaining("nova-remove"));
+  });
+
+  it("places account management beside settings in the sidebar footer", () => {
+    render(<Sidebar {...props} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "账户管理" }));
+    expect(props.onAccount).toHaveBeenCalledTimes(1);
   });
 
   it("delegates session and category deletion to the shared confirmation owner", () => {
