@@ -74,12 +74,18 @@ function StudentApp() {
   if (workspace.bootStatus === "error") return <div className="boot-screen error"><WifiOff size={28} /><strong>暂时无法连接后端</strong><p>{workspace.error}</p><button type="button" onClick={() => location.reload()}>重新连接</button></div>;
   if (workspace.bootStatus === "unauthenticated") return <div className="app-shell unauthenticated-app-shell">
     <Sidebar sessions={[]} preferences={workspace.preferences} activeId={null} open={sidebarOpen} collapsed={sidebarCollapsed} connected={false} onClose={() => setSidebarOpen(false)} onCollapse={() => setCollapsed(true)} onExpand={() => setCollapsed(false)} onSelect={() => setLoginOpen(true)} onCreate={() => setLoginOpen(true)} onMeta={() => undefined} onAddCategory={() => ""} onRenameCategory={() => undefined} onDeleteCategory={() => undefined} onDelete={() => undefined} onAccount={() => setLoginOpen(true)} onSettings={() => setLoginOpen(true)} />
-    <main className="unauthenticated-student-shell">
-      <section>
-        <p className="unauthenticated-brand">Nova · LSNU NLP Learning Agent</p>
-        <h1>《自然语言处理》智能体 欢迎您！</h1>
-        <p>登录后可开始新的学习对话，并安全保存学习记录。</p>
-        <Composer centered disabled={false} running={false} onSend={() => setLoginOpen(true)} onCancel={() => undefined} />
+    <main className="thread-shell unauthenticated-student-shell">
+      <header className="thread-header">
+        <SidebarToggle onClick={() => setCollapsed(false)} />
+        <div className="thread-title" />
+        <div className="thread-header-actions"><SchoolLogo /></div>
+      </header>
+      <section className="empty-thread-home">
+        <div>
+          <h1>《自然语言处理》智能体 欢迎您！</h1>
+          <p>登录后可开始新的学习对话，并安全保存学习记录。</p>
+          <Composer centered disabled={false} running={false} onSend={() => setLoginOpen(true)} onCancel={() => undefined} />
+        </div>
       </section>
     </main>
     <LoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} onAuthenticate={async (username, password) => {

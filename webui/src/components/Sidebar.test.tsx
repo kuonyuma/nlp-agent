@@ -17,9 +17,11 @@ describe("Sidebar delete requests", () => {
     expect(container.querySelector(".brand-mark img")).toHaveAttribute("src", expect.stringContaining("nova-remove"));
   });
 
-  it("places account management beside settings in the sidebar footer", () => {
-    render(<Sidebar {...props} />);
+  it("places account management below settings in the sidebar footer", () => {
+    const { container } = render(<Sidebar {...props} />);
 
+    const footerButtons = Array.from(container.querySelectorAll(".sidebar-footer .side-action"));
+    expect(footerButtons.map((button) => button.getAttribute("aria-label"))).toEqual(["settings", "账户管理"]);
     fireEvent.click(screen.getByRole("button", { name: "账户管理" }));
     expect(props.onAccount).toHaveBeenCalledTimes(1);
   });

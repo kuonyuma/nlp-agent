@@ -2,8 +2,6 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { LockKeyhole, X } from "lucide-react";
 import { FormEvent, useState } from "react";
 
-import novaLogoUrl from "../../logo/nova.png";
-
 export function LoginDialog({
   open,
   onClose,
@@ -45,7 +43,6 @@ export function LoginDialog({
       <Dialog.Overlay className="login-dialog-overlay" />
       <Dialog.Content className="login-dialog-content" aria-describedby="login-dialog-description">
         <button className="login-dialog-close" type="button" onClick={close} aria-label="关闭登录"><X size={18} /></button>
-        <img className="login-dialog-logo" src={novaLogoUrl} alt="Nova" />
         <Dialog.Title>登录 Nova</Dialog.Title>
         <Dialog.Description id="login-dialog-description">登录后可创建学习会话并使用实时对话功能。</Dialog.Description>
         <form onSubmit={(event) => void submit(event)}>

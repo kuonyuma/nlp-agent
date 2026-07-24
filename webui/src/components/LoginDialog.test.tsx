@@ -3,6 +3,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { LoginDialog } from "./LoginDialog";
 
 describe("LoginDialog", () => {
+  it("renders without loading a decorative logo image", () => {
+    render(<LoginDialog open onClose={vi.fn()} onAuthenticate={vi.fn()} />);
+
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
   it("submits fixed credentials and closes only after successful verification", async () => {
     const authenticate = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn();

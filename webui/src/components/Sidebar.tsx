@@ -106,7 +106,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
         </section>)}
         {!collapsed && !visible.length && <p className="sidebar-empty">{showArchived ? "暂无归档对话" : "还没有学习记录"}</p>}
       </div>
-      <div className="sidebar-footer"><SideAction collapsed={collapsed} label="账户管理" icon={<UserRound size={18} />} onClick={onAccount} /><SideAction collapsed={collapsed} label={t("settings")} icon={<Settings size={18} />} onClick={onSettings} /><i className={`connection-dot ${connected ? "online" : ""}`} title={connected ? "已连接" : "连接中"} /></div>
+      <div className="sidebar-footer"><SideAction collapsed={collapsed} label={t("settings")} icon={<Settings size={18} />} onClick={onSettings} /><SideAction collapsed={collapsed} label="账户管理" icon={<UserRound size={18} />} onClick={onAccount} /><i className={`connection-dot ${connected ? "online" : ""}`} title={connected ? "已连接" : "连接中"} /></div>
     </aside>
     <CategoryDialog open={categoryDialogOpen} onClose={() => setCategoryDialogOpen(false)} onConfirm={onAddCategory} />
   </>;
