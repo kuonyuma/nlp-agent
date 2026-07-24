@@ -13,6 +13,7 @@ import {
 } from "@/lib/learning-preferences";
 import type {
   ActivityItem,
+  AuthSession,
   ChatMessage,
   LearningContext,
   LearningCategory,
@@ -97,6 +98,7 @@ export function useStudentWorkspace() {
   const [preferences, setPreferences] = useState<LearningPreferences>(() => loadLearningPreferences());
   const preferencesRef = useRef(preferences);
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const confirmedSettingsRef = useRef(settings);
   const pendingSettingsPatches = useRef<Array<{ id: number; patch: Partial<UserSettings> }>>([]);
   const nextSettingsMutation = useRef(0);
@@ -324,6 +326,7 @@ export function useStudentWorkspace() {
         confirmedSettingsRef.current = loadedSettings;
         setSettings(loadedSettings);
         setWorkspaceId(resolveWorkspaceId(auth, loadedSettings));
+        setAuthSession(auth);
         // Match nanobot's home behavior: boot into a clean composer instead of
         // forcing the most recent transcript open. History remains in Sidebar.
         setBootStatus("ready");
@@ -535,6 +538,16 @@ export function useStudentWorkspace() {
       setError("");
       setBootStatus("loading");
       setAuthRevision((current) => current + 1);
+    },
+    authSession,
+    logout: async () => {
+      await api.logout();
+      socketRef.current?.close();
+      setAuthSession(null);
+      setSessions([]);
+      setActiveSessionId(null);
+      setMessages([]);
+      setBootStatus("unauthenticated");
     },
   };
 }
