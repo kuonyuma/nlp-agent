@@ -224,11 +224,18 @@ class SameOriginSessionAuth:
             )
         return token, claims
 
-    def authenticate(self, token: str | None) -> SessionClaims:
+    def token_fingerprint(self, token: str | None) -> bytes | None:
+        """Return an opaque token identifier suitable for in-process lookup only."""
+        if not token:
+            return None
+        return hashlib.sha256(token.encode("ascii")).digest()
+
+    def authenticate(self, token: str | None, *, touch: bool = True) -> SessionClaims:
         if not token:
             raise AuthenticationError("authentication cookie is missing")
         if self.credentials_configured:
-            digest = hashlib.sha256(token.encode("ascii")).digest()
+            digest = self.token_fingerprint(token)
+            assert digest is not None
             with self._sessions_lock:
                 session = self._sessions.get(digest)
                 now = time.monotonic()
@@ -240,7 +247,8 @@ class SameOriginSessionAuth:
                 ):
                     self._sessions.pop(digest, None)
                     raise AuthenticationError("authentication cookie has expired")
-                session.last_seen_at = now
+                if touch:
+                    session.last_seen_at = now
                 return session.claims
         try:
             payload, supplied_signature = token.split(".", 1)
@@ -261,7 +269,8 @@ class SameOriginSessionAuth:
     def revoke(self, token: str | None) -> None:
         if not token or not self.credentials_configured:
             return
-        digest = hashlib.sha256(token.encode("ascii")).digest()
+        digest = self.token_fingerprint(token)
+        assert digest is not None
         with self._sessions_lock:
             self._sessions.pop(digest, None)
 

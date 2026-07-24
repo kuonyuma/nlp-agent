@@ -95,6 +95,16 @@ def test_idle_timeout_expires_session() -> None:
         auth.authenticate(token)
 
 
+def test_read_only_session_check_does_not_extend_idle_timeout() -> None:
+    auth = make_auth()
+    token, _claims = auth.login("nova", "correct-password")
+    session = next(iter(auth._sessions.values()))
+    last_seen_at = session.last_seen_at
+
+    assert auth.authenticate(token, touch=False).user_id == "nova"
+    assert session.last_seen_at == last_seen_at
+
+
 def test_stateless_monitor_compatibility_remains_available_without_credentials() -> None:
     auth = SameOriginSessionAuth(secret="monitor-test-secret")
     token, claims = auth.issue(

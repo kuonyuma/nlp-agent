@@ -486,6 +486,36 @@ def test_websocket_rejects_cross_origin(web_app):
         assert exc.value.code == 4403
 
 
+def test_websocket_requires_an_authenticated_cookie(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                "/ws/v1",
+                headers={"Origin": "http://testserver"},
+            ) as websocket:
+                websocket.receive_json()
+        assert exc.value.code == 4401
+
+
+def test_logout_revokes_the_active_websocket_connection(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        with client.websocket_connect(
+            "/ws/v1",
+            headers={"Origin": "http://testserver"},
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "connection.ready"
+            assert client.delete(
+                "/api/v1/auth/session",
+                headers=write_headers(csrf),
+            ).status_code == 204
+            with pytest.raises(WebSocketDisconnect) as exc:
+                websocket.receive_json()
+            assert exc.value.code == 4401
+
+
 def test_websocket_reports_deleted_session_subscription_without_crashing(web_app):
     app, _engine = web_app
     with TestClient(app) as client:

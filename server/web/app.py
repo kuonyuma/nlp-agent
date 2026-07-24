@@ -343,7 +343,10 @@ def create_app(
         response: Response,
         _claims: WriteClaims,
     ):
-        auth.revoke(request.cookies.get(auth.cookie_name))
+        token = request.cookies.get(auth.cookie_name)
+        session_fingerprint = auth.token_fingerprint(token)
+        auth.revoke(token)
+        await hub.close_session(session_fingerprint)
         response.delete_cookie(auth.cookie_name, path="/", samesite="strict")
 
     @app.get("/api/v1/sessions", tags=["sessions"])
