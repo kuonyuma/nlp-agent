@@ -65,10 +65,11 @@ jobs:
           test -n "$DEPLOY_DIR"
           test -f "$DEPLOY_DIR/.env"
           export NOVA_ENV_FILE="$DEPLOY_DIR/.env"
-          docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml pull nova-web
-          docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml up -d --no-build --remove-orphans nova-web
+          docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml pull nova-web nova-monitor
+          docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml up -d --no-build --remove-orphans nova-web nova-monitor
           for attempt in {1..12}; do
-            if docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml exec -T nova-web .venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health/ready')"; then
+            if docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml exec -T nova-web .venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health/ready')" \
+              && docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml exec -T nova-monitor .venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/health/ready')"; then
               exit 0
             fi
             sleep 5
