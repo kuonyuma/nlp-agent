@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -122,21 +123,45 @@ def web_app(tmp_path):
     auth = SameOriginSessionAuth(
         secret="test-secret-that-is-long-enough-for-hmac",
         allowed_origins=["http://testserver"],
+        username="nova",
+        password_hash=PasswordHasher().hash("test-password"),
+        roles=frozenset({"admin"}),
     )
     return create_app(gateway_factory=gateway_factory, auth=auth), engine
 
 
 def authenticate(client: TestClient) -> str:
     response = client.post(
-        "/api/v1/auth/session",
+        "/api/v1/auth/login",
+        json={"username": "nova", "password": "test-password"},
         headers={"Origin": "http://testserver"},
     )
-    assert response.status_code == 201
+    assert response.status_code == 200
     return response.json()["csrf_token"]
 
 
 def write_headers(csrf: str) -> dict[str, str]:
     return {"Origin": "http://testserver", "X-CSRF-Token": csrf}
+
+
+def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        assert client.get("/api/v1/sessions").status_code == 401
+        assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
+
+        rejected = client.post(
+            "/api/v1/auth/login",
+            json={"username": "nova", "password": "incorrect"},
+            headers={"Origin": "http://testserver"},
+        )
+        assert rejected.status_code == 401
+
+        csrf = authenticate(client)
+        assert client.get("/api/v1/sessions").status_code == 200
+        logged_out = client.delete("/api/v1/auth/session", headers=write_headers(csrf))
+        assert logged_out.status_code == 204
+        assert client.get("/api/v1/sessions").status_code == 401
 
 
 def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
