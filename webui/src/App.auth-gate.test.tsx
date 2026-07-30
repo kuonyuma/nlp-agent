@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 
-vi.mock("@/lib/websocket-client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
-vi.mock("@/lib/api", () => {
+vi.mock("@/platform/realtime/client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
+vi.mock("@/platform/http/api", () => {
   class ApiError extends Error {
     constructor(message: string, public readonly status: number) {
       super(message);

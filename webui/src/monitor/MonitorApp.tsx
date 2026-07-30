@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Bot, Clock3, Database, Gauge, HardDrive, Radio, RefreshCw, Search, Server, Timer, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { authenticate, monitorApi, type ErrorRow, type Overview, type SessionRow, type TelemetryEvent, type Trace, type TraceDetail, type UsageRow } from "./api";
 
 export function controlPlaneUrl(current: Pick<Location, "protocol" | "hostname"> = location): string {

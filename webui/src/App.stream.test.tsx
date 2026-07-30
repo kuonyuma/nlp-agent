@@ -18,8 +18,8 @@ const stream = vi.hoisted(() => {
   };
 });
 
-vi.mock("@/lib/websocket-client", () => ({ StudentSocket: stream.StudentSocket }));
-vi.mock("@/lib/api", () => ({
+vi.mock("@/platform/realtime/client", () => ({ StudentSocket: stream.StudentSocket }));
+vi.mock("@/platform/http/api", () => ({
   ensureAuth: vi.fn().mockResolvedValue({}),
   api: {
     listSessions: vi.fn().mockResolvedValue({ items: [] }),
