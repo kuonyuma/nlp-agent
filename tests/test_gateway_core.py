@@ -109,6 +109,23 @@ class RecordingTurnDispatcher:
         return 0
 
 
+class FailingTurnDispatcher(RecordingTurnDispatcher):
+    async def submit(self, task):
+        raise ConnectionError("redis unavailable")
+
+
+class FlakyTurnDispatcher(RecordingTurnDispatcher):
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    async def submit(self, task):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ConnectionError("redis unavailable")
+        self.submissions.append(task)
+
+
 class LearningEngine(FakeEngine):
     def __init__(self):
         super().__init__()
@@ -198,6 +215,68 @@ async def test_gateway_submits_persisted_turn_to_dispatcher(tmp_path, principal)
     assert task.context == session
     assert task.content == "dispatch me"
     assert repository.get_turn(accepted.turn_id).status == TurnStatus.ACCEPTED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_marks_turn_failed_when_dispatch_transport_rejects_it(
+    tmp_path, principal
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=FailingTurnDispatcher(),
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    with pytest.raises(ConnectionError, match="redis unavailable"):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(session_id=session.session_id, content="dispatch me"),
+        )
+
+    failed = repository.active_turn_for_session(session.session_id)
+    assert failed is None
+    failed_turn = repository.list_turns(session.session_id)[0]
+    assert failed_turn.error_kind == "dispatch_failed"
+    events = repository.events_after(failed_turn.turn_id)
+    assert [event.type for event in events][-1] == GatewayEventType.TURN_FAILED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_retries_dispatch_failure_for_same_idempotency_key(
+    tmp_path, principal
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    dispatcher = FlakyTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+    request = SubmitTurnRequest(
+        session_id=session.session_id,
+        content="dispatch me",
+        idempotency_key="same",
+    )
+
+    with pytest.raises(ConnectionError):
+        await gateway.submit_turn(principal, request)
+    retried = await gateway.submit_turn(principal, request)
+
+    assert retried.duplicate is True
+    assert dispatcher.attempts == 2
+    assert dispatcher.submissions[0].turn_id == retried.turn_id
+    assert repository.get_turn(retried.turn_id).status == TurnStatus.ACCEPTED
     await gateway.close()
 
 

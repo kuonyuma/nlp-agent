@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from core.identity import AuthenticatedPrincipal
 from gateway.contracts import GatewayEventType, InjectMessageRequest, SubmitTurnRequest
 from gateway.core import BackendGateway
-from gateway.events import GatewayEventSubscription
+from gateway.events import GatewayEventStreamInterrupted, GatewayEventSubscription
 from server.web.auth import (
     AuthenticationError,
     OriginRejectedError,
@@ -283,6 +283,8 @@ class WebSocketConnection:
         try:
             async for event in subscription:
                 await self._deliver_gateway_event(event)
+        except GatewayEventStreamInterrupted:
+            await self._terminate(code=1012, reason="event transport interrupted")
         except asyncio.CancelledError:
             raise
         finally:

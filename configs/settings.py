@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     NLP_AGENT_MONITOR_PORT: int = 0
     NLP_AGENT_MONITOR_ALLOWED_HOSTS: str = ""
     NLP_AGENT_MONITOR_ALLOWED_ORIGINS: str = ""
+    NLP_AGENT_GATEWAY_TRANSPORT: str = ""
+    NLP_AGENT_REDIS_URL: str = ""
+    NLP_AGENT_STATE_FACTORY: str = ""
 
     _config: dict = {}
 
@@ -95,7 +98,14 @@ class Settings(BaseSettings):
 
     @property
     def gateway_runtime(self) -> dict:
-        return dict(self._config.get("gateway", {}))
+        config = dict(self._config.get("gateway", {}))
+        if self.NLP_AGENT_GATEWAY_TRANSPORT.strip():
+            config["transport"] = self.NLP_AGENT_GATEWAY_TRANSPORT.strip()
+        if self.NLP_AGENT_REDIS_URL.strip():
+            config["redis_url"] = self.NLP_AGENT_REDIS_URL.strip()
+        if self.NLP_AGENT_STATE_FACTORY.strip():
+            config["state_factory"] = self.NLP_AGENT_STATE_FACTORY.strip()
+        return config
 
     @property
     def web_runtime(self) -> dict:

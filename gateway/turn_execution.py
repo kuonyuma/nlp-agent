@@ -13,7 +13,7 @@ from typing import Any
 from gateway.contracts import GatewayEventType, TurnStatus
 from gateway.dispatch import TurnTask
 from gateway.engine import AgentEngine
-from gateway.repository import GatewayRepository
+from gateway.state import TurnExecutionState
 
 
 EventSink = Callable[[str, str, GatewayEventType, dict], Awaitable[None]]
@@ -35,7 +35,7 @@ def _extract_result(pattern: re.Pattern[str], text: str) -> tuple[str, dict[str,
 class InProcessTurnExecutor:
     """Runs and finalizes turn work for the memory dispatcher."""
 
-    def __init__(self, engine: AgentEngine, repository: GatewayRepository, emit: EventSink) -> None:
+    def __init__(self, engine: AgentEngine, repository: TurnExecutionState, emit: EventSink) -> None:
         self._engine = engine
         self._repository = repository
         self._emit = emit

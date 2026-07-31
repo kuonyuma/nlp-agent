@@ -54,6 +54,36 @@ def test_gateway_repository_idempotency_event_order_and_recovery(tmp_path):
     repository.close()
 
 
+def test_ensure_event_repairs_terminal_log_once(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    turn, _ = repository.create_turn(
+        turn_id="turn-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        user_id="alice",
+        input_text="hello",
+        idempotency_key=None,
+    )
+    repository.update_turn(turn.turn_id, TurnStatus.COMPLETED, final_text="answer")
+
+    first = repository.ensure_event(
+        turn_id=turn.turn_id,
+        session_id=turn.session_id,
+        event_type=GatewayEventType.TURN_COMPLETED,
+        payload={"content": "answer"},
+    )
+    second = repository.ensure_event(
+        turn_id=turn.turn_id,
+        session_id=turn.session_id,
+        event_type=GatewayEventType.TURN_COMPLETED,
+        payload={"content": "answer"},
+    )
+
+    assert second.event_id == first.event_id
+    assert len(repository.events_after(turn.turn_id)) == 1
+    repository.close()
+
+
 def test_event_retention_compacts_terminal_turns_caps_sessions_and_keeps_active(tmp_path):
     repository = GatewayRepository(tmp_path / "gateway.sqlite3")
     terminal_ids = []

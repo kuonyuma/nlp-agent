@@ -264,6 +264,9 @@ class GatewayRepository:
             "error_kind": error_kind,
             "error_message": error_message[:1000] if error_message else None,
         }
+        if status == TurnStatus.ACCEPTED:
+            fields["started_at"] = None
+            fields["completed_at"] = None
         if status == TurnStatus.RUNNING:
             fields["started_at"] = _now()
         if status in {
@@ -367,6 +370,30 @@ class GatewayRepository:
                 (turn_id, max(0, after_sequence), min(max(1, limit), 2000)),
             ).fetchall()
         return [self._event(row) for row in rows]
+
+    def ensure_event(
+        self,
+        *,
+        turn_id: str,
+        session_id: str,
+        event_type: GatewayEventType,
+        payload: dict[str, Any] | None = None,
+    ) -> GatewayEvent:
+        """Return an existing event of this type or append it exactly once."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM gateway_events WHERE turn_id=? AND event_type=? "
+                "ORDER BY sequence LIMIT 1",
+                (turn_id, event_type.value),
+            ).fetchone()
+            if row is not None:
+                return self._event(row)
+            return self.append_event(
+                turn_id=turn_id,
+                session_id=session_id,
+                event_type=event_type,
+                payload=payload,
+            )
 
     def list_turns(self, session_id: str, *, limit: int = 100) -> list[TurnRecord]:
         with self._lock:
