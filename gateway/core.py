@@ -30,9 +30,11 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
+from gateway.dispatch import InProcessTurnDispatcher, TurnDispatcher, TurnTask
 from gateway.engine import AgentEngine, LangGraphAgentEngine
 from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
+from gateway.turn_execution import InProcessTurnExecutor
 from server.agent.session_service import LocalSessionService, local_session_service
 
 
@@ -78,6 +80,7 @@ class BackendGateway:
         self,
         *,
         engine: AgentEngine | None = None,
+        dispatcher: TurnDispatcher | None = None,
         repository: GatewayRepository | None = None,
         sessions: LocalSessionService = local_session_service,
         shutdown_grace_s: float | None = None,
@@ -93,9 +96,6 @@ class BackendGateway:
         if not database.is_absolute():
             database = project / database
         self.engine = engine or LangGraphAgentEngine()
-        engine_parameter_count = len(inspect.signature(self.engine.run_turn).parameters)
-        self._engine_accepts_learning = engine_parameter_count >= 6
-        self._engine_accepts_teaching_materials = engine_parameter_count >= 7
         self.repository = repository or GatewayRepository(
             database,
             knowledge_point_prompt_budget=max(
@@ -104,7 +104,10 @@ class BackendGateway:
         )
         self.sessions = sessions
         self.events = GatewayEventBroker()
-        self._turn_tasks: dict[str, asyncio.Task[None]] = {}
+        executor = InProcessTurnExecutor(
+            self.engine, self.repository, self._emit_from_engine
+        )
+        self.dispatcher = dispatcher or InProcessTurnDispatcher(executor.run)
         self._session_turn_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.shutdown_grace_s = max(
             0.0,
@@ -375,16 +378,21 @@ class BackendGateway:
             GatewayEventType.TURN_ACCEPTED,
             {"status": TurnStatus.ACCEPTED.value},
         )
-        task = asyncio.create_task(
-            self._run_turn(
-                context, turn.turn_id, request.content, learning_context, progress,
-                exercise, teaching_materials, guided_session.get("id"),
-                teaching_session.get("id") if teaching_session is not None else None,
-            ),
-            name=f"gateway-turn:{turn.turn_id}",
+        await self.dispatcher.submit(
+            TurnTask(
+                context=context,
+                turn_id=turn.turn_id,
+                content=request.content,
+                learning_context=learning_context,
+                learning_progress=progress,
+                exercise_state=exercise,
+                teaching_materials=teaching_materials,
+                guided_session_id=guided_session.get("id"),
+                exercise_session_id=(
+                    teaching_session.get("id") if teaching_session is not None else None
+                ),
+            )
         )
-        self._turn_tasks[turn.turn_id] = task
-        task.add_done_callback(lambda _task, tid=turn.turn_id: self._turn_tasks.pop(tid, None))
         return TurnAccepted(
             turn_id=turn.turn_id,
             session_id=context.session_id,
@@ -392,11 +400,17 @@ class BackendGateway:
         )
 
     async def _run_turn(
-        self, context: SessionContext, turn_id: str, content: str,
-        learning_context: LearningContext | None, progress, exercise,
-        teaching_materials: TeachingMaterials, guided_session_id: str | None,
-        exercise_session_id: str | None,
+        self, task: TurnTask,
     ) -> None:
+        context = task.context
+        turn_id = task.turn_id
+        content = task.content
+        learning_context = task.learning_context
+        progress = task.learning_progress
+        exercise = task.exercise_state
+        teaching_materials = task.teaching_materials
+        guided_session_id = task.guided_session_id
+        exercise_session_id = task.exercise_session_id
         await asyncio.to_thread(
             self.repository.update_turn, turn_id, TurnStatus.RUNNING
         )
@@ -542,11 +556,7 @@ class BackendGateway:
         if turn.status not in {TurnStatus.ACCEPTED, TurnStatus.RUNNING}:
             return turn
         context = await self.sessions.resolve(principal, turn.session_id)
-        await self.engine.cancel_turn(context, turn_id)
-        task = self._turn_tasks.get(turn_id)
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self.dispatcher.cancel(turn_id)
         updated = await asyncio.to_thread(self.repository.get_turn, turn_id)
         return updated or turn
 
@@ -789,7 +799,7 @@ class BackendGateway:
             status="ok" if self._started else "stopped",
             started=self._started,
             accepting_turns=self._accepting,
-            active_turns=sum(not task.done() for task in self._turn_tasks.values()),
+            active_turns=self.dispatcher.active_count(),
             subscribers=self.events.subscriber_count,
             database=repository["database"],
             durable_events=repository["durable_events"],
@@ -806,20 +816,11 @@ class BackendGateway:
             if self._maintenance_task is not None:
                 await asyncio.gather(self._maintenance_task, return_exceptions=True)
                 self._maintenance_task = None
-            tasks = [task for task in self._turn_tasks.values() if not task.done()]
-            pending = set(tasks)
-            if pending and not force and self.shutdown_grace_s > 0:
-                _done, pending = await asyncio.wait(
-                    pending,
-                    timeout=self.shutdown_grace_s,
-                )
-            for task in pending:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            await self.dispatcher.close(
+                force=force, grace_s=self.shutdown_grace_s
+            )
             await self.engine.close()
             await asyncio.to_thread(self.repository.flush)
             self.repository.close()
-            self._turn_tasks.clear()
             self._session_turn_locks.clear()
             self._started = False

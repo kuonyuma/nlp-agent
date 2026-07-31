@@ -10,6 +10,7 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
+from gateway.dispatch import InProcessTurnDispatcher, TurnDispatcher, TurnTask
 
 __all__ = [
     "GatewayEvent",
@@ -20,4 +21,7 @@ __all__ = [
     "TurnAccepted",
     "TurnRecord",
     "TurnStatus",
+    "InProcessTurnDispatcher",
+    "TurnDispatcher",
+    "TurnTask",
 ]

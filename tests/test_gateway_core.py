@@ -15,6 +15,7 @@ from gateway.contracts import (
     TeachingConfigurationError,
 )
 from gateway.core import BackendGateway
+from gateway.dispatch import TurnTask
 from gateway.repository import GatewayRepository
 
 
@@ -91,6 +92,23 @@ class FakeEngine:
         self.closed = True
 
 
+class RecordingTurnDispatcher:
+    def __init__(self):
+        self.submissions = []
+
+    async def submit(self, task):
+        self.submissions.append(task)
+
+    async def cancel(self, turn_id):
+        return None
+
+    async def close(self, *, force=False, grace_s=0):
+        return None
+
+    def active_count(self):
+        return 0
+
+
 class LearningEngine(FakeEngine):
     def __init__(self):
         super().__init__()
@@ -151,6 +169,36 @@ class ExerciseProtocolEngine(LearningEngine):
 @pytest.fixture
 def principal():
     return AuthenticatedPrincipal(user_id="alice", workspace_ids=frozenset({"w1"}))
+
+
+@pytest.mark.asyncio
+async def test_gateway_submits_persisted_turn_to_dispatcher(tmp_path, principal):
+    engine = FakeEngine()
+    sessions = FakeSessions()
+    dispatcher = RecordingTurnDispatcher()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=engine,
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    accepted = await gateway.submit_turn(
+        principal,
+        SubmitTurnRequest(session_id=session.session_id, content="dispatch me"),
+    )
+
+    assert len(dispatcher.submissions) == 1
+    task = dispatcher.submissions[0]
+    assert isinstance(task, TurnTask)
+    assert task.turn_id == accepted.turn_id
+    assert task.context == session
+    assert task.content == "dispatch me"
+    assert repository.get_turn(accepted.turn_id).status == TurnStatus.ACCEPTED
+    await gateway.close()
 
 
 @pytest.mark.asyncio
