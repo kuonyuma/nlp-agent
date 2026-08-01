@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     NLP_AGENT_GATEWAY_TRANSPORT: str = ""
     NLP_AGENT_REDIS_URL: str = ""
     NLP_AGENT_STATE_FACTORY: str = ""
+    NLP_AGENT_DATABASE_URL: str = ""
+    NLP_AGENT_DB_POOL_SIZE: int = 10
+    NLP_AGENT_DB_MAX_OVERFLOW: int = 20
+    NLP_AGENT_DB_POOL_RECYCLE_S: int = 1800
+    NLP_AGENT_DB_CONNECT_TIMEOUT_S: int = 5
+    NLP_AGENT_DB_STATEMENT_TIMEOUT_S: int = 30
 
     _config: dict = {}
 
@@ -105,6 +111,21 @@ class Settings(BaseSettings):
             config["redis_url"] = self.NLP_AGENT_REDIS_URL.strip()
         if self.NLP_AGENT_STATE_FACTORY.strip():
             config["state_factory"] = self.NLP_AGENT_STATE_FACTORY.strip()
+        return config
+
+    @property
+    def database_runtime(self) -> dict:
+        config = dict(self._config.get("database", {}))
+        config.update(
+            {
+                "url": self.NLP_AGENT_DATABASE_URL.strip(),
+                "pool_size": self.NLP_AGENT_DB_POOL_SIZE,
+                "max_overflow": self.NLP_AGENT_DB_MAX_OVERFLOW,
+                "pool_recycle_s": self.NLP_AGENT_DB_POOL_RECYCLE_S,
+                "connect_timeout_s": self.NLP_AGENT_DB_CONNECT_TIMEOUT_S,
+                "statement_timeout_s": self.NLP_AGENT_DB_STATEMENT_TIMEOUT_S,
+            }
+        )
         return config
 
     @property
