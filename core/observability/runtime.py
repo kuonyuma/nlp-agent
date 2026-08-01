@@ -7,10 +7,9 @@ import time
 import uuid
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-from configs.settings import BASE_DIR
+from configs.settings import settings
 from core.observability.context import (
     TelemetryContext,
     bind_telemetry_context,
@@ -25,7 +24,7 @@ from core.observability.models import (
     TokenUsage,
     TraceRecord,
 )
-from core.observability.repository import TelemetryRepository
+from core.observability.mysql_repository import MySQLTelemetryRepository
 from utils.logger import get_logger
 
 
@@ -115,9 +114,15 @@ class Span(AbstractAsyncContextManager["Span"]):
 
 
 class TelemetryRuntime:
-    def __init__(self, path: str | Path | None = None, *, queue_size: int = 5000,
+    def __init__(self, path: str | None = None, *, queue_size: int = 5000,
                  batch_size: int = 100, flush_interval_s: float = .25) -> None:
-        self.repository = TelemetryRepository(path or BASE_DIR / ".data" / "observability" / "telemetry.sqlite3")
+        database_url = settings.NLP_AGENT_DATABASE_URL.strip()
+        if not database_url:
+            raise RuntimeError("NLP_AGENT_DATABASE_URL is required for MySQL observability")
+        self.repository = MySQLTelemetryRepository(database_url)
+        if path is not None:
+            # Explicit test/reset instances are isolated from the process-wide production store.
+            self.repository.clear()
         self.queue_size = queue_size
         self.batch_size = batch_size
         self.flush_interval_s = flush_interval_s

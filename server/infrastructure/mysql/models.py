@@ -394,3 +394,18 @@ class RuntimeConfigVersionModel(Base):
     revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
     config_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class ObservabilityRecordModel(TimestampedModel, Base):
+    """Append/upsert envelope store for traces, spans and telemetry events."""
+    __tablename__ = "nlp_observability_records"
+    __table_args__ = (UniqueConstraint("kind", "record_key", name="uq_nlp_observability_kind_record"),)
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    record_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    trace_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    session_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    turn_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    status: Mapped[str | None] = mapped_column(String(32), index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)

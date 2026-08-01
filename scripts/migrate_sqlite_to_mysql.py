@@ -129,8 +129,8 @@ def main() -> None:
     if args.execute:
         if not args.maintenance_window:
             raise SystemExit("refusing import without --maintenance-window")
-        if report["target_revision"] != "20260801_07":
-            raise SystemExit("target schema must be at Alembic revision 20260801_07")
+        if report["target_revision"] != "20260801_08":
+            raise SystemExit("target schema must be at Alembic revision 20260801_08")
         print(json.dumps(import_legacy_projection(args.sqlite, args.database_url), ensure_ascii=False, sort_keys=True))
         integrity = validate_mysql_integrity(args.database_url)
         print(json.dumps(integrity, ensure_ascii=False, sort_keys=True))

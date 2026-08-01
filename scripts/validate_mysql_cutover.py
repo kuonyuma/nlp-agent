@@ -13,7 +13,7 @@ def main() -> None:
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     revision = __import__("asyncio").run(target_schema_revision(args.database_url))
-    if revision != "20260801_06":
+    if revision != "20260801_08":
         raise SystemExit(f"schema revision is {revision!r}; expected 20260801_06")
     result = validate_mysql_integrity(args.database_url)
     if not result["valid"]:
