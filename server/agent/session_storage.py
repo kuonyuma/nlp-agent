@@ -364,7 +364,30 @@ async def record_transcript(session_id: str, messages: List[BaseMessage]):
     """
     暴露给上层的封装调用：对比当前 Graph 内的 messages 链，提取并附加新消息。
     """
-    global_session_storage.enqueue_messages(session_id, messages)
+    """Persist the current transcript snapshot in MySQL; JSONL is legacy-read only."""
+    from sqlalchemy import create_engine, delete
+    from sqlalchemy.dialects.mysql import insert
+    from configs.settings import settings
+    from server.infrastructure.mysql.models import ConversationTranscriptModel
+
+    def persist() -> None:
+        url = settings.NLP_AGENT_DATABASE_URL.strip()
+        if not url:
+            raise RuntimeError("NLP_AGENT_DATABASE_URL is required for transcript storage")
+        engine = create_engine(url.replace("mysql+aiomysql://", "mysql+pymysql://"), pool_pre_ping=True)
+        try:
+            with engine.begin() as connection:
+                connection.execute(delete(ConversationTranscriptModel).where(ConversationTranscriptModel.session_id == session_id))
+                parent_id = None
+                for index, message in enumerate(messages):
+                    message_id = str(getattr(message, "id", None) or uuid.uuid4())
+                    role = "assistant" if isinstance(message, AIMessage) else "tool" if isinstance(message, ToolMessage) else "system" if isinstance(message, SystemMessage) else "user"
+                    connection.execute(insert(ConversationTranscriptModel).values(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{session_id}:{message_id}:{index}")), session_id=session_id, message_uuid=message_id, parent_uuid=parent_id, message_type=message.__class__.__name__, role=role, content_json={"content": message.content}, tool_json={"tool_calls": getattr(message, "tool_calls", [])} if getattr(message, "tool_calls", None) else None, usage_json=getattr(message, "usage_metadata", None)))
+                    parent_id = message_id
+        finally:
+            engine.dispose()
+
+    await asyncio.to_thread(persist)
 
 async def load_transcript_file(session_id: str) -> List[BaseMessage]:
     """

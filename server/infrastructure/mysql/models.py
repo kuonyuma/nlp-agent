@@ -374,6 +374,24 @@ class MemoryDocumentModel(TimestampedModel, Base):
     revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
 
 
+class MemoryArchiveModel(TimestampedModel, Base):
+    __tablename__ = "nlp_memory_archives"
+    __table_args__ = (UniqueConstraint("user_id", "workspace_id", "source_id", name="uq_nlp_memory_archive_source"),)
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    user_id: Mapped[str] = mapped_column(UUID, nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(UUID, nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    cursor: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class MemoryCursorModel(Base):
+    __tablename__ = "nlp_memory_cursors"
+    scope_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    cursor: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+
+
 class ToolAuditModel(Base):
     __tablename__ = "nlp_tool_audits"
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
