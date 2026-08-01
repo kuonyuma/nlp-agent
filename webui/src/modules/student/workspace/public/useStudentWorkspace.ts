@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/platform/http/api";
 import { StudentSocket } from "@/platform/realtime/client";
-import type { AuthSession, ChatMessage, ServerEvent } from "@/shared/types";
+import type { AuthSession, ChatMessage } from "@/shared/types";
 
 import { useWorkspaceBootstrap } from "../internal/bootstrap";
 import { usePreferencesController } from "../internal/preferences-controller";
@@ -59,8 +59,10 @@ export function useStudentWorkspace() {
     setLoadingMessages,
     updateSessionMeta,
   });
-  const applyEvent = useCallback((event: ServerEvent) => {
-    createRealtimeEventHandler({
+  const handleEvent = useMemo(
+    // The factory stores refs for the socket callback; it does not read them during render.
+    // eslint-disable-next-line react-hooks/refs
+    () => createRealtimeEventHandler({
       socketRef,
       activeSessionRef,
       pendingRequests,
@@ -72,8 +74,9 @@ export function useStudentWorkspace() {
       updateSessionMeta,
       loadSessions,
       loadTurns,
-    })(event);
-  }, [activeSessionRef, inFlightTurnIds, loadSessions, loadTurns, persistPreferences, setActiveSessionId, socketRef, updateSessionMeta]);
+    }),
+    [activeSessionRef, inFlightTurnIds, loadSessions, loadTurns, persistPreferences, setActiveSessionId, socketRef, updateSessionMeta],
+  );
 
   useWorkspaceBootstrap({
     authRevision,
@@ -87,14 +90,14 @@ export function useStudentWorkspace() {
 
   useEffect(() => {
     if (bootStatus !== "ready") return;
-    const socket = new StudentSocket(applyEvent, setSocketStatus);
+    const socket = new StudentSocket(handleEvent, setSocketStatus);
     socketRef.current = socket;
     socket.connect();
     return () => {
       socket.close();
       socketRef.current = null;
     };
-  }, [applyEvent, bootStatus]);
+  }, [bootStatus, handleEvent]);
 
   useEffect(() => {
     loadGenerationRef.current += 1;
