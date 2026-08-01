@@ -229,3 +229,50 @@ class LearningEvidenceModel(Base):
     normalized_score: Mapped[int] = mapped_column(Integer, nullable=False)
     passed: Mapped[bool] = mapped_column(nullable=False)
     completed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class OutboxMessageModel(TimestampedModel, Base):
+    __tablename__ = "nlp_outbox_messages"
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    topic: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    available_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6))
+    locked_by: Mapped[str | None] = mapped_column(String(128))
+    locked_until: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+    redis_message_id: Mapped[str | None] = mapped_column(String(128))
+    published_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+
+
+class TurnCancellationModel(Base):
+    __tablename__ = "nlp_turn_cancellations"
+    turn_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_turns.id", ondelete="CASCADE"), primary_key=True)
+    requested_by: Mapped[str] = mapped_column(UUID, nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False, server_default="")
+    requested_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6))
+
+
+class ToolCallModel(TimestampedModel, Base):
+    __tablename__ = "nlp_tool_calls"
+    __table_args__ = (UniqueConstraint("turn_id", "operation_id", name="uq_nlp_tool_calls_turn_id_operation_id"),)
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    turn_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_turns.id", ondelete="CASCADE"), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    claim_generation: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
+    request_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    result_json: Mapped[dict | None] = mapped_column(JSON)
+
+
+class DeadLetterModel(Base):
+    __tablename__ = "nlp_dead_letters"
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    turn_id: Mapped[str | None] = mapped_column(UUID)
+    outbox_id: Mapped[str | None] = mapped_column(UUID)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    first_failed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6))
+    last_failed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6))
