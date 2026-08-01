@@ -73,7 +73,7 @@ class CourseTopicModel(TimestampedModel, Base):
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="enabled")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
@@ -148,12 +148,16 @@ class TurnModel(TimestampedModel, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="accepted")
     input_text: Mapped[str] = mapped_column(Text, nullable=False)
     result_text: Mapped[str | None] = mapped_column(Text)
+    error_kind: Mapped[str | None] = mapped_column(String(128))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
     learning_state_json: Mapped[dict | None] = mapped_column(JSON)
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
     claim_generation: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
     claimed_by: Mapped[str | None] = mapped_column(String(128))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+    started_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+    completed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
 
 
 class ConversationMessageModel(Base):
@@ -215,7 +219,7 @@ class ExerciseAttemptModel(Base):
     rubric_matches_json: Mapped[list] = mapped_column(JSON, nullable=False)
     normalized_score: Mapped[int] = mapped_column(Integer, nullable=False)
     passed: Mapped[bool] = mapped_column(nullable=False)
-    feedback: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    feedback: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
 
 
@@ -276,3 +280,71 @@ class DeadLetterModel(Base):
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     first_failed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6))
     last_failed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6))
+
+
+class GatewayCompatModel(TimestampedModel, Base):
+    """Transitional JSON projection for legacy Gateway aggregates during cutover."""
+    __tablename__ = "nlp_gateway_compat"
+    __table_args__ = (UniqueConstraint("namespace", "aggregate_id", name="uq_nlp_gateway_compat_namespace_aggregate"),)
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    aggregate_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+
+
+class AgentCheckpointModel(TimestampedModel, Base):
+    __tablename__ = "nlp_agent_checkpoints"
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False)
+    checkpoint_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    checkpoint_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class ConversationTranscriptModel(Base):
+    __tablename__ = "nlp_conversation_transcripts"
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    message_uuid: Mapped[str] = mapped_column(String(128), nullable=False)
+    parent_uuid: Mapped[str | None] = mapped_column(String(128))
+    message_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_json: Mapped[dict | list | str] = mapped_column(JSON, nullable=False)
+    tool_json: Mapped[dict | None] = mapped_column(JSON)
+    usage_json: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class MemoryDocumentModel(TimestampedModel, Base):
+    __tablename__ = "nlp_memory_documents"
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    user_id: Mapped[str] = mapped_column(UUID, nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(UUID, nullable=False, index=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    document_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_json: Mapped[dict | list | str] = mapped_column(JSON, nullable=False)
+    revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+
+
+class ToolAuditModel(Base):
+    __tablename__ = "nlp_tool_audits"
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    turn_id: Mapped[str | None] = mapped_column(UUID, index=True)
+    operation_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    actor_id: Mapped[str | None] = mapped_column(UUID)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    result_json: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class RuntimeConfigVersionModel(Base):
+    __tablename__ = "nlp_runtime_config_versions"
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    config_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
