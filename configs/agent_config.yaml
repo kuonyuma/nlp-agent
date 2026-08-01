@@ -2,11 +2,23 @@ defaults:
   coordinator: coordinator-pro
   worker: worker-flash
 
+# MySQL is provisioned through Alembic before application startup. The DSN
+# remains in NLP_AGENT_DATABASE_URL and must never be committed to this file.
+database:
+  driver: mysql
+  dsn_env: NLP_AGENT_DATABASE_URL
+  pool_size: 10
+  max_overflow: 20
+  pool_recycle_s: 1800
+  connect_timeout_s: 5
+  statement_timeout_s: 30
+
 # The local Backend Gateway is the only process allowed to own Agent runtime
 # state. FastAPI/HTTP adapters should connect to it instead of constructing a
 # second LangGraph or Worker runtime.
 gateway:
-  database: .data/gateway/gateway.sqlite3
+  # SQLite is available only to the one-shot migration CLI; no runtime fallback.
+  persistence: mysql
   single_process: true
   stream_queue_size: 500
   shutdown_grace_s: 30

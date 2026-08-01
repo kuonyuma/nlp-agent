@@ -9,7 +9,6 @@ import re
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
@@ -33,6 +32,7 @@ from gateway.dispatch import InProcessTurnDispatcher, TurnDispatcher, TurnTask
 from gateway.engine import AgentEngine, LangGraphAgentEngine
 from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
+from gateway.mysql_repository import MySQLGatewayRepository
 from gateway.turn_execution import InProcessTurnExecutor
 from gateway.redis_transport import RedisEventBridge, RedisTransportConfig, RedisTurnDispatcher
 from server.agent.session_service import LocalSessionService, local_session_service
@@ -62,20 +62,20 @@ class BackendGateway:
         max_events_per_session: int | None = None,
         retention_cleanup_interval_s: float | None = None,
     ) -> None:
-        project = Path(__file__).resolve().parent.parent
         from configs.settings import settings
 
         gateway_config = settings.gateway_runtime
-        database = Path(gateway_config.get("database", ".data/gateway/gateway.sqlite3"))
-        if not database.is_absolute():
-            database = project / database
         self.engine = engine or LangGraphAgentEngine()
-        self.repository = repository or GatewayRepository(
-            database,
-            knowledge_point_prompt_budget=max(
-                1, int(gateway_config.get("knowledge_point_prompt_budget", 12_000))
-            ),
-        )
+        if repository is not None:
+            self.repository = repository
+        elif str(gateway_config.get("persistence", "")).lower() == "mysql":
+            from configs.settings import settings as runtime_settings
+            dsn = runtime_settings.NLP_AGENT_DATABASE_URL.strip()
+            if not dsn:
+                raise RuntimeError("MySQL persistence mode requires NLP_AGENT_DATABASE_URL")
+            self.repository = MySQLGatewayRepository(dsn, knowledge_point_prompt_budget=max(1, int(gateway_config.get("knowledge_point_prompt_budget", 12_000))))
+        else:
+            raise RuntimeError("runtime persistence must be mysql; SQLite is migration-CLI only")
         self.sessions = sessions
         self.events = GatewayEventBroker()
         self._remote_execution = dispatcher is not None or gateway_config.get("transport") == "redis"

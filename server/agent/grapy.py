@@ -7,7 +7,7 @@ Agent 状态图构建模块。
 - 提供 `build_agent()` 工厂函数，构建并返回已编译的 StateGraph 实例。
 - 定义图的结构：Coordinator（决策节点）↔ ToolNode（工具执行节点），
   通过 `tools_condition` 条件边实现有工具调用时循环、无工具调用时终止。
-- 挂载 SQLite 持久化检查点（SqliteSaver），使跨 Worker 通知的多次推理
+- 挂载 MySQL 持久化检查点，使跨 Worker 通知的多次推理
   能共享同一 session 的历史上下文。
 
 Functions:
@@ -27,18 +27,18 @@ Dependencies:
     - `server.tools.task_stop_tool`: 提供 TaskStop 强制终止工具。
 
 Side effects:
-    - 首次调用时会在 `DATA_DIR` 下创建 SQLite 数据库文件（`coordinator_memory.sqlite3`）。
+    - 首次调用时连接已由 Alembic 初始化的 MySQL checkpoint 表。
     - 返回的编译图实例可直接用于 `ainvoke` / `astream` 等 LangGraph 运行时 API。
 """
-import os
-import aiosqlite
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from server.agent.state import AgentState
 from server.tools.task_stop_tool import task_stop_tool
-from server.agent.node.session_storage import DATA_DIR
 from server.agent.node.coordinator import coordinator_node, get_coordinator_toolset
+from server.infrastructure.mysql.config import DatabaseConfig
+from server.infrastructure.mysql.engine import create_engine
+from server.infrastructure.mysql.langgraph_checkpointer import MySQLCheckpointSaver
+from configs.settings import settings
 from server.tools.worker_tool import spawn_worker, send_message
 from server.tools.runtime_tool_node import RuntimeToolNode
 from core.tool_registry import physical_tool_manager
@@ -64,7 +64,7 @@ async def build_agent():
     """
     构建并编译 Agentic 状态图。
     Returns:
-        编译后的 StateGraph 实例，包含 Coordinator 和工具节点，已挂载 SQLite 检查点。
+        编译后的 StateGraph 实例，包含 Coordinator 和 MySQL 检查点。
 
     """
     workflow = StateGraph(AgentState)
@@ -85,12 +85,8 @@ async def build_agent():
         {"coordinator": "coordinator", END: END},
     )
 
-    # 挂载本地 SQLite 作为 Coordinator 的主脑记忆
-    os.makedirs(DATA_DIR, exist_ok=True)
-    db_path = os.path.join(DATA_DIR, "coordinator_memory.sqlite3")
-
-    conn = await aiosqlite.connect(db_path)
-    checkpointer = AsyncSqliteSaver(conn)
+    # LangGraph state is durable MySQL state; schema ownership stays with Alembic.
+    checkpointer = MySQLCheckpointSaver(create_engine(DatabaseConfig.from_runtime(settings.database_runtime)))
 
     compiled = workflow.compile(checkpointer=checkpointer)
-    return compiled, conn
+    return compiled, checkpointer
