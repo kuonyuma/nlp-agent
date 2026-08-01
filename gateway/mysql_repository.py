@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import create_engine, text
@@ -130,19 +130,30 @@ class MySQLGatewayRepository:
     def start_or_resume_guided_session(self, *, session_id: str, workspace_id: str, user_id: str, topic_id: str, first_message: str, guided_blueprint=None):
         key = f"{session_id}:{topic_id}"; current = self._compat("guided", key)
         if current and current.get("status") == "active": return current
-        value = {"id": str(uuid.uuid4()), "session_id": session_id, "workspace_id": workspace_id, "user_id": user_id, "topic_id": topic_id, "status": "active", "attempts": 0, "objective": first_message, "guided_blueprint": guided_blueprint or {}}
+        value = {"id": str(uuid.uuid4()), "session_id": session_id, "workspace_id": workspace_id, "user_id": user_id, "topic_id": topic_id, "status": "active", "attempts": 0, "objective": first_message, "guided_blueprint": guided_blueprint or {}, "updated_at": _now().isoformat()}
         self._compat("guided", key, value); return value
 
     def advance_guided_session(self, guided_session_id: str, **changes: Any):
         with self._engine.connect() as c: key = c.execute(text("SELECT aggregate_id FROM nlp_gateway_compat WHERE namespace='guided' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.id'))=:id LIMIT 1"), {"id": guided_session_id}).scalar()
         if not key: return changes
-        value = self._compat("guided", key) or {}; value.update({k: v for k, v in changes.items() if v is not None}); self._compat("guided", key, value); return value
-    def update_turn_guided_status(self, turn_id: str, *, status: str) -> None: return None
+        value = self._compat("guided", key) or {}; value.update({k: v for k, v in changes.items() if v is not None}); value["updated_at"] = _now().isoformat(); self._compat("guided", key, value); return value
+    def update_turn_guided_status(self, turn_id: str, *, status: str) -> None:
+        with self._engine.begin() as c:
+            c.execute(text("UPDATE nlp_turns SET learning_state_json=JSON_SET(COALESCE(learning_state_json, JSON_OBJECT()), '$.guided_session_status', :status) WHERE id=:id"), {"id": turn_id, "status": status})
     def end_guided_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
         with self._engine.connect() as c: keys = c.execute(text("SELECT aggregate_id FROM nlp_gateway_compat WHERE namespace='guided' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"s": session_id}).scalars().all()
         for key in keys: value = self._compat("guided", key) or {}; value["status"] = status; self._compat("guided", key, value)
         return len(keys)
-    def expire_guided_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int: return 0
+    def expire_guided_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
+        cutoff = _now() - timedelta(minutes=max(1, idle_minutes)); count = 0
+        with self._engine.connect() as c:
+            keys = c.execute(text("SELECT aggregate_id,payload_json FROM nlp_gateway_compat WHERE namespace='guided' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"s": session_id}).all()
+        for key, raw in keys:
+            value = raw if isinstance(raw, dict) else json.loads(raw)
+            updated = datetime.fromisoformat(value.get("updated_at", "1970-01-01T00:00:00+00:00"))
+            if updated < cutoff:
+                value.update(status="expired", completed_at=_now().isoformat(), updated_at=_now().isoformat()); self._compat("guided", key, value); count += 1
+        return count
 
     def start_exercise_session(self, *, session_id: str, workspace_id: str, user_id: str, topic_id: str, mode: str):
         blueprints = self.get_teaching_catalog(workspace_id)["catalog"].get("exercise_blueprints" if mode == "practice" else "review_blueprints", [])
@@ -155,9 +166,27 @@ class MySQLGatewayRepository:
         with self._engine.connect() as c: row = c.execute(text("SELECT payload_json FROM nlp_gateway_compat WHERE namespace='exercise' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.topic_id'))=:t AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.mode'))=:m AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active' LIMIT 1"), {"s": session_id, "t": topic_id, "m": mode}).scalar()
         return row if isinstance(row, dict) else (json.loads(row) if row else None)
     def active_or_latest_exercise_session(self, **kwargs: Any): return self.active_exercise_session(**kwargs)
-    def expire_exercise_sessions(self, **_: Any) -> int: return 0
+    def expire_exercise_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
+        return self._expire_compat_sessions("exercise", session_id, idle_minutes)
     def end_exercise_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
-        return 0
+        return self._update_compat_sessions("exercise", session_id, status)
+
+    def _update_compat_sessions(self, namespace: str, session_id: str, status: str) -> int:
+        with self._engine.connect() as c:
+            rows = c.execute(text("SELECT aggregate_id,payload_json FROM nlp_gateway_compat WHERE namespace=:n AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"n": namespace, "s": session_id}).all()
+        for key, raw in rows:
+            value = raw if isinstance(raw, dict) else json.loads(raw); value.update(status=status, updated_at=_now().isoformat()); self._compat(namespace, key, value)
+        return len(rows)
+
+    def _expire_compat_sessions(self, namespace: str, session_id: str, idle_minutes: int) -> int:
+        cutoff = _now() - timedelta(minutes=max(1, idle_minutes)); count = 0
+        with self._engine.connect() as c:
+            rows = c.execute(text("SELECT aggregate_id,payload_json FROM nlp_gateway_compat WHERE namespace=:n AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"n": namespace, "s": session_id}).all()
+        for key, raw in rows:
+            value = raw if isinstance(raw, dict) else json.loads(raw); updated = datetime.fromisoformat(value.get("updated_at", "1970-01-01T00:00:00+00:00"))
+            if updated < cutoff:
+                value.update(status="expired", updated_at=_now().isoformat()); self._compat(namespace, key, value); count += 1
+        return count
     def exercise_state(self, exercise_session_id: str) -> ExerciseState:
         value = self._compat("exercise", exercise_session_id) or {}; question = value.get("question", "")
         return ExerciseState(question=question, rubric=value.get("rubric", []), attempt=len(value.get("attempts", [])), status="awaiting_answer" if question else "idle")
@@ -168,11 +197,28 @@ class MySQLGatewayRepository:
     def get_user_settings(self, user_id: str): return self._compat("settings", user_id) or {}
     def update_user_settings(self, user_id: str, changes: dict[str, Any]):
         value = {**self.get_user_settings(user_id), **changes}; self._compat("settings", user_id, value); return value
-    def delete_session(self, session_id: str) -> None: return None
+    def delete_session(self, session_id: str) -> None:
+        with self._engine.begin() as c:
+            c.execute(text("DELETE FROM nlp_turn_events WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})
+            c.execute(text("DELETE FROM nlp_turn_cancellations WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})
+            c.execute(text("DELETE FROM nlp_turns WHERE conversation_id=:s"), {"s": session_id})
+            c.execute(text("DELETE FROM nlp_conversation_messages WHERE conversation_id=:s"), {"s": session_id})
+            c.execute(text("DELETE FROM nlp_conversations WHERE id=:s"), {"s": session_id})
+            c.execute(text("DELETE FROM nlp_gateway_compat WHERE JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s"), {"s": session_id})
     def latest_event_sequence(self, turn_id: str) -> int:
         with self._engine.connect() as c: return int(c.execute(text("SELECT COALESCE(MAX(sequence),0) FROM nlp_turn_events WHERE turn_id=:id"), {"id": turn_id}).scalar_one())
-    def recover_interrupted(self): return []
-    def prune_events(self, **_: Any): return {"compacted": 0, "capped": 0, "remaining": 0}
+    def recover_interrupted(self):
+        with self._engine.begin() as c:
+            rows = c.execute(text("SELECT id FROM nlp_turns WHERE status IN ('accepted','running')")).scalars().all()
+            for turn_id in rows:
+                c.execute(text("UPDATE nlp_turns SET status='interrupted',error_kind='gateway_restart',error_message='Gateway restarted before the turn completed.',completed_at=UTC_TIMESTAMP(6) WHERE id=:id"), {"id": turn_id})
+        return [self.get_turn(turn_id) for turn_id in rows if self.get_turn(turn_id) is not None]
+    def prune_events(self, *, retention_days: int, max_events_per_session: int, now: datetime | None = None):
+        cutoff = (now or _now()) - timedelta(days=max(1, retention_days))
+        with self._engine.begin() as c:
+            compacted = c.execute(text("DELETE e FROM nlp_turn_events e JOIN nlp_turns t ON t.id=e.turn_id WHERE e.created_at < :cutoff AND t.status IN ('completed','failed','cancelled','interrupted') AND e.event_type NOT IN ('message.completed','turn.completed','turn.failed','turn.cancelled')"), {"cutoff": cutoff}).rowcount
+            remaining = int(c.execute(text("SELECT COUNT(*) FROM nlp_turn_events")).scalar_one())
+        return {"compacted": int(compacted or 0), "capped": 0, "remaining": remaining}
     def flush(self) -> None: return None
     def health(self):
         with self._engine.connect() as c: count = int(c.execute(text("SELECT COUNT(*) FROM nlp_turn_events")).scalar_one())
