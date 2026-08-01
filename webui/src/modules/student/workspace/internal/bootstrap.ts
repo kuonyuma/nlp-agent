@@ -4,7 +4,7 @@ import { ApiError, api, ensureAuth } from "@/platform/http/api";
 import type { AuthSession, UserSettings } from "@/shared/types";
 import { resolveWorkspaceId } from "@/shared/utils/workspace";
 
-import { DEFAULT_SETTINGS } from "./settings-controller";
+import { DEFAULT_SETTINGS } from "./constants";
 
 interface BootstrapOptions {
   authRevision: number;

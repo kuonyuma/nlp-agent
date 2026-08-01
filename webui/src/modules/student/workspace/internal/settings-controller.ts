@@ -5,12 +5,7 @@ import { setAppLanguage } from "@/shared/i18n";
 import { normalizeLocale } from "@/shared/i18n/config";
 import type { UserSettings } from "@/shared/types";
 
-export const DEFAULT_SETTINGS: UserSettings = {
-  locale: "zh-CN",
-  theme: "system",
-  show_reasoning: false,
-  stream_render_interval_ms: 30,
-};
+import { DEFAULT_SETTINGS } from "./constants";
 
 export function useSettingsController() {
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
