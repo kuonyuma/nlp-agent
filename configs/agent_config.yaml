@@ -16,10 +16,9 @@ database:
 # The local Backend Gateway is the only process allowed to own Agent runtime
 # state. FastAPI/HTTP adapters should connect to it instead of constructing a
 # second LangGraph or Worker runtime.
-  gateway:
-    database: .data/gateway/gateway.sqlite3
-    # Set to mysql only during the approved maintenance-window cutover.
-    persistence: sqlite
+gateway:
+  # SQLite is available only to the one-shot migration CLI; no runtime fallback.
+  persistence: mysql
   single_process: true
   stream_queue_size: 500
   shutdown_grace_s: 30

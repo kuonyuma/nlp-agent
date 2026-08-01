@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, cast
 
-from gateway.repository import GatewayRepository
+from gateway.mysql_repository import MySQLGatewayRepository
 from gateway.state import TurnExecutionState
 
 
@@ -26,12 +25,11 @@ def build_turn_execution_state(config: dict[str, Any]) -> TurnExecutionState:
         )
         return factory(config)
 
-    database = Path(str(config.get("database", ".data/gateway/gateway.sqlite3")))
-    if not database.is_absolute():
-        database = Path(__file__).resolve().parent.parent / database
-    return GatewayRepository(
-        database,
-        knowledge_point_prompt_budget=max(
-            1, int(config.get("knowledge_point_prompt_budget", 12_000))
-        ),
-    )
+    if str(config.get("persistence", "")).lower() != "mysql":
+        raise RuntimeError("runtime persistence must be mysql; SQLite is migration-CLI only")
+    from configs.settings import settings
+
+    url = settings.NLP_AGENT_DATABASE_URL.strip()
+    if not url:
+        raise RuntimeError("NLP_AGENT_DATABASE_URL is required for MySQL worker state")
+    return MySQLGatewayRepository(url, knowledge_point_prompt_budget=max(1, int(config.get("knowledge_point_prompt_budget", 12_000))))

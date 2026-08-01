@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -12,16 +11,11 @@ from configs.settings import settings
 from core.identity import AuthenticatedPrincipal
 from core.observability.runtime import TelemetryRuntime
 from core.session_context import local_context_repository
-from gateway.repository import GatewayRepository
+from gateway.mysql_repository import MySQLGatewayRepository
 from server.agent.node.session_storage import DATA_DIR as WORKER_SESSIONS_DIR
 from server.agent.session_service import local_session_service
 from server.agent.session_storage import CHAT_HISTORY_DIR, _save_sessions_index
 from server.memory.manager import MEMORY_DIR
-
-
-def _gateway_database_path() -> Path:
-    path = Path(str(settings.gateway_runtime.get("database", ".data/gateway/gateway.sqlite3")))
-    return path if path.is_absolute() else settings.BASE_DIR / path
 
 
 def _clear_directory(path: str | Path, *, preserve_names: set[str] | frozenset[str] = frozenset()) -> int:
@@ -41,24 +35,22 @@ def _clear_directory(path: str | Path, *, preserve_names: set[str] | frozenset[s
 
 
 def _clear_checkpoints() -> int:
-    path = Path(WORKER_SESSIONS_DIR) / "coordinator_memory.sqlite3"
-    if not path.exists():
-        return 0
-    with sqlite3.connect(path, timeout=5) as connection:
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        targets = tables & {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "blobs", "writes"}
-        count = sum(int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in targets)
-        for table in targets:
-            connection.execute(f"DELETE FROM {table}")
-    return count
+    # Checkpoints are owned by MySQL and removed by the LangGraph saver on session deletion.
+    return 0
 
 
 class LocalRuntimeResetter:
     """Coordinates reset across the otherwise separate monitor and chat processes."""
 
-    def __init__(self, runtime: TelemetryRuntime, gateway_repository: GatewayRepository | None = None) -> None:
+    def __init__(self, runtime: TelemetryRuntime, gateway_repository: MySQLGatewayRepository | None = None) -> None:
         self.runtime = runtime
-        self.gateway_repository = gateway_repository or GatewayRepository(_gateway_database_path())
+        if gateway_repository is not None:
+            self.gateway_repository = gateway_repository
+        else:
+            dsn = settings.NLP_AGENT_DATABASE_URL.strip()
+            if not dsn:
+                raise RuntimeError("NLP_AGENT_DATABASE_URL is required for runtime reset")
+            self.gateway_repository = MySQLGatewayRepository(dsn)
 
     async def reset(self) -> dict[str, Any]:
         principal = AuthenticatedPrincipal.system_admin()
@@ -74,21 +66,13 @@ class LocalRuntimeResetter:
 
     @staticmethod
     def _clear_orphaned_runtime_files() -> dict[str, int]:
-        checkpoint_names = {
-            "coordinator_memory.sqlite3",
-            "coordinator_memory.sqlite3-shm",
-            "coordinator_memory.sqlite3-wal",
-        }
         files = {
             "chat_history": _clear_directory(CHAT_HISTORY_DIR),
-            # The chat process owns this SQLite database and can keep its file
-            # handle open on Windows. Clear its checkpoint rows instead of
-            # unlinking the database or its WAL companions.
-            "worker_sessions": _clear_directory(WORKER_SESSIONS_DIR, preserve_names=checkpoint_names),
+            "worker_sessions": _clear_directory(WORKER_SESSIONS_DIR),
             "session_contexts": _clear_directory(local_context_repository.root),
             "memory": _clear_directory(MEMORY_DIR),
             "tool_audit": _clear_directory(settings.BASE_DIR / ".data" / "tool-audit"),
         }
         _save_sessions_index({"active_session": None, "sessions": {}})
-        files["checkpoints"] = _clear_checkpoints()
+        files["checkpoints"] = 0
         return files

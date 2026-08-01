@@ -252,7 +252,10 @@ class LangGraphAgentEngine:
         await physical_tool_manager.close()
         await global_telemetry.close()
         if self._connection is not None:
-            await self._connection.close()
+            if hasattr(self._connection, "aclose"):
+                await self._connection.aclose()
+            elif hasattr(self._connection, "close"):
+                await self._connection.close()
         self._runtime = None
         self._app = None
         self._connection = None

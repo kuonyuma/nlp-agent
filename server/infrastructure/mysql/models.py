@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.mysql import BIGINT, DATETIME
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -301,6 +301,52 @@ class AgentCheckpointModel(TimestampedModel, Base):
     checkpoint_id: Mapped[str] = mapped_column(String(128), nullable=False)
     checkpoint_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class LangGraphCheckpointModel(Base):
+    """Opaque LangGraph checkpoint envelope; payloads are serde-owned binary values."""
+    __tablename__ = "nlp_langgraph_checkpoints"
+    __table_args__ = (UniqueConstraint("thread_id", "checkpoint_ns", "checkpoint_id", name="uq_nlp_langgraph_checkpoint"),)
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
+    checkpoint_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    parent_checkpoint_id: Mapped[str | None] = mapped_column(String(128))
+    checkpoint_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    checkpoint_blob: Mapped[bytes] = mapped_column(LargeBinary(length=16_777_215), nullable=False)
+    metadata_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    metadata_blob: Mapped[bytes] = mapped_column(LargeBinary(length=16_777_215), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class LangGraphCheckpointBlobModel(Base):
+    __tablename__ = "nlp_langgraph_checkpoint_blobs"
+    __table_args__ = (UniqueConstraint("thread_id", "checkpoint_ns", "channel", "version", name="uq_nlp_langgraph_checkpoint_blob"),)
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
+    channel: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[str] = mapped_column(String(128), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    value_blob: Mapped[bytes] = mapped_column(LargeBinary(length=16_777_215), nullable=False)
+
+
+class LangGraphCheckpointWriteModel(Base):
+    __tablename__ = "nlp_langgraph_checkpoint_writes"
+    __table_args__ = (UniqueConstraint("thread_id", "checkpoint_ns", "checkpoint_id", "task_id", "write_index", name="uq_nlp_langgraph_checkpoint_write"),)
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
+    checkpoint_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    write_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    channel: Mapped[str] = mapped_column(String(128), nullable=False)
+    value_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    value_blob: Mapped[bytes] = mapped_column(LargeBinary(length=16_777_215), nullable=False)
+    task_path: Mapped[str] = mapped_column(String(512), nullable=False, server_default="")
 
 
 class ConversationTranscriptModel(Base):
