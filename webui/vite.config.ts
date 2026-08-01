@@ -40,6 +40,7 @@ export default defineConfig(({ mode }) => {
       environment: "happy-dom",
       globals: true,
       setupFiles: ["./src/tests/setup.ts"],
+      maxWorkers: 4,
     },
   };
 });

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import inspect
 import json
 import re
 import uuid
@@ -15,7 +14,7 @@ from typing import Any
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
 from core.session_context import SessionContext
-from core.learning import ExerciseState, LearningContext, TeachingMaterials, default_progress
+from core.learning import LearningContext, TeachingMaterials, default_progress
 from gateway.contracts import (
     GatewayEvent,
     GatewayEventType,
@@ -30,42 +29,19 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
+from gateway.dispatch import InProcessTurnDispatcher, TurnDispatcher, TurnTask
 from gateway.engine import AgentEngine, LangGraphAgentEngine
 from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
+from gateway.turn_execution import InProcessTurnExecutor
+from gateway.redis_transport import RedisEventBridge, RedisTransportConfig, RedisTurnDispatcher
 from server.agent.session_service import LocalSessionService, local_session_service
 
 
-_EXERCISE_RESULT_RE = re.compile(r"<!--\s*exercise-result:\s*(\{.*?\})\s*-->", re.DOTALL)
-_GUIDED_RESULT_RE = re.compile(r"<!--\s*guided-result:\s*(\{.*?\})\s*-->", re.DOTALL)
 _EXPLICIT_EXERCISE_START_RE = re.compile(
     r"(?:开始|继续|新(?:的)?|再来|下一).{0,8}(?:练习|复习|题)|(?:练习|复习).{0,8}(?:开始|继续|下一题)",
     re.IGNORECASE,
 )
-
-
-def _extract_exercise_result(text: str) -> tuple[str, dict[str, Any] | None]:
-    """Remove the hidden model envelope and return its validated JSON object when present."""
-    match = _EXERCISE_RESULT_RE.search(text)
-    if match is None:
-        return text.strip(), None
-    try:
-        value = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return text.strip(), None
-    return _EXERCISE_RESULT_RE.sub("", text).strip(), value if isinstance(value, dict) else None
-
-
-def _extract_guided_result(text: str) -> tuple[str, dict[str, Any] | None]:
-    match = _GUIDED_RESULT_RE.search(text)
-    if match is None:
-        return text.strip(), None
-    try:
-        value = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return _GUIDED_RESULT_RE.sub("", text).strip(), None
-    return _GUIDED_RESULT_RE.sub("", text).strip(), value if isinstance(value, dict) else None
-
 
 def _is_explicit_exercise_start(content: str) -> bool:
     return bool(_EXPLICIT_EXERCISE_START_RE.search(content.strip()))
@@ -78,6 +54,7 @@ class BackendGateway:
         self,
         *,
         engine: AgentEngine | None = None,
+        dispatcher: TurnDispatcher | None = None,
         repository: GatewayRepository | None = None,
         sessions: LocalSessionService = local_session_service,
         shutdown_grace_s: float | None = None,
@@ -93,9 +70,6 @@ class BackendGateway:
         if not database.is_absolute():
             database = project / database
         self.engine = engine or LangGraphAgentEngine()
-        engine_parameter_count = len(inspect.signature(self.engine.run_turn).parameters)
-        self._engine_accepts_learning = engine_parameter_count >= 6
-        self._engine_accepts_teaching_materials = engine_parameter_count >= 7
         self.repository = repository or GatewayRepository(
             database,
             knowledge_point_prompt_budget=max(
@@ -104,7 +78,38 @@ class BackendGateway:
         )
         self.sessions = sessions
         self.events = GatewayEventBroker()
-        self._turn_tasks: dict[str, asyncio.Task[None]] = {}
+        self._remote_execution = dispatcher is not None or gateway_config.get("transport") == "redis"
+        self._event_bridge = None
+        if dispatcher is None and self._remote_execution:
+            redis_config = RedisTransportConfig(
+                url=str(gateway_config.get("redis_url", "redis://127.0.0.1:6379/0")),
+                task_stream=str(gateway_config.get("redis_turn_stream", "nlp-agent:turns")),
+                task_group=str(gateway_config.get("redis_turn_group", "nlp-agent-workers")),
+                event_channel=str(gateway_config.get("redis_event_channel", "nlp-agent:events")),
+                control_channel=str(gateway_config.get("redis_control_channel", "nlp-agent:control")),
+                reclaim_idle_ms=int(gateway_config.get("redis_reclaim_idle_ms", 60_000)),
+                cancel_key_prefix=str(
+                    gateway_config.get("redis_cancel_key_prefix", "nlp-agent:cancel:")
+                ),
+                cancel_ttl_s=int(gateway_config.get("redis_cancel_ttl_s", 604_800)),
+                dead_letter_stream=str(
+                    gateway_config.get(
+                        "redis_dead_letter_stream", "nlp-agent:turns:dead"
+                    )
+                ),
+            )
+            self.dispatcher = RedisTurnDispatcher.from_config(redis_config)
+            self._event_bridge = RedisEventBridge(
+                self.dispatcher.client,
+                redis_config,
+                self.events,
+                observe=self.dispatcher.observe,
+            )
+        else:
+            executor = InProcessTurnExecutor(
+                self.engine, self.repository, self._emit_from_engine
+            )
+            self.dispatcher = dispatcher or InProcessTurnDispatcher(executor.run)
         self._session_turn_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.shutdown_grace_s = max(
             0.0,
@@ -148,8 +153,11 @@ class BackendGateway:
         async with self._lifecycle_lock:
             if self._started:
                 return
-            await self.engine.start(self._emit_from_engine)
-            interrupted = await asyncio.to_thread(self.repository.recover_interrupted)
+            if not self._remote_execution:
+                await self.engine.start(self._emit_from_engine)
+            if self._event_bridge is not None:
+                await self._event_bridge.start()
+            interrupted = [] if self._remote_execution else await asyncio.to_thread(self.repository.recover_interrupted)
             for turn in interrupted:
                 await self._emit(
                     turn.turn_id,
@@ -227,7 +235,10 @@ class BackendGateway:
                 session_id=context.session_id,
                 idempotency_key=request.idempotency_key,
             )
-            if existing is not None:
+            if existing is not None and not (
+                existing.status == TurnStatus.FAILED
+                and existing.error_kind == "dispatch_failed"
+            ):
                 return TurnAccepted(
                     turn_id=existing.turn_id,
                     session_id=existing.session_id,
@@ -362,12 +373,21 @@ class BackendGateway:
             guided_session_status=str(guided_session.get("status") or "active"),
             exercise_state=exercise,
         )
-        if duplicate:
+        resubmitted = bool(
+            duplicate
+            and turn.status == TurnStatus.FAILED
+            and turn.error_kind == "dispatch_failed"
+        )
+        if duplicate and not resubmitted:
             return TurnAccepted(
                 turn_id=turn.turn_id,
                 session_id=turn.session_id,
                 status=turn.status,
                 duplicate=True,
+            )
+        if resubmitted:
+            turn = await asyncio.to_thread(
+                self.repository.update_turn, turn.turn_id, TurnStatus.ACCEPTED
             )
         await self._emit(
             turn.turn_id,
@@ -375,143 +395,45 @@ class BackendGateway:
             GatewayEventType.TURN_ACCEPTED,
             {"status": TurnStatus.ACCEPTED.value},
         )
-        task = asyncio.create_task(
-            self._run_turn(
-                context, turn.turn_id, request.content, learning_context, progress,
-                exercise, teaching_materials, guided_session.get("id"),
-                teaching_session.get("id") if teaching_session is not None else None,
-            ),
-            name=f"gateway-turn:{turn.turn_id}",
-        )
-        self._turn_tasks[turn.turn_id] = task
-        task.add_done_callback(lambda _task, tid=turn.turn_id: self._turn_tasks.pop(tid, None))
-        return TurnAccepted(
-            turn_id=turn.turn_id,
-            session_id=context.session_id,
-            status=TurnStatus.ACCEPTED,
-        )
-
-    async def _run_turn(
-        self, context: SessionContext, turn_id: str, content: str,
-        learning_context: LearningContext | None, progress, exercise,
-        teaching_materials: TeachingMaterials, guided_session_id: str | None,
-        exercise_session_id: str | None,
-    ) -> None:
-        await asyncio.to_thread(
-            self.repository.update_turn, turn_id, TurnStatus.RUNNING
-        )
-        await self._emit(
-            turn_id,
-            context.session_id,
-            GatewayEventType.TURN_STARTED,
-            {"status": TurnStatus.RUNNING.value},
-        )
+        task = TurnTask(
+                context=context,
+                turn_id=turn.turn_id,
+                content=request.content,
+                learning_context=learning_context,
+                learning_progress=progress,
+                exercise_state=exercise,
+                teaching_materials=teaching_materials,
+                guided_session_id=guided_session.get("id"),
+                exercise_session_id=(
+                    teaching_session.get("id") if teaching_session is not None else None
+                ),
+            )
         try:
-            if self._engine_accepts_teaching_materials:
-                final_text = await self.engine.run_turn(
-                    context, turn_id, content,
-                    learning_context=learning_context,
-                    learning_progress=progress,
-                    exercise_state=exercise,
-                    teaching_materials=teaching_materials,
-                )
-            elif self._engine_accepts_learning:
-                final_text = await self.engine.run_turn(
-                    context, turn_id, content,
-                    learning_context=learning_context,
-                    learning_progress=progress,
-                    exercise_state=exercise,
-                )
-            else:
-                final_text = await self.engine.run_turn(context, turn_id, content)
-        except asyncio.CancelledError:
-            await self.engine.cancel_turn(context, turn_id)
-            await asyncio.to_thread(
-                self.repository.update_turn, turn_id, TurnStatus.CANCELLED
-            )
-            await self._emit(
-                turn_id,
-                context.session_id,
-                GatewayEventType.TURN_CANCELLED,
-                {"status": TurnStatus.CANCELLED.value},
-            )
-            raise
+            await self.dispatcher.submit(task)
         except Exception as error:
             await asyncio.to_thread(
                 self.repository.update_turn,
-                turn_id,
+                turn.turn_id,
                 TurnStatus.FAILED,
-                error_kind=type(error).__name__,
+                error_kind="dispatch_failed",
                 error_message=str(error),
             )
             await self._emit(
-                turn_id,
+                turn.turn_id,
                 context.session_id,
                 GatewayEventType.TURN_FAILED,
                 {
                     "status": TurnStatus.FAILED.value,
-                    "error_kind": type(error).__name__,
+                    "error_kind": "dispatch_failed",
                     "message": str(error)[:500],
                 },
             )
-            return
-        if guided_session_id is not None:
-            final_text, guided_result = _extract_guided_result(final_text)
-            await asyncio.to_thread(
-                self.repository.advance_guided_session,
-                guided_session_id,
-                tutor_message=final_text,
-                known_concepts=(guided_result or {}).get("known_concepts"),
-                misconceptions=(guided_result or {}).get("misconceptions"),
-                completed=(guided_result or {}).get("status") == "completed",
-            )
-            await asyncio.to_thread(
-                self.repository.update_turn_guided_status,
-                turn_id,
-                status="completed" if (guided_result or {}).get("status") == "completed" else "active",
-            )
-        final_exercise_state = exercise
-        if exercise_session_id is not None and exercise is not None:
-            final_text, exercise_result = _extract_exercise_result(final_text)
-            try:
-                if exercise.status == "idle":
-                    question = str((exercise_result or {}).get("question") or final_text).strip()
-                    await asyncio.to_thread(
-                        self.repository.record_exercise_question, exercise_session_id, question
-                    )
-                    final_exercise_state = await asyncio.to_thread(
-                        self.repository.exercise_state, exercise_session_id
-                    )
-                elif exercise.status == "awaiting_answer" and exercise_result and exercise_result.get("kind") == "grading":
-                    matches = exercise_result.get("matches")
-                    if not isinstance(matches, list):
-                        raise ValueError("grading result must contain rubric matches")
-                    final_exercise_state = await asyncio.to_thread(
-                        self.repository.grade_exercise_answer,
-                        exercise_session_id, answer=content, matches=matches,
-                        feedback=str(exercise_result.get("feedback") or ""),
-                    )
-            except ValueError:
-                # The chat answer remains available, but an invalid model envelope must never mutate learning records.
-                pass
-        await asyncio.to_thread(
-            self.repository.update_turn,
-            turn_id,
-            TurnStatus.COMPLETED,
-            final_text=final_text,
-            exercise_state=final_exercise_state,
-        )
-        await self._emit(
-            turn_id,
-            context.session_id,
-            GatewayEventType.MESSAGE_COMPLETED,
-            {"content": final_text},
-        )
-        await self._emit(
-            turn_id,
-            context.session_id,
-            GatewayEventType.TURN_COMPLETED,
-            {"status": TurnStatus.COMPLETED.value, "content": final_text},
+            raise
+        return TurnAccepted(
+            turn_id=turn.turn_id,
+            session_id=context.session_id,
+            status=TurnStatus.ACCEPTED,
+            duplicate=resubmitted,
         )
 
     async def inject_message(
@@ -519,7 +441,15 @@ class BackendGateway:
     ) -> TurnAccepted:
         self._require_started()
         context = await self.sessions.resolve(principal, request.session_id)
-        turn_id = await self.engine.inject(context, request.content)
+        if self._remote_execution:
+            active = await asyncio.to_thread(
+                self.repository.active_turn_for_session, context.session_id
+            )
+            turn_id = active.turn_id if active is not None else None
+            if turn_id is not None and hasattr(self.dispatcher, "inject"):
+                await self.dispatcher.inject(turn_id, request.content)
+        else:
+            turn_id = await self.engine.inject(context, request.content)
         if turn_id is None:
             raise TurnConflictError("session has no active turn")
         await self._emit(
@@ -542,11 +472,7 @@ class BackendGateway:
         if turn.status not in {TurnStatus.ACCEPTED, TurnStatus.RUNNING}:
             return turn
         context = await self.sessions.resolve(principal, turn.session_id)
-        await self.engine.cancel_turn(context, turn_id)
-        task = self._turn_tasks.get(turn_id)
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await self.dispatcher.cancel(turn_id)
         updated = await asyncio.to_thread(self.repository.get_turn, turn_id)
         return updated or turn
 
@@ -789,7 +715,7 @@ class BackendGateway:
             status="ok" if self._started else "stopped",
             started=self._started,
             accepting_turns=self._accepting,
-            active_turns=sum(not task.done() for task in self._turn_tasks.values()),
+            active_turns=self.dispatcher.active_count(),
             subscribers=self.events.subscriber_count,
             database=repository["database"],
             durable_events=repository["durable_events"],
@@ -806,20 +732,14 @@ class BackendGateway:
             if self._maintenance_task is not None:
                 await asyncio.gather(self._maintenance_task, return_exceptions=True)
                 self._maintenance_task = None
-            tasks = [task for task in self._turn_tasks.values() if not task.done()]
-            pending = set(tasks)
-            if pending and not force and self.shutdown_grace_s > 0:
-                _done, pending = await asyncio.wait(
-                    pending,
-                    timeout=self.shutdown_grace_s,
-                )
-            for task in pending:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            await self.engine.close()
+            if self._event_bridge is not None:
+                await self._event_bridge.close()
+            await self.dispatcher.close(
+                force=force, grace_s=self.shutdown_grace_s
+            )
+            if not self._remote_execution:
+                await self.engine.close()
             await asyncio.to_thread(self.repository.flush)
             self.repository.close()
-            self._turn_tasks.clear()
             self._session_turn_locks.clear()
             self._started = False

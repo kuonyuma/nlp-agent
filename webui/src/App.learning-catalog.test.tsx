@@ -8,8 +8,8 @@ const api = vi.hoisted(() => ({
     .mockResolvedValueOnce({ catalog: { topics: [] } }),
 }));
 
-vi.mock("@/lib/websocket-client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
-vi.mock("@/lib/api", () => ({ ensureAuth: vi.fn().mockResolvedValue({}), api }));
+vi.mock("@/platform/realtime/client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
+vi.mock("@/platform/http/api", () => ({ ensureAuth: vi.fn().mockResolvedValue({}), api }));
 
 import { App } from "./App";
 

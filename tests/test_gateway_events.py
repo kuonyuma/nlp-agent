@@ -1,5 +1,7 @@
+import pytest
+
 from gateway.contracts import GatewayEvent, GatewayEventType
-from gateway.events import GatewayEventBroker
+from gateway.events import GatewayEventBroker, GatewayEventStreamInterrupted
 
 
 def test_live_queue_keeps_latest_event_when_full():
@@ -23,3 +25,12 @@ def test_live_queue_keeps_latest_event_when_full():
     assert broker.publish(first) == 0
     assert broker.publish(terminal) == 1
     assert queue.get_nowait() == terminal
+
+
+async def test_interrupt_all_requires_subscribers_to_replay_durable_events():
+    broker = GatewayEventBroker()
+    subscription = broker.open_subscription(session_id="session-1")
+
+    assert broker.interrupt_all() == 1
+    with pytest.raises(GatewayEventStreamInterrupted):
+        await subscription.__anext__()

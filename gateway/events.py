@@ -8,9 +8,16 @@ from dataclasses import dataclass
 from gateway.contracts import GatewayEvent
 
 
+class GatewayEventStreamInterrupted(RuntimeError):
+    """Live transport was interrupted; consumers must replay durable events."""
+
+
+_INTERRUPTED = object()
+
+
 @dataclass(slots=True)
 class _Subscription:
-    queue: asyncio.Queue[GatewayEvent]
+    queue: asyncio.Queue[GatewayEvent | object]
     turn_id: str | None
     session_id: str | None
 
@@ -22,7 +29,7 @@ class GatewayEventSubscription:
         self,
         broker: "GatewayEventBroker",
         subscription_id: int,
-        queue: asyncio.Queue[GatewayEvent],
+        queue: asyncio.Queue[GatewayEvent | object],
     ) -> None:
         self._broker = broker
         self._subscription_id = subscription_id
@@ -35,7 +42,12 @@ class GatewayEventSubscription:
     async def __anext__(self) -> GatewayEvent:
         if self._closed:
             raise StopAsyncIteration
-        return await self._queue.get()
+        event = await self._queue.get()
+        if event is _INTERRUPTED:
+            raise GatewayEventStreamInterrupted(
+                "live event transport interrupted; replay durable events"
+            )
+        return event
 
     async def close(self) -> None:
         if self._closed:
@@ -55,10 +67,10 @@ class GatewayEventBroker:
         turn_id: str | None = None,
         session_id: str | None = None,
         maxsize: int = 500,
-    ) -> tuple[int, asyncio.Queue[GatewayEvent]]:
+    ) -> tuple[int, asyncio.Queue[GatewayEvent | object]]:
         if turn_id is None and session_id is None:
             raise ValueError("turn_id or session_id is required")
-        queue: asyncio.Queue[GatewayEvent] = asyncio.Queue(maxsize=maxsize)
+        queue: asyncio.Queue[GatewayEvent | object] = asyncio.Queue(maxsize=maxsize)
         subscription_id = self._next_id
         self._next_id += 1
         self._subscriptions[subscription_id] = _Subscription(queue, turn_id, session_id)
@@ -100,6 +112,21 @@ class GatewayEventBroker:
                     pass
                 dropped += 1
         return dropped
+
+    def interrupt_all(self) -> int:
+        """Wake live subscribers so network adapters force a durable replay."""
+        interrupted = 0
+        for subscription in tuple(self._subscriptions.values()):
+            try:
+                subscription.queue.put_nowait(_INTERRUPTED)
+            except asyncio.QueueFull:
+                try:
+                    subscription.queue.get_nowait()
+                    subscription.queue.put_nowait(_INTERRUPTED)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    continue
+            interrupted += 1
+        return interrupted
 
     @property
     def subscriber_count(self) -> int:

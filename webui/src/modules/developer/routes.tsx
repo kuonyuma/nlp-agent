@@ -1,0 +1,24 @@
+import { Route, Routes, useNavigate } from "react-router-dom";
+
+import { NotFoundPage } from "@/app/NotFoundPage";
+import { DeveloperWorkspace, type DeveloperPage } from "@/modules/developer/workspace/DeveloperWorkspace";
+
+export function DeveloperRoutes() {
+  const navigate = useNavigate();
+  const page = (next: DeveloperPage) => navigate(next === "overview" ? "/developer" : `/developer/${next}`);
+  return (
+    <Routes>
+      <Route index element={<DeveloperWorkspace page="overview" onNavigate={page} />} />
+      <Route path="agents" element={<DeveloperWorkspace page="agents" onNavigate={page} />} />
+      <Route path="tools" element={<DeveloperWorkspace page="tools" onNavigate={page} />} />
+      <Route path="models" element={<DeveloperWorkspace page="models" onNavigate={page} />} />
+      <Route path="mcp" element={<DeveloperWorkspace page="mcp" onNavigate={page} />} />
+      <Route path="skills" element={<DeveloperWorkspace page="skills" onNavigate={page} />} />
+      <Route path="automations" element={<DeveloperWorkspace page="automations" onNavigate={page} />} />
+      <Route path="settings" element={<DeveloperWorkspace page="settings" onNavigate={page} />} />
+      <Route path="*" element={<NotFoundPage />} />
+    </Routes>
+  );
+}
+
+export default DeveloperRoutes;

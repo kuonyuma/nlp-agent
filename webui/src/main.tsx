@@ -2,11 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import faviconUrl from "../logo/nova_32x32.png";
 
-import "./i18n";
-import { StaticUiBridge } from "./i18n/StaticUiBridge";
-import { App } from "./App";
-import { AppErrorBoundary } from "./components/AppErrorBoundary";
-import "./styles.css";
+import { App } from "./app/App";
+import "./app/styles.css";
 
 const favicon = document.querySelector<HTMLLinkElement>("#app-favicon");
 if (favicon) {
@@ -28,6 +25,6 @@ if (favicon) {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <StaticUiBridge><AppErrorBoundary><App /></AppErrorBoundary></StaticUiBridge>
+    <App />
   </React.StrictMode>,
 );
