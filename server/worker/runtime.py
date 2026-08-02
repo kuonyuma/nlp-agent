@@ -15,6 +15,7 @@ from gateway.redis_transport import (
 )
 from gateway.state_factory import build_turn_execution_state
 from gateway.turn_execution import InProcessTurnExecutor
+from server.infrastructure.mysql import MySQLRuntime
 
 
 def redis_config() -> RedisTransportConfig:
@@ -39,6 +40,8 @@ def redis_config() -> RedisTransportConfig:
 async def run_worker() -> None:
     from redis.asyncio import Redis
 
+    database_runtime = MySQLRuntime.from_runtime(settings.database_runtime)
+    await database_runtime.start()
     config = redis_config()
     redis = Redis.from_url(config.url, decode_responses=True)
     gateway_config = settings.gateway_runtime
@@ -133,3 +136,4 @@ async def run_worker() -> None:
         await engine.close()
         repository.close()
         await redis.aclose()
+        await database_runtime.close()

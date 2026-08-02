@@ -23,6 +23,7 @@ from gateway.contracts import (
     TurnConflictError,
 )
 from gateway.core import BackendGateway
+from server.infrastructure.mysql import MySQLRuntime
 from server.web.auth import (
     AuthenticationError,
     CsrfRejectedError,
@@ -142,6 +143,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        database_runtime = (
+            MySQLRuntime.from_runtime(settings.database_runtime)
+            if gateway_factory is BackendGateway
+            else None
+        )
+        if database_runtime is not None:
+            await database_runtime.start()
+            app.state.database = database_runtime
         gateway = gateway_factory()
         app.state.gateway = gateway
         await gateway.start()
@@ -151,6 +160,8 @@ def create_app(
             await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()
+            if database_runtime is not None:
+                await database_runtime.close()
 
     app = FastAPI(
         title="NLP Agent Web API",
