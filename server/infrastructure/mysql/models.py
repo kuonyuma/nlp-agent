@@ -305,6 +305,30 @@ class DeadLetterModel(Base):
     last_failed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, server_default=func.utc_timestamp(6))
 
 
+class GatewayCompatModel(TimestampedModel, Base):
+    """Historical schema declaration needed when Alembic replays revision 05.
+
+    Runtime code must not use this retired projection; revision 20260802_11
+    drops the table after its normalized replacements have been created.
+    """
+
+    __tablename__ = "nlp_gateway_compat"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace",
+            "aggregate_id",
+            name="uq_nlp_gateway_compat_namespace_aggregate",
+        ),
+    )
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    aggregate_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    revision: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False, server_default="0"
+    )
+
+
 class AgentCheckpointModel(TimestampedModel, Base):
     __tablename__ = "nlp_agent_checkpoints"
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
