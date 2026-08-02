@@ -113,7 +113,19 @@ class OutboxRelay:
             row.status, row.locked_by, row.locked_until, row.attempts = "publishing", self._relay_id, now + timedelta(seconds=self._lock_s), row.attempts + 1
         await session.flush()
         for row in rows:
-            redis_id = await self._redis.xadd(self._stream, {"topic": row.topic, "payload": __import__("json").dumps(row.payload_json, ensure_ascii=False)})
+            if row.topic == "turn.dispatch":
+                task_payload = row.payload_json.get("task")
+                if not isinstance(task_payload, str):
+                    raise ValueError("turn.dispatch outbox payload requires an encoded task")
+                fields = {"payload": task_payload}
+            else:
+                fields = {
+                    "topic": row.topic,
+                    "payload": __import__("json").dumps(
+                        row.payload_json, ensure_ascii=False
+                    ),
+                }
+            redis_id = await self._redis.xadd(self._stream, fields)
             row.status, row.redis_message_id, row.published_at, row.locked_until = "published", str(redis_id), utc_now(), None
         await session.flush()
         return len(rows)

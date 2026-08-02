@@ -56,3 +56,65 @@ async def test_operation_replay_uses_stable_turn_operation_identity() -> None:
 
     assert restored is operation
     session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_outbox_relay_publishes_turn_task_in_worker_stream_format() -> None:
+    from server.application.turn_reliability import OutboxRelay
+
+    row = MagicMock(
+        id="outbox-1",
+        topic="turn.dispatch",
+        payload_json={"task": "encoded-turn-task"},
+        attempts=0,
+    )
+    rows = MagicMock()
+    rows.all.return_value = [row]
+    session = AsyncMock()
+    session.scalars.return_value = rows
+    redis = AsyncMock()
+    redis.xadd.return_value = "1-0"
+
+    published = await OutboxRelay(redis, stream="turns", relay_id="relay-1").publish_batch(session)
+
+    assert published == 1
+    redis.xadd.assert_awaited_once_with("turns", {"payload": "encoded-turn-task"})
+    assert row.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_outbox_dispatcher_persists_encoded_task_before_transport_publish() -> None:
+    from core.learning import TeachingMaterials
+    from core.session_context import SessionContext
+    from gateway.dispatch import TurnTask
+    from gateway.outbox_dispatcher import OutboxTurnDispatcher
+
+    session = AsyncMock()
+    unit_of_work = AsyncMock()
+    unit_of_work.session = session
+    unit_of_work.__aenter__.return_value = unit_of_work
+    factory = MagicMock()
+    factory.begin.return_value = unit_of_work
+    reliability = AsyncMock()
+    transport = AsyncMock()
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"),
+        turn_id="turn-1",
+        content="hello",
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        teaching_materials=TeachingMaterials(),
+        guided_session_id=None,
+        exercise_session_id=None,
+    )
+
+    dispatcher = OutboxTurnDispatcher(factory, reliability, transport)
+    await dispatcher.submit(task)
+
+    reliability.enqueue.assert_awaited_once()
+    kwargs = reliability.enqueue.await_args.kwargs
+    assert kwargs["topic"] == "turn.dispatch"
+    assert isinstance(kwargs["payload"]["task"], str)
+    unit_of_work.commit.assert_awaited_once()
+    transport.submit.assert_not_awaited()

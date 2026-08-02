@@ -223,4 +223,142 @@ class MySQLGatewayRepository:
     def health(self):
         with self._engine.connect() as c: count = int(c.execute(text("SELECT COUNT(*) FROM nlp_turn_events")).scalar_one())
         return {"database": "mysql", "durable_events": count}
+
+    # Normalized teaching read/write path. The compat projection is deliberately
+    # not consulted: catalog revision and entity rows are authoritative here.
+    def _ensure_workspace(self, connection: Any, workspace_id: str) -> None:
+        connection.execute(
+            text(
+                "INSERT IGNORE INTO nlp_workspaces(id,slug,name,status) "
+                "VALUES(:id,:slug,:name,'active')"
+            ),
+            {"id": workspace_id, "slug": workspace_id[:64], "name": workspace_id[:128]},
+        )
+
+    @staticmethod
+    def _json(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        return json.loads(value) if value else {}
+
+    def get_teaching_catalog(self, workspace_id: str):
+        with self._engine.connect() as connection:
+            catalog = connection.execute(
+                text("SELECT revision,updated_at FROM nlp_course_catalogs WHERE workspace_id=:workspace_id"),
+                {"workspace_id": workspace_id},
+            ).mappings().first()
+            if catalog is None:
+                return {
+                    "workspace_id": workspace_id,
+                    "revision": 0,
+                    "updated_at": None,
+                    "catalog": {
+                        "workspace_id": workspace_id,
+                        "topics": [],
+                        "exercise_blueprints": [],
+                        "review_blueprints": [],
+                        "guided_blueprints": [],
+                    },
+                }
+            topic_rows = connection.execute(
+                text("SELECT id,name,description,status,sort_order FROM nlp_course_topics WHERE workspace_id=:workspace_id ORDER BY sort_order,id"),
+                {"workspace_id": workspace_id},
+            ).mappings().all()
+            point_rows = connection.execute(
+                text("SELECT id,topic_id,name,markdown,status,sort_order FROM nlp_knowledge_points WHERE workspace_id=:workspace_id ORDER BY sort_order,id"),
+                {"workspace_id": workspace_id},
+            ).mappings().all()
+            points_by_topic: dict[str, list[dict[str, Any]]] = {}
+            for point in point_rows:
+                points_by_topic.setdefault(str(point["topic_id"]), []).append(
+                    {
+                        "id": point["id"], "name": point["name"], "markdown": point["markdown"],
+                        "status": point["status"], "sort_order": point["sort_order"],
+                    }
+                )
+            topics = [
+                {
+                    "id": row["id"], "name": row["name"], "description": row["description"],
+                    "status": row["status"], "sort_order": row["sort_order"],
+                    "knowledge_points": points_by_topic.get(str(row["id"]), []),
+                }
+                for row in topic_rows
+            ]
+            blueprint_rows = connection.execute(
+                text("SELECT kind,payload_json FROM nlp_teaching_blueprints WHERE workspace_id=:workspace_id ORDER BY id"),
+                {"workspace_id": workspace_id},
+            ).mappings().all()
+        blueprints = {"exercise": [], "review": [], "guided": []}
+        for row in blueprint_rows:
+            blueprint = self._json(row["payload_json"])
+            blueprint.setdefault("kind", row["kind"])
+            blueprints.get(str(row["kind"]), []).append(blueprint)
+        value = {
+            "workspace_id": workspace_id,
+            "topics": topics,
+            "exercise_blueprints": blueprints["exercise"],
+            "review_blueprints": blueprints["review"],
+            "guided_blueprints": blueprints["guided"],
+        }
+        return {"workspace_id": workspace_id, "revision": int(catalog["revision"]), "updated_at": catalog["updated_at"], "catalog": value}
+
+    def update_teaching_catalog(self, workspace_id: str, catalog: dict[str, Any]):
+        groups = {
+            "exercise": list(catalog.get("exercise_blueprints", [])),
+            "review": list(catalog.get("review_blueprints", [])),
+            "guided": list(catalog.get("guided_blueprints", [])),
+        }
+        with self._engine.begin() as connection:
+            self._ensure_workspace(connection, workspace_id)
+            row = connection.execute(
+                text("SELECT revision FROM nlp_course_catalogs WHERE workspace_id=:workspace_id FOR UPDATE"),
+                {"workspace_id": workspace_id},
+            ).mappings().first()
+            revision = int(row["revision"]) + 1 if row else 1
+            if row is None:
+                connection.execute(
+                    text("INSERT INTO nlp_course_catalogs(workspace_id,revision) VALUES(:workspace_id,:revision)"),
+                    {"workspace_id": workspace_id, "revision": revision},
+                )
+            else:
+                connection.execute(
+                    text("UPDATE nlp_course_catalogs SET revision=:revision WHERE workspace_id=:workspace_id"),
+                    {"workspace_id": workspace_id, "revision": revision},
+                )
+            connection.execute(text("DELETE FROM nlp_teaching_blueprints WHERE workspace_id=:workspace_id"), {"workspace_id": workspace_id})
+            connection.execute(text("DELETE FROM nlp_course_topics WHERE workspace_id=:workspace_id"), {"workspace_id": workspace_id})
+            for topic_order, topic in enumerate(catalog.get("topics", [])):
+                topic_id = str(topic["id"])
+                connection.execute(
+                    text("INSERT INTO nlp_course_topics(id,workspace_id,name,description,status,sort_order) VALUES(:id,:workspace_id,:name,:description,:status,:sort_order)"),
+                    {"id": topic_id, "workspace_id": workspace_id, "name": str(topic.get("name", "")), "description": str(topic.get("description", "")), "status": str(topic.get("status", "enabled")), "sort_order": int(topic.get("sort_order", topic_order))},
+                )
+                for point_order, point in enumerate(topic.get("knowledge_points", [])):
+                    connection.execute(
+                        text("INSERT INTO nlp_knowledge_points(id,workspace_id,topic_id,name,markdown,status,sort_order) VALUES(:id,:workspace_id,:topic_id,:name,:markdown,:status,:sort_order)"),
+                        {"id": str(point["id"]), "workspace_id": workspace_id, "topic_id": topic_id, "name": str(point.get("name", "")), "markdown": str(point.get("markdown", "")), "status": str(point.get("status", "enabled")), "sort_order": int(point.get("sort_order", point_order))},
+                    )
+            for kind, blueprints in groups.items():
+                for blueprint in blueprints:
+                    connection.execute(
+                        text("INSERT INTO nlp_teaching_blueprints(id,workspace_id,kind,topic_id,knowledge_point_id,status,payload_json,revision) VALUES(:id,:workspace_id,:kind,:topic_id,:knowledge_point_id,:status,:payload_json,:revision)"),
+                        {"id": str(blueprint["id"]), "workspace_id": workspace_id, "kind": kind, "topic_id": str(blueprint["topic_id"]), "knowledge_point_id": blueprint.get("knowledge_point_id"), "status": str(blueprint.get("status", "draft")), "payload_json": json.dumps({**blueprint, "kind": kind}, ensure_ascii=False), "revision": int(blueprint.get("revision", 0))},
+                    )
+        result = self.get_teaching_catalog(workspace_id)
+        result["revision"] = revision
+        return result
+
+    def teaching_topic(self, workspace_id: str, topic_id: str):
+        catalog = self.get_teaching_catalog(workspace_id)["catalog"]
+        topic = next((item for item in catalog["topics"] if item["id"] == topic_id and item.get("status", "enabled") == "enabled"), None)
+        if topic is None:
+            return None
+        points = [item for item in topic["knowledge_points"] if item.get("status", "enabled") == "enabled"]
+        if sum(len(str(item.get("markdown") or item.get("name") or "")) for item in points) > self.knowledge_point_prompt_budget:
+            raise TeachingConfigurationError(f"主题“{topic_id}”的知识点内容超过提示词预算")
+        return {"id": topic_id, "name": topic.get("name", topic_id), "description": topic.get("description", ""), "knowledge_points": points}
+
+    def select_guided_blueprint(self, *, workspace_id: str, topic_id: str):
+        return next((item for item in self.get_teaching_catalog(workspace_id)["catalog"]["guided_blueprints"] if item.get("topic_id") == topic_id and item.get("status", "enabled") == "enabled"), None)
+
     def close(self) -> None: self._engine.dispose()

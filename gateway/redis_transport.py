@@ -99,6 +99,7 @@ class RedisWorkerRuntime:
         inject: Any = None,
         cancel_pending: Any = None,
         is_terminal: Any = None,
+        reclaim_pending: bool = True,
     ) -> None:
         self._redis = redis
         self.config = config
@@ -107,6 +108,7 @@ class RedisWorkerRuntime:
         self._inject = inject
         self._cancel_pending = cancel_pending
         self._is_terminal = is_terminal
+        self._reclaim_pending = reclaim_pending
         self._group_ready = False
         self._closed = False
         self._active: dict[str, asyncio.Task[Any]] = {}
@@ -128,7 +130,7 @@ class RedisWorkerRuntime:
     async def run_once(self, *, block_ms: int = 5000) -> int:
         await self._ensure_group()
         batches = []
-        if hasattr(self._redis, "xautoclaim"):
+        if self._reclaim_pending and hasattr(self._redis, "xautoclaim"):
             claimed = await self._redis.xautoclaim(
                 self.config.task_stream,
                 self.config.task_group,

@@ -36,6 +36,9 @@ gateway:
   redis_cancel_key_prefix: "nlp-agent:cancel:"
   redis_cancel_ttl_s: 604800
   redis_dead_letter_stream: nlp-agent:turns:dead
+  # MySQL is the authoritative claim lease; Redis pending-entry reclaim is not
+  # an execution ownership mechanism.
+  mysql_turn_lease_s: 60
   # Future MSSQL adapter: package.module:function returning TurnExecutionState.
   state_factory: ""
 

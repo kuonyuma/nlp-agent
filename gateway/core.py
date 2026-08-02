@@ -33,9 +33,12 @@ from gateway.engine import AgentEngine, LangGraphAgentEngine
 from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
 from gateway.mysql_repository import MySQLGatewayRepository
+from gateway.outbox_dispatcher import OutboxTurnDispatcher
 from gateway.turn_execution import InProcessTurnExecutor
 from gateway.redis_transport import RedisEventBridge, RedisTransportConfig, RedisTurnDispatcher
 from server.agent.session_service import LocalSessionService, local_session_service
+from server.application.turn_reliability import TurnReliabilityService
+from server.infrastructure.mysql import MySQLRuntime
 
 
 _EXPLICIT_EXERCISE_START_RE = re.compile(
@@ -66,6 +69,7 @@ class BackendGateway:
 
         gateway_config = settings.gateway_runtime
         self.engine = engine or LangGraphAgentEngine()
+        self._database_runtime: MySQLRuntime | None = None
         if repository is not None:
             self.repository = repository
         elif str(gateway_config.get("persistence", "")).lower() == "mysql":
@@ -73,6 +77,7 @@ class BackendGateway:
             dsn = runtime_settings.NLP_AGENT_DATABASE_URL.strip()
             if not dsn:
                 raise RuntimeError("MySQL persistence mode requires NLP_AGENT_DATABASE_URL")
+            self._database_runtime = MySQLRuntime.from_runtime(settings.database_runtime)
             self.repository = MySQLGatewayRepository(dsn, knowledge_point_prompt_budget=max(1, int(gateway_config.get("knowledge_point_prompt_budget", 12_000))))
         else:
             raise RuntimeError("runtime persistence must be mysql; SQLite is migration-CLI only")
@@ -98,12 +103,19 @@ class BackendGateway:
                     )
                 ),
             )
-            self.dispatcher = RedisTurnDispatcher.from_config(redis_config)
+            redis_dispatcher = RedisTurnDispatcher.from_config(redis_config)
+            if self._database_runtime is None:
+                raise RuntimeError("Redis production dispatch requires MySQL runtime")
+            self.dispatcher = OutboxTurnDispatcher(
+                self._database_runtime.uow,
+                TurnReliabilityService(),
+                redis_dispatcher,
+            )
             self._event_bridge = RedisEventBridge(
-                self.dispatcher.client,
+                redis_dispatcher.client,
                 redis_config,
                 self.events,
-                observe=self.dispatcher.observe,
+                observe=redis_dispatcher.observe,
             )
         else:
             executor = InProcessTurnExecutor(
@@ -153,6 +165,8 @@ class BackendGateway:
         async with self._lifecycle_lock:
             if self._started:
                 return
+            if self._database_runtime is not None:
+                await self._database_runtime.start()
             if not self._remote_execution:
                 await self.engine.start(self._emit_from_engine)
             if self._event_bridge is not None:
@@ -726,6 +740,8 @@ class BackendGateway:
             if not self._started:
                 await asyncio.to_thread(self.repository.flush)
                 self.repository.close()
+                if self._database_runtime is not None:
+                    await self._database_runtime.close()
                 return
             self._accepting = False
             self._maintenance_stop.set()
@@ -741,5 +757,7 @@ class BackendGateway:
                 await self.engine.close()
             await asyncio.to_thread(self.repository.flush)
             self.repository.close()
+            if self._database_runtime is not None:
+                await self._database_runtime.close()
             self._session_turn_locks.clear()
             self._started = False
