@@ -36,7 +36,7 @@ class MySQLGatewayRepository:
         state = row.get("learning_state_json") or {}
         return TurnRecord(turn_id=row["id"], session_id=row["conversation_id"], workspace_id=row["workspace_id"], user_id=row["user_id"], status=TurnStatus(row["status"]), input_text=row["input_text"], learning_context=LearningContext.model_validate(state["context"]) if state.get("context") else None, learning_progress=LearningProgress.model_validate(state["progress"]) if state.get("progress") else None, exercise_state=ExerciseState.model_validate(state["exercise"]) if state.get("exercise") else None, final_text=row.get("result_text"), error_kind=row.get("error_kind"), error_message=row.get("error_message"), created_at=row["created_at"], started_at=row.get("started_at"), completed_at=row.get("completed_at"))
 
-    def create_turn(self, *, turn_id: str, session_id: str, workspace_id: str, user_id: str, input_text: str, idempotency_key: str | None, learning_context=None, learning_progress=None, exercise_state=None, **_: Any) -> tuple[TurnRecord, bool]:
+    def create_turn(self, *, turn_id: str, session_id: str, workspace_id: str, user_id: str, input_text: str, idempotency_key: str | None, learning_context=None, learning_progress=None, exercise_state=None, dispatch_payload: str | None = None, **_: Any) -> tuple[TurnRecord, bool]:
         with self._engine.begin() as c:
             if idempotency_key:
                 old = c.execute(text("SELECT * FROM nlp_turns WHERE user_id=:u AND conversation_id=:s AND idempotency_key=:k"), {"u": user_id, "s": session_id, "k": idempotency_key}).mappings().first()
@@ -44,12 +44,16 @@ class MySQLGatewayRepository:
                     return self._record(dict(old)), True
             state = {"context": learning_context.model_dump(mode="json") if learning_context else None, "progress": learning_progress.model_dump(mode="json") if learning_progress else None, "exercise": exercise_state.model_dump(mode="json") if exercise_state else None}
             c.execute(text("INSERT INTO nlp_turns(id,conversation_id,workspace_id,user_id,status,input_text,learning_state_json,idempotency_key) VALUES(:id,:s,:w,:u,'accepted',:input,:state,:key)"), {"id": turn_id, "s": session_id, "w": workspace_id, "u": user_id, "input": input_text, "state": json.dumps(state), "key": idempotency_key})
+            if dispatch_payload is not None:
+                c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
         return self._record(self._row(turn_id) or {}), False
 
-    def update_turn(self, turn_id: str, status: TurnStatus, *, final_text=None, error_kind=None, error_message=None, exercise_state=None) -> TurnRecord:
+    def update_turn(self, turn_id: str, status: TurnStatus, *, final_text=None, error_kind=None, error_message=None, exercise_state=None, dispatch_payload: str | None = None) -> TurnRecord:
         terminal = status in {TurnStatus.COMPLETED, TurnStatus.FAILED, TurnStatus.CANCELLED, TurnStatus.INTERRUPTED}
         with self._engine.begin() as c:
             c.execute(text("UPDATE nlp_turns SET status=:status,result_text=:result,error_kind=:kind,error_message=:message,started_at=CASE WHEN :running='running' THEN UTC_TIMESTAMP(6) ELSE started_at END,completed_at=CASE WHEN :terminal=1 THEN UTC_TIMESTAMP(6) ELSE completed_at END WHERE id=:id"), {"status": status.value, "result": final_text, "kind": error_kind, "message": (error_message or "")[:1000] or None, "running": status.value, "terminal": int(terminal), "id": turn_id})
+            if dispatch_payload is not None:
+                c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
         row = self._row(turn_id)
         if row is None:
             raise KeyError(turn_id)
@@ -96,115 +100,154 @@ class MySQLGatewayRepository:
         latest = turns[0] if turns else None
         return (latest.learning_context, latest.learning_progress, latest.exercise_state) if latest else (None, None, None)
 
-    def teaching_topic(self, *_: Any): return None
-    def _compat(self, namespace: str, aggregate_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        with self._engine.begin() as c:
-            if payload is not None:
-                c.execute(text("INSERT INTO nlp_gateway_compat(id,namespace,aggregate_id,payload_json) VALUES(UUID(),:n,:a,:p) ON DUPLICATE KEY UPDATE payload_json=VALUES(payload_json),revision=revision+1"), {"n": namespace, "a": aggregate_id, "p": json.dumps(payload, ensure_ascii=False, default=str)})
-            row = c.execute(text("SELECT payload_json FROM nlp_gateway_compat WHERE namespace=:n AND aggregate_id=:a"), {"n": namespace, "a": aggregate_id}).scalar()
-        return row if isinstance(row, dict) else (json.loads(row) if row else None)
+    @staticmethod
+    def _json(value: Any) -> Any:
+        return value if isinstance(value, (dict, list)) else (json.loads(value) if value else {})
 
-    def get_teaching_catalog(self, workspace_id: str):
-        catalog = self._compat("teaching", workspace_id) or {"workspace_id": workspace_id, "topics": [], "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": []}
-        return {"workspace_id": workspace_id, "revision": int(catalog.get("revision", 0)), "catalog": catalog}
+    def _guided(self, row: Any) -> dict[str, Any]:
+        state = self._json(row["state_json"])
+        return {"id": row["id"], "session_id": row["conversation_id"], "workspace_id": row["workspace_id"], "user_id": row["user_id"], "topic_id": row["topic_id"], "status": row["status"], "objective": row["objective"], "attempts": int(row["attempts"]), "guided_blueprint": self._json(row["blueprint_snapshot_json"]), "created_at": row["created_at"], "updated_at": row["updated_at"], "completed_at": row["completed_at"], **state}
 
-    def update_teaching_catalog(self, workspace_id: str, catalog: dict[str, Any]):
-        current = self.get_teaching_catalog(workspace_id)
-        revision = int(current["revision"]) + 1
-        value = {**catalog, "workspace_id": workspace_id, "revision": revision}
-        self._compat("teaching", workspace_id, value)
-        return {"workspace_id": workspace_id, "revision": revision, "catalog": value}
-
-    def teaching_topic(self, workspace_id: str, topic_id: str):
-        catalog = self.get_teaching_catalog(workspace_id)["catalog"]
-        topic = next((x for x in catalog.get("topics", []) if x.get("id") == topic_id and x.get("status", "enabled") == "enabled"), None)
-        if topic is None: return None
-        points = [x for x in topic.get("knowledge_points", []) if x.get("status", "enabled") == "enabled"]
-        if sum(len(str(x.get("markdown") or x.get("name") or "")) for x in points) > self.knowledge_point_prompt_budget:
-            raise TeachingConfigurationError(f"主题“{topic_id}”的知识点内容超过提示词预算")
-        return {"id": topic_id, "name": topic.get("name", topic_id), "description": topic.get("description", ""), "knowledge_points": points}
-
-    def select_guided_blueprint(self, *, workspace_id: str, topic_id: str):
-        return next((x for x in self.get_teaching_catalog(workspace_id)["catalog"].get("guided_blueprints", []) if x.get("topic_id") == topic_id and x.get("status", "enabled") == "enabled"), None)
+    def active_guided_session(self, *, session_id: str, topic_id: str):
+        with self._engine.connect() as c:
+            row = c.execute(text("SELECT * FROM nlp_guided_sessions WHERE conversation_id=:s AND topic_id=:t AND status='active' ORDER BY created_at DESC LIMIT 1"), {"s": session_id, "t": topic_id}).mappings().first()
+        return self._guided(row) if row else None
 
     def start_or_resume_guided_session(self, *, session_id: str, workspace_id: str, user_id: str, topic_id: str, first_message: str, guided_blueprint=None):
-        key = f"{session_id}:{topic_id}"; current = self._compat("guided", key)
-        if current and current.get("status") == "active": return current
-        value = {"id": str(uuid.uuid4()), "session_id": session_id, "workspace_id": workspace_id, "user_id": user_id, "topic_id": topic_id, "status": "active", "attempts": 0, "objective": first_message, "guided_blueprint": guided_blueprint or {}, "updated_at": _now().isoformat()}
-        self._compat("guided", key, value); return value
+        with self._engine.begin() as c:
+            row = c.execute(text("SELECT * FROM nlp_guided_sessions WHERE conversation_id=:s AND topic_id=:t AND status='active' ORDER BY created_at DESC LIMIT 1 FOR UPDATE"), {"s": session_id, "t": topic_id}).mappings().first()
+            if row:
+                state = self._json(row["state_json"])
+                state["learner_responses"] = [*state.get("learner_responses", []), first_message][:20]
+                c.execute(text("UPDATE nlp_guided_sessions SET attempts=attempts+1,state_json=:state WHERE id=:id"), {"id": row["id"], "state": json.dumps(state, ensure_ascii=False)})
+            else:
+                record_id = str(uuid.uuid4())
+                c.execute(text("INSERT INTO nlp_guided_sessions(id,conversation_id,workspace_id,user_id,topic_id,status,objective,attempts,state_json,blueprint_snapshot_json) VALUES(:id,:s,:w,:u,:t,'active',:objective,0,:state,:blueprint)"), {"id": record_id, "s": session_id, "w": workspace_id, "u": user_id, "t": topic_id, "objective": first_message, "state": json.dumps({"stage": "opening", "learner_responses": [], "known_concepts": [], "misconceptions": [], "last_question": ""}, ensure_ascii=False), "blueprint": json.dumps(guided_blueprint or {}, ensure_ascii=False)})
+        return self.active_guided_session(session_id=session_id, topic_id=topic_id) or {}
 
-    def advance_guided_session(self, guided_session_id: str, **changes: Any):
-        with self._engine.connect() as c: key = c.execute(text("SELECT aggregate_id FROM nlp_gateway_compat WHERE namespace='guided' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.id'))=:id LIMIT 1"), {"id": guided_session_id}).scalar()
-        if not key: return changes
-        value = self._compat("guided", key) or {}; value.update({k: v for k, v in changes.items() if v is not None}); value["updated_at"] = _now().isoformat(); self._compat("guided", key, value); return value
+    def advance_guided_session(self, guided_session_id: str, *, tutor_message: str, known_concepts: object = None, misconceptions: object = None, completed: bool = False):
+        known = [str(item)[:300] for item in known_concepts if str(item).strip()][:30] if isinstance(known_concepts, list) else []
+        mistakes = [str(item)[:300] for item in misconceptions if str(item).strip()][:20] if isinstance(misconceptions, list) else []
+        with self._engine.begin() as c:
+            row = c.execute(text("SELECT state_json FROM nlp_guided_sessions WHERE id=:id AND status='active' FOR UPDATE"), {"id": guided_session_id}).mappings().first()
+            if row is None: return None
+            state = self._json(row["state_json"])
+            state.update({"stage": "completed" if completed else "awaiting_learner_response", "known_concepts": known, "misconceptions": mistakes, "last_question": tutor_message[:2000]})
+            c.execute(text("UPDATE nlp_guided_sessions SET status=:status,state_json=:state,completed_at=CASE WHEN :completed THEN UTC_TIMESTAMP(6) ELSE NULL END WHERE id=:id"), {"id": guided_session_id, "status": "completed" if completed else "active", "state": json.dumps(state, ensure_ascii=False), "completed": completed})
     def update_turn_guided_status(self, turn_id: str, *, status: str) -> None:
         with self._engine.begin() as c:
             c.execute(text("UPDATE nlp_turns SET learning_state_json=JSON_SET(COALESCE(learning_state_json, JSON_OBJECT()), '$.guided_session_status', :status) WHERE id=:id"), {"id": turn_id, "status": status})
     def end_guided_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
-        with self._engine.connect() as c: keys = c.execute(text("SELECT aggregate_id FROM nlp_gateway_compat WHERE namespace='guided' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"s": session_id}).scalars().all()
-        for key in keys: value = self._compat("guided", key) or {}; value["status"] = status; self._compat("guided", key, value)
-        return len(keys)
+        if status not in {"completed", "cancelled", "expired"}: raise ValueError("invalid guided session terminal status")
+        with self._engine.begin() as c:
+            return c.execute(text("UPDATE nlp_guided_sessions SET status=:status,completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active'"), {"s": session_id, "status": status}).rowcount
     def expire_guided_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
-        cutoff = _now() - timedelta(minutes=max(1, idle_minutes)); count = 0
-        with self._engine.connect() as c:
-            keys = c.execute(text("SELECT aggregate_id,payload_json FROM nlp_gateway_compat WHERE namespace='guided' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"s": session_id}).all()
-        for key, raw in keys:
-            value = raw if isinstance(raw, dict) else json.loads(raw)
-            updated = datetime.fromisoformat(value.get("updated_at", "1970-01-01T00:00:00+00:00"))
-            if updated < cutoff:
-                value.update(status="expired", completed_at=_now().isoformat(), updated_at=_now().isoformat()); self._compat("guided", key, value); count += 1
-        return count
+        with self._engine.begin() as c:
+            return c.execute(text("UPDATE nlp_guided_sessions SET status='expired',completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active' AND updated_at < :cutoff"), {"s": session_id, "cutoff": _now() - timedelta(minutes=max(1, idle_minutes))}).rowcount
 
-    def start_exercise_session(self, *, session_id: str, workspace_id: str, user_id: str, topic_id: str, mode: str):
-        blueprints = self.get_teaching_catalog(workspace_id)["catalog"].get("exercise_blueprints" if mode == "practice" else "review_blueprints", [])
-        blueprint = next((x for x in blueprints if x.get("topic_id") == topic_id and x.get("status", "enabled") == "enabled"), None)
-        if blueprint is None: return None
-        value = {"id": str(uuid.uuid4()), "session_id": session_id, "workspace_id": workspace_id, "user_id": user_id, "topic_id": topic_id, "mode": mode, "status": "active", "blueprint_snapshot": blueprint, "attempts": []}
-        self._compat("exercise", value["id"], value); return value
+    def _exercise(self, row: Any) -> dict[str, Any]:
+        return {"id": row["id"], "session_id": row["conversation_id"], "workspace_id": row["workspace_id"], "user_id": row["user_id"], "topic_id": row["topic_id"], "mode": row["mode"], "status": row["status"], "blueprint_snapshot": self._json(row["blueprint_snapshot_json"]), "created_at": row["created_at"], "updated_at": row["updated_at"], "completed_at": row["completed_at"]}
+
+    def get_exercise_session(self, exercise_session_id: str):
+        with self._engine.connect() as c: row = c.execute(text("SELECT * FROM nlp_exercise_sessions WHERE id=:id"), {"id": exercise_session_id}).mappings().first()
+        return self._exercise(row) if row else None
 
     def active_exercise_session(self, *, session_id: str, topic_id: str, mode: str):
-        with self._engine.connect() as c: row = c.execute(text("SELECT payload_json FROM nlp_gateway_compat WHERE namespace='exercise' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.topic_id'))=:t AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.mode'))=:m AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active' LIMIT 1"), {"s": session_id, "t": topic_id, "m": mode}).scalar()
-        return row if isinstance(row, dict) else (json.loads(row) if row else None)
-    def active_or_latest_exercise_session(self, **kwargs: Any): return self.active_exercise_session(**kwargs)
-    def expire_exercise_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
-        return self._expire_compat_sessions("exercise", session_id, idle_minutes)
+        with self._engine.connect() as c: row = c.execute(text("SELECT * FROM nlp_exercise_sessions WHERE conversation_id=:s AND topic_id=:t AND mode=:m AND status='active' ORDER BY created_at DESC LIMIT 1"), {"s": session_id, "t": topic_id, "m": mode}).mappings().first()
+        return self._exercise(row) if row else None
+
+    def active_or_latest_exercise_session(self, *, session_id: str, topic_id: str, mode: str):
+        with self._engine.connect() as c: row = c.execute(text("SELECT * FROM nlp_exercise_sessions WHERE conversation_id=:s AND topic_id=:t AND mode=:m ORDER BY (status='active') DESC,created_at DESC LIMIT 1"), {"s": session_id, "t": topic_id, "m": mode}).mappings().first()
+        return self._exercise(row) if row else None
+
+    def start_exercise_session(self, *, session_id: str, workspace_id: str, user_id: str, topic_id: str, mode: str):
+        if mode not in {"practice", "review"}: raise ValueError("exercise session mode must be practice or review")
+        catalog = self.get_teaching_catalog(workspace_id)["catalog"]
+        topic = next((item for item in catalog["topics"] if item["id"] == topic_id and item.get("status", "enabled") == "enabled"), None)
+        candidates = [item for item in catalog["exercise_blueprints" if mode == "practice" else "review_blueprints"] if item.get("topic_id") == topic_id and item.get("status") == "enabled"] if topic else []
+        if not candidates: return None
+        record_id = str(uuid.uuid4())
+        with self._engine.begin() as c: c.execute(text("INSERT INTO nlp_exercise_sessions(id,conversation_id,workspace_id,user_id,topic_id,mode,status,blueprint_snapshot_json) VALUES(:id,:s,:w,:u,:t,:m,'active',:blueprint)"), {"id": record_id, "s": session_id, "w": workspace_id, "u": user_id, "t": topic_id, "m": mode, "blueprint": json.dumps(candidates[0], ensure_ascii=False)})
+        return self.get_exercise_session(record_id)
+
     def end_exercise_sessions(self, *, session_id: str, status: str = "cancelled") -> int:
-        return self._update_compat_sessions("exercise", session_id, status)
+        if status not in {"completed", "cancelled", "expired"}: raise ValueError("invalid exercise session terminal status")
+        with self._engine.begin() as c: return c.execute(text("UPDATE nlp_exercise_sessions SET status=:status,completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active'"), {"s": session_id, "status": status}).rowcount
 
-    def _update_compat_sessions(self, namespace: str, session_id: str, status: str) -> int:
-        with self._engine.connect() as c:
-            rows = c.execute(text("SELECT aggregate_id,payload_json FROM nlp_gateway_compat WHERE namespace=:n AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"n": namespace, "s": session_id}).all()
-        for key, raw in rows:
-            value = raw if isinstance(raw, dict) else json.loads(raw); value.update(status=status, updated_at=_now().isoformat()); self._compat(namespace, key, value)
-        return len(rows)
+    def expire_exercise_sessions(self, *, session_id: str, idle_minutes: int = 30) -> int:
+        with self._engine.begin() as c: return c.execute(text("UPDATE nlp_exercise_sessions SET status='expired',completed_at=UTC_TIMESTAMP(6) WHERE conversation_id=:s AND status='active' AND updated_at < :cutoff"), {"s": session_id, "cutoff": _now() - timedelta(minutes=max(1, idle_minutes))}).rowcount
 
-    def _expire_compat_sessions(self, namespace: str, session_id: str, idle_minutes: int) -> int:
-        cutoff = _now() - timedelta(minutes=max(1, idle_minutes)); count = 0
-        with self._engine.connect() as c:
-            rows = c.execute(text("SELECT aggregate_id,payload_json FROM nlp_gateway_compat WHERE namespace=:n AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.status'))='active'"), {"n": namespace, "s": session_id}).all()
-        for key, raw in rows:
-            value = raw if isinstance(raw, dict) else json.loads(raw); updated = datetime.fromisoformat(value.get("updated_at", "1970-01-01T00:00:00+00:00"))
-            if updated < cutoff:
-                value.update(status="expired", updated_at=_now().isoformat()); self._compat(namespace, key, value); count += 1
-        return count
+    def exercise_questions(self, exercise_session_id: str) -> list[dict[str, Any]]:
+        with self._engine.connect() as c: rows = c.execute(text("SELECT * FROM nlp_exercise_questions WHERE exercise_session_id=:id ORDER BY sequence"), {"id": exercise_session_id}).mappings().all()
+        return [{**dict(row), "rubric": self._json(row["rubric_json"])} for row in rows]
+
+    def exercise_attempts(self, exercise_session_id: str) -> list[dict[str, Any]]:
+        with self._engine.connect() as c: rows = c.execute(text("SELECT a.* FROM nlp_exercise_attempts a JOIN nlp_exercise_questions q ON q.id=a.exercise_question_id WHERE q.exercise_session_id=:id ORDER BY q.sequence,a.attempt_number"), {"id": exercise_session_id}).mappings().all()
+        return [{**dict(row), "rubric_matches": self._json(row["rubric_matches_json"]), "passed": bool(row["passed"])} for row in rows]
+
+    def learning_evidence(self, exercise_session_id: str) -> list[dict[str, Any]]:
+        with self._engine.connect() as c: rows = c.execute(text("SELECT * FROM nlp_learning_evidence WHERE exercise_session_id=:id ORDER BY completed_at,id"), {"id": exercise_session_id}).mappings().all()
+        return [{**dict(row), "blueprint_snapshot": self._json(row["blueprint_snapshot_json"]), "knowledge_point_ids": self._json(row["blueprint_snapshot_json"]).get("knowledge_point_ids", [])} for row in rows]
+
     def exercise_state(self, exercise_session_id: str) -> ExerciseState:
-        value = self._compat("exercise", exercise_session_id) or {}; question = value.get("question", "")
-        return ExerciseState(question=question, rubric=value.get("rubric", []), attempt=len(value.get("attempts", [])), status="awaiting_answer" if question else "idle")
+        session = self.get_exercise_session(exercise_session_id)
+        if session is None: return ExerciseState()
+        questions = self.exercise_questions(exercise_session_id); blueprint = session["blueprint_snapshot"]
+        current = next((item for item in reversed(questions) if item["status"] == "awaiting_answer"), None)
+        rubric = [str(point.get("criterion", point)) if isinstance(point, dict) else str(point) for point in blueprint.get("rubric", [])]
+        attempts = self.exercise_attempts(exercise_session_id)
+        if session["status"] != "active": return ExerciseState(blueprint_id=blueprint.get("id"), exercise_session_id=exercise_session_id, rubric=rubric, question_number=len(questions), question_count=1, attempt=len(attempts), status="completed")
+        if current is None: return ExerciseState(blueprint_id=blueprint.get("id"), exercise_session_id=exercise_session_id, rubric=rubric, question_number=len(questions)+1, question_count=1, status="idle")
+        return ExerciseState(blueprint_id=blueprint.get("id"), exercise_session_id=exercise_session_id, question=current["question"], rubric=rubric, question_number=int(current["sequence"]), question_count=1, attempt=sum(item["exercise_question_id"] == current["id"] for item in attempts), status="awaiting_answer")
+
     def record_exercise_question(self, exercise_session_id: str, question: str):
-        value = self._compat("exercise", exercise_session_id) or {}; value["question"] = question; value.setdefault("attempts", []); self._compat("exercise", exercise_session_id, value); return value
-    def grade_exercise_answer(self, exercise_session_id: str, **result: Any):
-        value = self._compat("exercise", exercise_session_id) or {}; value.setdefault("attempts", []).append(result); self._compat("exercise", exercise_session_id, value); return self.exercise_state(exercise_session_id)
-    def get_user_settings(self, user_id: str): return self._compat("settings", user_id) or {}
+        question = question.strip()
+        if not question: raise ValueError("exercise question must not be empty")
+        session = self.get_exercise_session(exercise_session_id)
+        if session is None or session["status"] != "active": raise ValueError("exercise session is not active")
+        questions = self.exercise_questions(exercise_session_id)
+        if any(item["status"] == "awaiting_answer" for item in questions): raise ValueError("exercise already has an unanswered question")
+        if len(questions) >= 1: raise ValueError("exercise question count is complete")
+        record = {"id": str(uuid.uuid4()), "exercise_session_id": exercise_session_id, "sequence": 1, "question": question, "rubric": session["blueprint_snapshot"].get("rubric", []), "status": "awaiting_answer"}
+        with self._engine.begin() as c:
+            c.execute(text("INSERT INTO nlp_exercise_questions(id,exercise_session_id,sequence,question,rubric_json,status) VALUES(:id,:session,:sequence,:question,:rubric,:status)"), {"id": record["id"], "session": exercise_session_id, "sequence": 1, "question": question, "rubric": json.dumps(record["rubric"], ensure_ascii=False), "status": "awaiting_answer"})
+        return record
+
+    def grade_exercise_answer(self, exercise_session_id: str, *, answer: str, matches: list[dict[str, Any]], feedback: str) -> ExerciseState:
+        session = self.get_exercise_session(exercise_session_id)
+        if session is None or session["status"] != "active": raise ValueError("exercise session is not active")
+        question = next((item for item in reversed(self.exercise_questions(exercise_session_id)) if item["status"] == "awaiting_answer"), None)
+        if question is None: raise ValueError("exercise has no unanswered question")
+        rubric = question["rubric"]
+        if {item.get("criterion_index") for item in matches if isinstance(item, dict)} != set(range(len(rubric))) or len(matches) != len(rubric): raise ValueError("grading result does not match blueprint rubric")
+        weights = [max(0.0, float(point.get("weight", 1) if isinstance(point, dict) else 1)) for point in rubric]
+        score = round(sum(weights[int(item["criterion_index"])] for item in matches if item.get("achieved")) / (sum(weights) or float(len(weights) or 1)) * 100)
+        normalized = [{"criterion_index": int(item["criterion_index"]), "criterion": str(rubric[int(item["criterion_index"])].get("criterion", "") if isinstance(rubric[int(item["criterion_index"])], dict) else rubric[int(item["criterion_index"])]), "weight": weights[int(item["criterion_index"])], "achieved": bool(item.get("achieved")), "evidence": str(item.get("evidence", ""))[:1000]} for item in sorted(matches, key=lambda item: int(item["criterion_index"]))]
+        attempt_number = sum(item["exercise_question_id"] == question["id"] for item in self.exercise_attempts(exercise_session_id)) + 1
+        with self._engine.begin() as c:
+            c.execute(text("INSERT INTO nlp_exercise_attempts(id,exercise_question_id,answer,attempt_number,rubric_matches_json,normalized_score,passed,feedback) VALUES(UUID(),:question,:answer,:attempt,:matches,:score,:passed,:feedback)"), {"question": question["id"], "answer": answer, "attempt": attempt_number, "matches": json.dumps(normalized, ensure_ascii=False), "score": score, "passed": score >= 60, "feedback": feedback[:4000]})
+            c.execute(text("UPDATE nlp_exercise_questions SET status='completed' WHERE id=:id"), {"id": question["id"]})
+            c.execute(text("INSERT INTO nlp_learning_evidence(id,exercise_session_id,exercise_question_id,blueprint_snapshot_json,learner_answer,normalized_score,passed,completed_at) VALUES(UUID(),:session,:question,:blueprint,:answer,:score,:passed,UTC_TIMESTAMP(6))"), {"session": exercise_session_id, "question": question["id"], "blueprint": json.dumps(session["blueprint_snapshot"], ensure_ascii=False), "answer": answer, "score": score, "passed": score >= 60})
+            c.execute(text("UPDATE nlp_exercise_sessions SET status='completed',completed_at=UTC_TIMESTAMP(6) WHERE id=:id"), {"id": exercise_session_id})
+        return self.exercise_state(exercise_session_id)
+
+    def get_user_settings(self, user_id: str):
+        with self._engine.connect() as c: row = c.execute(text("SELECT revision,preferences_json,updated_at FROM nlp_user_preferences WHERE user_id=:id"), {"id": user_id}).mappings().first()
+        return {"revision": int(row["revision"]), "settings": self._json(row["preferences_json"]), "updated_at": row["updated_at"]} if row else {"revision": 0, "settings": {}, "updated_at": None}
+
     def update_user_settings(self, user_id: str, changes: dict[str, Any]):
-        value = {**self.get_user_settings(user_id), **changes}; self._compat("settings", user_id, value); return value
+        current = self.get_user_settings(user_id); settings = {**current["settings"], **changes}; revision = current["revision"] + 1
+        with self._engine.begin() as c: c.execute(text("INSERT INTO nlp_user_preferences(user_id,preferences_json,revision) VALUES(:id,:settings,:revision) ON DUPLICATE KEY UPDATE preferences_json=VALUES(preferences_json),revision=VALUES(revision)"), {"id": user_id, "settings": json.dumps(settings, ensure_ascii=False), "revision": revision})
+        return self.get_user_settings(user_id)
     def delete_session(self, session_id: str) -> None:
         with self._engine.begin() as c:
             c.execute(text("DELETE FROM nlp_turn_events WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})
             c.execute(text("DELETE FROM nlp_turn_cancellations WHERE turn_id IN (SELECT id FROM nlp_turns WHERE conversation_id=:s)"), {"s": session_id})
             c.execute(text("DELETE FROM nlp_turns WHERE conversation_id=:s"), {"s": session_id})
             c.execute(text("DELETE FROM nlp_conversation_messages WHERE conversation_id=:s"), {"s": session_id})
+            c.execute(text("DELETE FROM nlp_guided_sessions WHERE conversation_id=:s"), {"s": session_id})
+            c.execute(text("DELETE FROM nlp_exercise_sessions WHERE conversation_id=:s"), {"s": session_id})
             c.execute(text("DELETE FROM nlp_conversations WHERE id=:s"), {"s": session_id})
-            c.execute(text("DELETE FROM nlp_gateway_compat WHERE JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.session_id'))=:s"), {"s": session_id})
     def latest_event_sequence(self, turn_id: str) -> int:
         with self._engine.connect() as c: return int(c.execute(text("SELECT COALESCE(MAX(sequence),0) FROM nlp_turn_events WHERE turn_id=:id"), {"id": turn_id}).scalar_one())
     def recover_interrupted(self):
@@ -223,4 +266,142 @@ class MySQLGatewayRepository:
     def health(self):
         with self._engine.connect() as c: count = int(c.execute(text("SELECT COUNT(*) FROM nlp_turn_events")).scalar_one())
         return {"database": "mysql", "durable_events": count}
+
+    # Normalized teaching read/write path. The compat projection is deliberately
+    # not consulted: catalog revision and entity rows are authoritative here.
+    def _ensure_workspace(self, connection: Any, workspace_id: str) -> None:
+        connection.execute(
+            text(
+                "INSERT IGNORE INTO nlp_workspaces(id,slug,name,status) "
+                "VALUES(:id,:slug,:name,'active')"
+            ),
+            {"id": workspace_id, "slug": workspace_id[:64], "name": workspace_id[:128]},
+        )
+
+    @staticmethod
+    def _json(value: Any) -> Any:
+        if isinstance(value, (dict, list)):
+            return value
+        return json.loads(value) if value else {}
+
+    def get_teaching_catalog(self, workspace_id: str):
+        with self._engine.connect() as connection:
+            catalog = connection.execute(
+                text("SELECT revision,updated_at FROM nlp_course_catalogs WHERE workspace_id=:workspace_id"),
+                {"workspace_id": workspace_id},
+            ).mappings().first()
+            if catalog is None:
+                return {
+                    "workspace_id": workspace_id,
+                    "revision": 0,
+                    "updated_at": None,
+                    "catalog": {
+                        "workspace_id": workspace_id,
+                        "topics": [],
+                        "exercise_blueprints": [],
+                        "review_blueprints": [],
+                        "guided_blueprints": [],
+                    },
+                }
+            topic_rows = connection.execute(
+                text("SELECT id,name,description,status,sort_order FROM nlp_course_topics WHERE workspace_id=:workspace_id ORDER BY sort_order,id"),
+                {"workspace_id": workspace_id},
+            ).mappings().all()
+            point_rows = connection.execute(
+                text("SELECT id,topic_id,name,markdown,status,sort_order FROM nlp_knowledge_points WHERE workspace_id=:workspace_id ORDER BY sort_order,id"),
+                {"workspace_id": workspace_id},
+            ).mappings().all()
+            points_by_topic: dict[str, list[dict[str, Any]]] = {}
+            for point in point_rows:
+                points_by_topic.setdefault(str(point["topic_id"]), []).append(
+                    {
+                        "id": point["id"], "name": point["name"], "markdown": point["markdown"],
+                        "status": point["status"], "sort_order": point["sort_order"],
+                    }
+                )
+            topics = [
+                {
+                    "id": row["id"], "name": row["name"], "description": row["description"],
+                    "status": row["status"], "sort_order": row["sort_order"],
+                    "knowledge_points": points_by_topic.get(str(row["id"]), []),
+                }
+                for row in topic_rows
+            ]
+            blueprint_rows = connection.execute(
+                text("SELECT kind,payload_json FROM nlp_teaching_blueprints WHERE workspace_id=:workspace_id ORDER BY id"),
+                {"workspace_id": workspace_id},
+            ).mappings().all()
+        blueprints = {"exercise": [], "review": [], "guided": []}
+        for row in blueprint_rows:
+            blueprint = self._json(row["payload_json"])
+            blueprint.setdefault("kind", row["kind"])
+            blueprints.get(str(row["kind"]), []).append(blueprint)
+        value = {
+            "workspace_id": workspace_id,
+            "topics": topics,
+            "exercise_blueprints": blueprints["exercise"],
+            "review_blueprints": blueprints["review"],
+            "guided_blueprints": blueprints["guided"],
+        }
+        return {"workspace_id": workspace_id, "revision": int(catalog["revision"]), "updated_at": catalog["updated_at"], "catalog": value}
+
+    def update_teaching_catalog(self, workspace_id: str, catalog: dict[str, Any]):
+        groups = {
+            "exercise": list(catalog.get("exercise_blueprints", [])),
+            "review": list(catalog.get("review_blueprints", [])),
+            "guided": list(catalog.get("guided_blueprints", [])),
+        }
+        with self._engine.begin() as connection:
+            self._ensure_workspace(connection, workspace_id)
+            row = connection.execute(
+                text("SELECT revision FROM nlp_course_catalogs WHERE workspace_id=:workspace_id FOR UPDATE"),
+                {"workspace_id": workspace_id},
+            ).mappings().first()
+            revision = int(row["revision"]) + 1 if row else 1
+            if row is None:
+                connection.execute(
+                    text("INSERT INTO nlp_course_catalogs(workspace_id,revision) VALUES(:workspace_id,:revision)"),
+                    {"workspace_id": workspace_id, "revision": revision},
+                )
+            else:
+                connection.execute(
+                    text("UPDATE nlp_course_catalogs SET revision=:revision WHERE workspace_id=:workspace_id"),
+                    {"workspace_id": workspace_id, "revision": revision},
+                )
+            connection.execute(text("DELETE FROM nlp_teaching_blueprints WHERE workspace_id=:workspace_id"), {"workspace_id": workspace_id})
+            connection.execute(text("DELETE FROM nlp_course_topics WHERE workspace_id=:workspace_id"), {"workspace_id": workspace_id})
+            for topic_order, topic in enumerate(catalog.get("topics", [])):
+                topic_id = str(topic["id"])
+                connection.execute(
+                    text("INSERT INTO nlp_course_topics(id,workspace_id,name,description,status,sort_order) VALUES(:id,:workspace_id,:name,:description,:status,:sort_order)"),
+                    {"id": topic_id, "workspace_id": workspace_id, "name": str(topic.get("name", "")), "description": str(topic.get("description", "")), "status": str(topic.get("status", "enabled")), "sort_order": int(topic.get("sort_order", topic_order))},
+                )
+                for point_order, point in enumerate(topic.get("knowledge_points", [])):
+                    connection.execute(
+                        text("INSERT INTO nlp_knowledge_points(id,workspace_id,topic_id,name,markdown,status,sort_order) VALUES(:id,:workspace_id,:topic_id,:name,:markdown,:status,:sort_order)"),
+                        {"id": str(point["id"]), "workspace_id": workspace_id, "topic_id": topic_id, "name": str(point.get("name", "")), "markdown": str(point.get("markdown", "")), "status": str(point.get("status", "enabled")), "sort_order": int(point.get("sort_order", point_order))},
+                    )
+            for kind, blueprints in groups.items():
+                for blueprint in blueprints:
+                    connection.execute(
+                        text("INSERT INTO nlp_teaching_blueprints(id,workspace_id,kind,topic_id,knowledge_point_id,status,payload_json,revision) VALUES(:id,:workspace_id,:kind,:topic_id,:knowledge_point_id,:status,:payload_json,:revision)"),
+                        {"id": str(blueprint["id"]), "workspace_id": workspace_id, "kind": kind, "topic_id": str(blueprint["topic_id"]), "knowledge_point_id": blueprint.get("knowledge_point_id"), "status": str(blueprint.get("status", "draft")), "payload_json": json.dumps({**blueprint, "kind": kind}, ensure_ascii=False), "revision": int(blueprint.get("revision", 0))},
+                    )
+        result = self.get_teaching_catalog(workspace_id)
+        result["revision"] = revision
+        return result
+
+    def teaching_topic(self, workspace_id: str, topic_id: str):
+        catalog = self.get_teaching_catalog(workspace_id)["catalog"]
+        topic = next((item for item in catalog["topics"] if item["id"] == topic_id and item.get("status", "enabled") == "enabled"), None)
+        if topic is None:
+            return None
+        points = [item for item in topic["knowledge_points"] if item.get("status", "enabled") == "enabled"]
+        if sum(len(str(item.get("markdown") or item.get("name") or "")) for item in points) > self.knowledge_point_prompt_budget:
+            raise TeachingConfigurationError(f"主题“{topic_id}”的知识点内容超过提示词预算")
+        return {"id": topic_id, "name": topic.get("name", topic_id), "description": topic.get("description", ""), "knowledge_points": points}
+
+    def select_guided_blueprint(self, *, workspace_id: str, topic_id: str):
+        return next((item for item in self.get_teaching_catalog(workspace_id)["catalog"]["guided_blueprints"] if item.get("topic_id") == topic_id and item.get("status", "enabled") == "enabled"), None)
+
     def close(self) -> None: self._engine.dispose()

@@ -125,6 +125,24 @@ async def test_worker_executes_stream_task_and_acknowledges_it():
     assert redis.acks == [("turns", "workers", "1-0")]
 
 
+@pytest.mark.asyncio
+async def test_worker_can_disable_redis_pending_reclaim_when_mysql_owns_leases():
+    redis = FakeRedis()
+    config = RedisTransportConfig(task_stream="turns", task_group="workers")
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"), turn_id="turn-1", content="hello",
+        learning_context=None, learning_progress=None, exercise_state=None,
+        teaching_materials=TeachingMaterials(), guided_session_id=None, exercise_session_id=None,
+    )
+    redis.reads.append([("turns", [("1-0", {"payload": TurnTaskCodec.dumps(task)})])])
+    worker = RedisWorkerRuntime(
+        redis, config, lambda _task: None, consumer_name="worker-1", reclaim_pending=False
+    )
+
+    assert await worker.run_once(block_ms=0) == 1
+    assert redis.claims == []
+
+
 async def test_event_publisher_sends_gateway_event_to_pubsub():
     redis = FakeRedis()
     config = RedisTransportConfig(event_channel="events")

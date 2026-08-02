@@ -43,7 +43,7 @@ class InProcessTurnExecutor:
         self._accepts_learning = parameter_count >= 6
         self._accepts_teaching_materials = parameter_count >= 7
 
-    async def run(self, task: TurnTask) -> None:
+    async def run(self, task: TurnTask, execution_context: Any | None = None) -> None:
         await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.RUNNING)
         await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_STARTED, {"status": TurnStatus.RUNNING.value})
         try:

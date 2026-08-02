@@ -15,6 +15,9 @@ from gateway.redis_transport import (
 )
 from gateway.state_factory import build_turn_execution_state
 from gateway.turn_execution import InProcessTurnExecutor
+from server.application.turn_reliability import OutboxRelay, TurnReliabilityService
+from server.infrastructure.mysql import MySQLRuntime
+from server.worker.fencing import FencedTurnExecutor
 
 
 def redis_config() -> RedisTransportConfig:
@@ -39,12 +42,16 @@ def redis_config() -> RedisTransportConfig:
 async def run_worker() -> None:
     from redis.asyncio import Redis
 
+    database_runtime = MySQLRuntime.from_runtime(settings.database_runtime)
+    await database_runtime.start()
     config = redis_config()
     redis = Redis.from_url(config.url, decode_responses=True)
     gateway_config = settings.gateway_runtime
     repository = build_turn_execution_state(gateway_config)
     engine = LangGraphAgentEngine()
     publisher = RedisEventPublisher(redis, config)
+    reliability = TurnReliabilityService()
+    worker_id = f"{socket.gethostname()}-{id(redis)}"
 
     async def emit(turn_id: str, session_id: str, event_type: GatewayEventType, payload: dict) -> None:
         event = await asyncio.to_thread(
@@ -117,19 +124,41 @@ async def run_worker() -> None:
 
     await engine.start(emit)
     executor = InProcessTurnExecutor(engine, repository, emit)
+    fenced_executor = FencedTurnExecutor(
+        database_runtime.uow,
+        reliability,
+        executor.run,
+        worker_id=worker_id,
+        lease_s=int(gateway_config.get("mysql_turn_lease_s", 60)),
+    )
     worker = RedisWorkerRuntime(
         redis,
         config,
-        executor.run,
-        consumer_name=f"{socket.gethostname()}-{id(executor)}",
+        fenced_executor,
+        consumer_name=worker_id,
         inject=engine.inject,
         cancel_pending=cancel_pending,
         is_terminal=is_terminal,
+        reclaim_pending=False,
     )
+
+    async def relay_forever() -> None:
+        relay = OutboxRelay(redis, stream=config.task_stream, relay_id=worker_id)
+        while True:
+            async with database_runtime.uow.begin() as unit_of_work:
+                await reliability.recover_stuck_turns(unit_of_work.session)
+                await relay.publish_batch(unit_of_work.session)
+                await unit_of_work.commit()
+            await asyncio.sleep(0.5)
+
+    relay_task = asyncio.create_task(relay_forever(), name="mysql-outbox-relay")
     try:
         await worker.run_forever()
     finally:
+        relay_task.cancel()
+        await asyncio.gather(relay_task, return_exceptions=True)
         await worker.close()
         await engine.close()
         repository.close()
         await redis.aclose()
+        await database_runtime.close()

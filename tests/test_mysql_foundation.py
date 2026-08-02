@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from configs.settings import Settings
 from server.infrastructure.mysql import DatabaseConfig, UnitOfWorkFactory, create_engine, create_session_factory
+from server.infrastructure.mysql.runtime import MySQLRuntime
 from server.infrastructure.mysql.models import SessionModel, UserModel, WorkspaceModel
 
 
@@ -109,3 +110,22 @@ async def test_session_factory_creates_explicit_transactions(mysql_engine) -> No
     async with UnitOfWorkFactory(session_factory).begin() as unit_of_work:
         assert unit_of_work.session is not None
         await unit_of_work.commit()
+
+
+@pytest.mark.asyncio
+async def test_mysql_runtime_verifies_configured_database_and_disposes_engine(monkeypatch) -> None:
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    verify = AsyncMock()
+    monkeypatch.setattr("server.infrastructure.mysql.runtime.create_engine", lambda _config: engine)
+    monkeypatch.setattr("server.infrastructure.mysql.runtime.verify_database_ready", verify)
+
+    runtime = MySQLRuntime.from_runtime(
+        {"url": "mysql+aiomysql://user:password@db:3306/nlp_agent"}
+    )
+
+    await runtime.start()
+    await runtime.close()
+
+    verify.assert_awaited_once_with(engine)
+    engine.dispose.assert_awaited_once()

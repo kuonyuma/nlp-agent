@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import yaml
+
 from configs.settings import Settings
 
 
@@ -31,3 +35,24 @@ def test_monitor_network_settings_can_be_overridden_by_environment_values():
     assert runtime["port"] == 9877
     assert runtime["allowed_hosts"] == ["monitor.internal"]
     assert runtime["allowed_origins"] == ["http://monitor.internal"]
+
+
+def test_compose_runs_mysql_migrations_before_application_services_start():
+    compose = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "compose.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    mysql = compose["services"]["mysql"]
+    migrate = compose["services"]["nova-migrate"]
+
+    assert mysql["image"] == "mysql:8.4"
+    assert mysql["healthcheck"]
+    assert migrate["command"] == [".venv/bin/python", "-m", "alembic", "upgrade", "head"]
+    assert migrate["depends_on"]["mysql"]["condition"] == "service_healthy"
+    for service_name in ("nova-web", "nova-worker", "nova-monitor"):
+        assert (
+            compose["services"][service_name]["depends_on"]["nova-migrate"]["condition"]
+            == "service_completed_successfully"
+        )

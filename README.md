@@ -103,14 +103,22 @@ Copy-Item .env-example .env
 notepad .env
 ```
 
-至少替换 `DEEPSEEK_API_KEY`、`NLP_AGENT_WEB_SECRET`，并将
-`SERVER_IP_OR_DOMAIN` 替换为服务器实际内网 IP 或域名。
+至少替换 `DEEPSEEK_API_KEY`、`NLP_AGENT_WEB_SECRET`、
+`NLP_AGENT_MYSQL_PASSWORD`、`NLP_AGENT_MYSQL_ROOT_PASSWORD`，并将
+`SERVER_IP_OR_DOMAIN` 替换为服务器实际内网 IP 或域名。部署服务器的
+`NLP_AGENT_DATABASE_URL` 必须指向该服务器的 MySQL：同一 Compose 部署使用
+`mysql:3306`；托管数据库则改为其私网地址。不要填开发机的数据库地址。
 
 2. 构建并启动主服务：
 
 ```powershell
 docker compose up -d --build
 ```
+
+Compose 会先启动 MySQL 8.4，再运行一次 `nova-migrate` 执行 Alembic；只有迁移
+成功后 Web、Worker 和 Monitor 才会启动。业务表由 Alembic 创建，应用进程不会
+运行时建表。MySQL 数据保存在 Docker 卷 `mysql-data`，Redis 只保存队列与实时
+传输状态。
 
 3. 如需启动运行监控：
 

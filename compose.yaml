@@ -1,4 +1,21 @@
 services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${NLP_AGENT_MYSQL_DATABASE:-nlp_agent}
+      MYSQL_USER: ${NLP_AGENT_MYSQL_USER:-nlp_agent}
+      MYSQL_PASSWORD: ${NLP_AGENT_MYSQL_PASSWORD:?Set NLP_AGENT_MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${NLP_AGENT_MYSQL_ROOT_PASSWORD:?Set NLP_AGENT_MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]
@@ -10,6 +27,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Alembic, rather than application code, owns all schema creation and upgrades.
+  nova-migrate:
+    image: ${NOVA_IMAGE:-nova-agent}:${NOVA_TAG:-local}
+    pull_policy: ${NOVA_PULL_POLICY:-build}
+    command: [".venv/bin/python", "-m", "alembic", "upgrade", "head"]
+    env_file:
+      - ${NOVA_ENV_FILE:-.env}
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
 
   nova-web:
     build:
@@ -27,10 +56,10 @@ services:
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
     ports:
       - "${NOVA_WEB_HOST_PORT:-8765}:8765"
-    volumes:
-      - nova-data:/app/.data
     restart: unless-stopped
     depends_on:
+      nova-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
@@ -49,10 +78,10 @@ services:
     environment:
       NLP_AGENT_GATEWAY_TRANSPORT: redis
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
-    volumes:
-      - nova-data:/app/.data
     restart: unless-stopped
     depends_on:
+      nova-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -67,11 +96,12 @@ services:
       NLP_AGENT_MONITOR_PORT: 8766
     ports:
       - "${NOVA_MONITOR_HOST_PORT:-8766}:8766"
-    volumes:
-      - nova-data:/app/.data
     restart: unless-stopped
     profiles: ["monitor"]
+    depends_on:
+      nova-migrate:
+        condition: service_completed_successfully
 
 volumes:
-  nova-data:
+  mysql-data:
   redis-data:

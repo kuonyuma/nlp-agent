@@ -235,6 +235,29 @@ class LearningEvidenceModel(Base):
     completed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
 
 
+class GuidedSessionModel(TimestampedModel, Base):
+    __tablename__ = "nlp_guided_sessions"
+    __table_args__ = (Index("ix_nlp_guided_sessions_active", "conversation_id", "topic_id", "status"),)
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(UUID, nullable=False)
+    user_id: Mapped[str] = mapped_column(UUID, nullable=False)
+    topic_id: Mapped[str] = mapped_column(UUID, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    state_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    blueprint_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+
+
+class UserPreferenceModel(TimestampedModel, Base):
+    __tablename__ = "nlp_user_preferences"
+    user_id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    preferences_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+
+
 class OutboxMessageModel(TimestampedModel, Base):
     __tablename__ = "nlp_outbox_messages"
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
@@ -283,14 +306,27 @@ class DeadLetterModel(Base):
 
 
 class GatewayCompatModel(TimestampedModel, Base):
-    """Transitional JSON projection for legacy Gateway aggregates during cutover."""
+    """Historical schema declaration needed when Alembic replays revision 05.
+
+    Runtime code must not use this retired projection; revision 20260802_11
+    drops the table after its normalized replacements have been created.
+    """
+
     __tablename__ = "nlp_gateway_compat"
-    __table_args__ = (UniqueConstraint("namespace", "aggregate_id", name="uq_nlp_gateway_compat_namespace_aggregate"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace",
+            "aggregate_id",
+            name="uq_nlp_gateway_compat_namespace_aggregate",
+        ),
+    )
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     namespace: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     aggregate_id: Mapped[str] = mapped_column(String(128), nullable=False)
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
-    revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+    revision: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False, server_default="0"
+    )
 
 
 class AgentCheckpointModel(TimestampedModel, Base):
