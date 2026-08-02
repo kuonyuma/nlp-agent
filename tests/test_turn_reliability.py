@@ -35,6 +35,7 @@ async def test_recovery_invalidates_old_generation_and_emits_handover_without_re
     latest_sequence = MagicMock()
     latest_sequence.first.return_value = 7
     session.scalars.side_effect = [scalars, latest_sequence]
+    session.scalar.return_value = {"turn_id": "turn-1", "task": "encoded-turn-task"}
     service = TurnReliabilityService()
 
     recovered = await service.recover_stuck_turns(session)
@@ -43,6 +44,11 @@ async def test_recovery_invalidates_old_generation_and_emits_handover_without_re
     assert turn.claim_generation == 3
     added = [call.args[0] for call in session.add.call_args_list]
     assert any(getattr(item, "event_type", None) == "turn.handover" and getattr(item, "sequence", None) == 8 for item in added)
+    assert any(
+        getattr(item, "topic", None) == "turn.dispatch"
+        and getattr(item, "payload_json", None) == {"turn_id": "turn-1", "task": "encoded-turn-task"}
+        for item in added
+    )
 
 
 @pytest.mark.asyncio
@@ -83,18 +89,12 @@ async def test_outbox_relay_publishes_turn_task_in_worker_stream_format() -> Non
 
 
 @pytest.mark.asyncio
-async def test_outbox_dispatcher_persists_encoded_task_before_transport_publish() -> None:
+async def test_outbox_dispatcher_only_tracks_task_persisted_by_turn_repository() -> None:
     from core.learning import TeachingMaterials
     from core.session_context import SessionContext
     from gateway.dispatch import TurnTask
     from gateway.outbox_dispatcher import OutboxTurnDispatcher
 
-    session = AsyncMock()
-    unit_of_work = AsyncMock()
-    unit_of_work.session = session
-    unit_of_work.__aenter__.return_value = unit_of_work
-    factory = MagicMock()
-    factory.begin.return_value = unit_of_work
     reliability = AsyncMock()
     transport = AsyncMock()
     task = TurnTask(
@@ -109,12 +109,9 @@ async def test_outbox_dispatcher_persists_encoded_task_before_transport_publish(
         exercise_session_id=None,
     )
 
-    dispatcher = OutboxTurnDispatcher(factory, reliability, transport)
+    dispatcher = OutboxTurnDispatcher(reliability, transport)
     await dispatcher.submit(task)
 
-    reliability.enqueue.assert_awaited_once()
-    kwargs = reliability.enqueue.await_args.kwargs
-    assert kwargs["topic"] == "turn.dispatch"
-    assert isinstance(kwargs["payload"]["task"], str)
-    unit_of_work.commit.assert_awaited_once()
+    reliability.enqueue.assert_not_awaited()
     transport.submit.assert_not_awaited()
+    assert dispatcher.active_count() == 1

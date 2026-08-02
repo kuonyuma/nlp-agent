@@ -206,6 +206,7 @@ class GatewayRepository:
         guided_session_attempts: int | None = None,
         guided_session_status: str | None = None,
         exercise_state: ExerciseState | None = None,
+        dispatch_payload: str | None = None,
     ) -> tuple[TurnRecord, bool]:
         with self._lock, self._conn:
             if idempotency_key:
@@ -257,6 +258,7 @@ class GatewayRepository:
         error_kind: str | None = None,
         error_message: str | None = None,
         exercise_state: ExerciseState | None = None,
+        dispatch_payload: str | None = None,
     ) -> TurnRecord:
         fields: dict[str, Any] = {
             "status": status.value,

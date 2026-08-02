@@ -5,8 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from gateway.dispatch import TurnTask
-from gateway.redis_transport import TurnTaskCodec
-from server.application.turn_reliability import TurnReliabilityService
 
 
 class OutboxTurnDispatcher:
@@ -14,23 +12,20 @@ class OutboxTurnDispatcher:
 
     def __init__(
         self,
-        unit_of_work_factory: Any,
-        reliability: TurnReliabilityService,
+        reliability: Any,
         transport: Any,
     ) -> None:
-        self._unit_of_work_factory = unit_of_work_factory
         self._reliability = reliability
         self._transport = transport
         self._active: set[str] = set()
 
     async def submit(self, task: TurnTask) -> None:
-        async with self._unit_of_work_factory.begin() as unit_of_work:
-            await self._reliability.enqueue(
-                unit_of_work.session,
-                topic="turn.dispatch",
-                payload={"task": TurnTaskCodec.dumps(task)},
-            )
-            await unit_of_work.commit()
+        """Track a task already persisted atomically with its Turn.
+
+        MySQLGatewayRepository.create_turn owns the transaction that inserts both
+        rows.  Keeping the dispatcher write-free prevents a second transaction
+        from producing an orphaned outbox message.
+        """
         self._active.add(task.turn_id)
 
     async def cancel(self, turn_id: str) -> None:

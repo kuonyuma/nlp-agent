@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 from gateway.dispatch import TurnTask
 from server.application.turn_reliability import TurnReliabilityService
+
+
+@dataclass(frozen=True)
+class TurnExecutionContext:
+    """Fence values that every side-effecting execution boundary must carry."""
+
+    turn_id: str
+    claim_generation: int
+    operation_id: str = "turn.execution"
 
 
 class FencedTurnExecutor:
@@ -43,7 +53,13 @@ class FencedTurnExecutor:
             self._heartbeat(task.turn_id, generation), name=f"turn-lease:{task.turn_id}"
         )
         try:
-            await self._execute(task)
+            await self._execute(
+                task,
+                TurnExecutionContext(
+                    turn_id=task.turn_id,
+                    claim_generation=generation,
+                ),
+            )
             return True
         finally:
             heartbeat.cancel()

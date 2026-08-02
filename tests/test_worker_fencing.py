@@ -41,7 +41,11 @@ async def test_fenced_executor_claims_turn_before_invoking_agent() -> None:
         session, turn_id="turn-1", worker_id="worker-a", lease_s=30
     )
     unit_of_work.commit.assert_awaited_once()
-    execute.assert_awaited_once_with(task)
+    execute.assert_awaited_once()
+    execution = execute.await_args.args[1]
+    assert execution.turn_id == "turn-1"
+    assert execution.claim_generation == 4
+    assert execution.operation_id == "turn.execution"
 
 
 @pytest.mark.asyncio

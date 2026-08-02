@@ -36,6 +36,7 @@ from gateway.mysql_repository import MySQLGatewayRepository
 from gateway.outbox_dispatcher import OutboxTurnDispatcher
 from gateway.turn_execution import InProcessTurnExecutor
 from gateway.redis_transport import RedisEventBridge, RedisTransportConfig, RedisTurnDispatcher
+from gateway.redis_transport import TurnTaskCodec
 from server.agent.session_service import LocalSessionService, local_session_service
 from server.application.turn_reliability import TurnReliabilityService
 from server.infrastructure.mysql import MySQLRuntime
@@ -107,7 +108,6 @@ class BackendGateway:
             if self._database_runtime is None:
                 raise RuntimeError("Redis production dispatch requires MySQL runtime")
             self.dispatcher = OutboxTurnDispatcher(
-                self._database_runtime.uow,
                 TurnReliabilityService(),
                 redis_dispatcher,
             )
@@ -365,6 +365,17 @@ class BackendGateway:
             guided_blueprint=guided_session.get("guided_blueprint", {}),
         )
         turn_id = str(uuid.uuid4())
+        task = TurnTask(
+            context=context,
+            turn_id=turn_id,
+            content=request.content,
+            learning_context=learning_context,
+            learning_progress=progress,
+            exercise_state=exercise,
+            teaching_materials=teaching_materials,
+            guided_session_id=guided_session.get("id"),
+            exercise_session_id=(teaching_session.get("id") if teaching_session is not None else None),
+        )
         turn, duplicate = await asyncio.to_thread(
             self.repository.create_turn,
             turn_id=turn_id,
@@ -386,6 +397,7 @@ class BackendGateway:
             guided_session_attempts=int(guided_session.get("attempts") or 0),
             guided_session_status=str(guided_session.get("status") or "active"),
             exercise_state=exercise,
+            dispatch_payload=TurnTaskCodec.dumps(task) if self._remote_execution else None,
         )
         resubmitted = bool(
             duplicate
@@ -401,7 +413,10 @@ class BackendGateway:
             )
         if resubmitted:
             turn = await asyncio.to_thread(
-                self.repository.update_turn, turn.turn_id, TurnStatus.ACCEPTED
+                self.repository.update_turn,
+                turn.turn_id,
+                TurnStatus.ACCEPTED,
+                dispatch_payload=TurnTaskCodec.dumps(task) if self._remote_execution else None,
             )
         await self._emit(
             turn.turn_id,
@@ -409,19 +424,12 @@ class BackendGateway:
             GatewayEventType.TURN_ACCEPTED,
             {"status": TurnStatus.ACCEPTED.value},
         )
-        task = TurnTask(
-                context=context,
-                turn_id=turn.turn_id,
-                content=request.content,
-                learning_context=learning_context,
-                learning_progress=progress,
-                exercise_state=exercise,
-                teaching_materials=teaching_materials,
-                guided_session_id=guided_session.get("id"),
-                exercise_session_id=(
-                    teaching_session.get("id") if teaching_session is not None else None
-                ),
-            )
+        task = task.__class__(
+            context=task.context, turn_id=turn.turn_id, content=task.content,
+            learning_context=task.learning_context, learning_progress=task.learning_progress,
+            exercise_state=task.exercise_state, teaching_materials=task.teaching_materials,
+            guided_session_id=task.guided_session_id, exercise_session_id=task.exercise_session_id,
+        )
         try:
             await self.dispatcher.submit(task)
         except Exception as error:

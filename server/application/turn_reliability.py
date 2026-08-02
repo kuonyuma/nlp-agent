@@ -62,7 +62,18 @@ class TurnReliabilityService:
             turn.claimed_by = None
             turn.lease_expires_at = None
             session.add(TurnEventModel(id=str(uuid.uuid4()), turn_id=turn.id, sequence=(await self._next_sequence(session, turn.id)), claim_generation=turn.claim_generation, event_type="turn.handover", payload_json={"reason": "lease_expired"}))
-            await self.enqueue(session, topic="turn.dispatch", payload={"turn_id": turn.id})
+            original = await session.scalar(
+                select(OutboxMessageModel.payload_json)
+                .where(
+                    OutboxMessageModel.topic == "turn.dispatch",
+                    OutboxMessageModel.payload_json["turn_id"].as_string() == turn.id,
+                )
+                .order_by(OutboxMessageModel.created_at.desc())
+                .limit(1)
+            )
+            if not isinstance(original, dict) or not isinstance(original.get("task"), str):
+                raise ValueError(f"turn {turn.id} has no recoverable dispatch task")
+            await self.enqueue(session, topic="turn.dispatch", payload=original)
             recovered.append(turn.id)
         await session.flush()
         return recovered
