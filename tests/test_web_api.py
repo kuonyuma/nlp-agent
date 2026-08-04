@@ -172,6 +172,16 @@ def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_
         assert client.get("/api/v1/sessions").status_code == 401
 
 
+def test_guest_session_has_only_guest_capabilities(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        response = client.post("/api/v1/auth/guest", headers={"Origin": "http://testserver"})
+
+        assert response.status_code == 200
+        assert response.json()["roles"] == ["guest"]
+        assert client.get("/api/v1/sessions").status_code == 403
+
+
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
     app, _engine = student_web_app
     with TestClient(app) as client:

@@ -29,7 +29,12 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
-from gateway.dispatch import InProcessTurnDispatcher, TurnDispatcher, TurnTask
+from gateway.dispatch import (
+    ExecutionAuthorizationContext,
+    InProcessTurnDispatcher,
+    TurnDispatcher,
+    TurnTask,
+)
 from gateway.engine import AgentEngine, LangGraphAgentEngine
 from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
@@ -383,6 +388,11 @@ class BackendGateway:
             teaching_materials=teaching_materials,
             guided_session_id=guided_session.get("id"),
             exercise_session_id=(teaching_session.get("id") if teaching_session is not None else None),
+            authorization=ExecutionAuthorizationContext(
+                submitter_user_id=principal.user_id,
+                workspace_id=context.workspace_id,
+                authorization_version=principal.authorization_version,
+            ),
         )
         turn, duplicate = await asyncio.to_thread(
             self.repository.create_turn,
@@ -437,6 +447,7 @@ class BackendGateway:
             learning_context=task.learning_context, learning_progress=task.learning_progress,
             exercise_state=task.exercise_state, teaching_materials=task.teaching_materials,
             guided_session_id=task.guided_session_id, exercise_session_id=task.exercise_session_id,
+            authorization=task.authorization,
         )
         try:
             await self.dispatcher.submit(task)

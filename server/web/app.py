@@ -34,6 +34,7 @@ from server.web.auth import (
 from server.web.contracts import (
     CreateSessionBody,
     LoginBody,
+    ReplaceUserRolesBody,
     InjectChatBody,
     SubmitChatBody,
     ToolApprovalBody,
@@ -186,6 +187,9 @@ def create_app(
         request: Request, claims: SessionClaims
     ) -> AuthenticatedPrincipal:
         """Resolve roles and workspace membership from MySQL in production."""
+        # Guests are deliberately anonymous and never require an nlp_users row.
+        if claims.roles == frozenset({"guest"}):
+            return claims.principal()
         session_factory = getattr(
             request.app.state.gateway, "authorization_session_factory", None
         )
@@ -241,6 +245,15 @@ def create_app(
 
     @app.exception_handler(AccessDeniedError)
     async def access_error(request: Request, _error: AccessDeniedError):
+        return _problem(
+            request,
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="forbidden",
+            title="Access forbidden",
+        )
+
+    @app.exception_handler(PermissionError)
+    async def permission_error(request: Request, _error: PermissionError):
         return _problem(
             request,
             status_code=status.HTTP_403_FORBIDDEN,
@@ -354,6 +367,73 @@ def create_app(
             "expires_at": claims.expires_at,
         }
 
+    @app.post("/api/v1/auth/guest", status_code=status.HTTP_200_OK, tags=["auth"])
+    async def guest_login(request: Request, response: Response):
+        auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
+        token, claims = auth.issue_guest(
+            previous_token=request.cookies.get(auth.cookie_name)
+        )
+        response.set_cookie(
+            auth.cookie_name, token, max_age=auth.ttl_s, httponly=True,
+            secure=auth.secure, samesite="strict", path="/",
+        )
+        return {
+            "user_id": claims.user_id, "workspace_ids": [], "roles": ["guest"],
+            "csrf_token": claims.csrf_token, "expires_at": claims.expires_at,
+        }
+
+    def authorization_session_factory(request: Request):
+        factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if factory is None:
+            raise RuntimeError("RBAC administration requires MySQL persistence")
+        return factory
+
+    @app.get("/api/v1/roles", tags=["rbac"])
+    async def list_roles(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            roles = await rbac_service.role_catalog(session)
+        return {"items": [
+            {"code": row.code, "name": row.name, "description": row.description,
+             "status": row.status, "is_builtin": row.is_builtin}
+            for row in roles
+        ]}
+
+    @app.get("/api/v1/permissions", tags=["rbac"])
+    async def list_permissions(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            permissions = await rbac_service.permission_catalog(session)
+        return {"items": [
+            {"code": row.code, "name": row.name, "description": row.description,
+             "status": row.status}
+            for row in permissions
+        ]}
+
+    @app.get("/api/v1/users/{user_id}/roles", tags=["rbac"])
+    async def get_user_roles(user_id: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            roles = await rbac_service.user_role_codes(session, user_id)
+        return {"user_id": user_id, "role_codes": sorted(roles)}
+
+    @app.put("/api/v1/users/{user_id}/roles", tags=["rbac"])
+    async def replace_user_roles(
+        user_id: str,
+        body: ReplaceUserRolesBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                roles = await rbac_service.replace_user_roles(
+                    session, user_id=user_id, role_codes=body.role_codes,
+                    assigned_by_user_id=principal.user_id,
+                )
+        return {"user_id": user_id, "role_codes": sorted(roles)}
+
     @app.delete("/api/v1/auth/session", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"])
     async def delete_auth_session(
         request: Request,
@@ -368,6 +448,7 @@ def create_app(
 
     @app.get("/api/v1/sessions", tags=["sessions"])
     async def list_sessions(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         return {"items": await request.app.state.gateway.sessions.list(principal)}
 
     @app.post("/api/v1/sessions", status_code=status.HTTP_201_CREATED, tags=["sessions"])
@@ -394,11 +475,13 @@ def create_app(
 
     @app.get("/api/v1/sessions/{session_id}", tags=["sessions"])
     async def get_session(session_id: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         context = await request.app.state.gateway.sessions.resolve(principal, session_id)
         return context.model_dump(mode="json")
 
     @app.get("/api/v1/sessions/{session_id}/messages", tags=["sessions"])
     async def get_messages(session_id: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         return {
             "items": await request.app.state.gateway.sessions.messages(principal, session_id)
         }

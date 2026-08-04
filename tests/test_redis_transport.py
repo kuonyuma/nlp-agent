@@ -3,7 +3,7 @@ import pytest
 
 from core.session_context import SessionContext
 from core.learning import TeachingMaterials
-from gateway.dispatch import TurnTask
+from gateway.dispatch import ExecutionAuthorizationContext, TurnTask
 from gateway.contracts import GatewayEvent, GatewayEventType
 from gateway.redis_transport import RedisEventPublisher, RedisTransportConfig, RedisTurnDispatcher, RedisWorkerRuntime, TurnTaskCodec
 
@@ -71,6 +71,9 @@ def test_turn_task_codec_preserves_worker_payload():
         teaching_materials=TeachingMaterials(),
         guided_session_id=None,
         exercise_session_id=None,
+        authorization=ExecutionAuthorizationContext(
+            submitter_user_id="alice", workspace_id="w1", authorization_version=7
+        ),
     )
 
     restored = TurnTaskCodec.loads(TurnTaskCodec.dumps(task))

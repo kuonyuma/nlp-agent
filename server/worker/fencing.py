@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from gateway.dispatch import TurnTask
+from core.rbac import Permission, authorization_service
+from server.rbac.service import rbac_service
 from server.application.turn_reliability import TurnReliabilityService
 
 
@@ -47,6 +49,19 @@ class FencedTurnExecutor:
             )
             if generation is None:
                 return False
+            if task.authorization is None:
+                raise PermissionError("worker task lacks authorization context")
+            principal = await rbac_service.principal_for_user_id(
+                unit_of_work.session, task.authorization.submitter_user_id
+            )
+            if principal.authorization_version != task.authorization.authorization_version:
+                raise PermissionError("submitter authorization has changed")
+            if task.authorization.workspace_id != task.context.workspace_id:
+                raise PermissionError("worker authorization workspace mismatch")
+            authorization_service.require(
+                principal, Permission.AGENT_TURN_SUBMIT,
+                workspace_id=task.authorization.workspace_id,
+            )
             await unit_of_work.commit()
 
         heartbeat = asyncio.create_task(

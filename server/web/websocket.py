@@ -13,6 +13,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from core.identity import AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from gateway.contracts import GatewayEventType, InjectMessageRequest, SubmitTurnRequest
 from gateway.core import BackendGateway
 from gateway.events import GatewayEventStreamInterrupted, GatewayEventSubscription
@@ -34,6 +35,18 @@ from server.web.contracts import (
     parse_command_payload,
 )
 from server.web.protocol import control_event, gateway_event_envelope
+
+
+# The gateway repeats these checks at its transport-independent boundary.
+# This map keeps the protocol contract visible for WebSocket clients/reviewers.
+WS_COMMAND_PERMISSIONS: dict[str, Permission] = {
+    "chat.send": Permission.AGENT_TURN_SUBMIT,
+    "chat.inject": Permission.AGENT_SESSION_UPDATE,
+    "chat.cancel": Permission.AGENT_TURN_CANCEL,
+    "session.subscribe": Permission.AGENT_SESSION_READ,
+    "session.unsubscribe": Permission.AGENT_SESSION_READ,
+    "stream.resume": Permission.AGENT_EVENT_REPLAY,
+}
 
 
 @dataclass(slots=True)
@@ -456,6 +469,9 @@ async def _dispatch_command(
     command: CommandEnvelope,
 ) -> None:
     payload = parse_command_payload(command)
+    required = WS_COMMAND_PERMISSIONS.get(command.type)
+    if required is not None:
+        authorization_service.require(connection.principal, required)
     if isinstance(payload, ChatSendPayload):
         await connection.subscribe(payload.session_id)
         accepted = await connection.gateway.submit_turn(

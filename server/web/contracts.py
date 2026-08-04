@@ -26,6 +26,10 @@ class LoginBody(StrictModel):
     password: str = Field(min_length=1, max_length=512)
 
 
+class ReplaceUserRolesBody(StrictModel):
+    role_codes: set[str] = Field(min_length=1, max_length=16)
+
+
 class SubmitChatBody(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)

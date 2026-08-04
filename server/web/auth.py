@@ -188,6 +188,17 @@ class SameOriginSessionAuth:
             )
         )
 
+    def issue_guest(self, *, previous_token: str | None = None) -> tuple[str, SessionClaims]:
+        """Create a limited session for public, read-only guest capabilities."""
+        self.revoke(previous_token)
+        return self.issue(
+            AuthenticatedPrincipal(
+                user_id="guest",
+                workspace_ids=frozenset(),
+                roles=frozenset({"guest"}),
+            )
+        )
+
     def issue(
         self,
         principal: AuthenticatedPrincipal | None = None,

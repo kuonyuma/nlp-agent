@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     NLP_AGENT_WEB_SECRET: str = ""
     NLP_AGENT_AUTH_USERNAME: str = ""
     NLP_AGENT_AUTH_PASSWORD_HASH: str = ""
-    NLP_AGENT_AUTH_ROLES: str = "student,teacher,admin"
+    NLP_AGENT_AUTH_ROLES: str = "student"
     NLP_AGENT_AUTH_SESSION_TTL_S: int = 1800
     NLP_AGENT_AUTH_IDLE_TIMEOUT_S: int = 900
     NLP_AGENT_AUTH_MAX_LOGIN_ATTEMPTS: int = 5

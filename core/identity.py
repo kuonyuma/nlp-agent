@@ -17,6 +17,9 @@ class AuthenticatedPrincipal(BaseModel):
     user_id: str
     workspace_ids: frozenset[str] = Field(default_factory=lambda: frozenset({"default"}))
     roles: frozenset[str] = Field(default_factory=frozenset)
+    # Persisted grant codes. Empty retains the compatibility role catalogue for
+    # local/test identities that are intentionally not backed by MySQL.
+    permissions: frozenset[str] = Field(default_factory=frozenset)
     # Incremented whenever role assignments change.  It is carried through
     # the request context so long-lived transports can detect an authz change.
     authorization_version: int = Field(default=0, ge=0)

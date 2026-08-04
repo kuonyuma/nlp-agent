@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select
+import uuid
+
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.identity import AuthenticatedPrincipal
 from server.infrastructure.mysql.models import (
     RoleModel,
+    PermissionModel,
     UserModel,
     UserRoleModel,
     WorkspaceMemberModel,
+    AuthorizationAuditLogModel,
+    RolePermissionModel,
 )
 
 
@@ -21,22 +26,31 @@ class UnknownRoleError(ValueError):
 
 
 class RbacService:
-    async def principal_for_username(
-        self, session: AsyncSession, username: str
+    async def principal_for_user_id(
+        self, session: AsyncSession, user_id: str
     ) -> AuthenticatedPrincipal:
-        """Resolve the authoritative runtime principal from MySQL.
-
-        The signed browser session proves who authenticated; role and workspace
-        membership are deliberately reloaded here so a changed assignment takes
-        effect on the next HTTP request (and on WebSocket guard ticks).
-        """
         user = await session.scalar(
-            select(UserModel).where(UserModel.username == username, UserModel.status == "active")
+            select(UserModel).where(UserModel.id == user_id, UserModel.status == "active")
         )
         if user is None:
-            raise PermissionError("authenticated user is not active in RBAC")
+            raise PermissionError("turn submitter is not active in RBAC")
         roles = await self.roles_for(session, user.id)
-        workspace_ids = frozenset(
+        permissions = frozenset(
+            (
+                await session.scalars(
+                    select(PermissionModel.code)
+                    .join(RolePermissionModel, RolePermissionModel.permission_id == PermissionModel.id)
+                    .join(UserRoleModel, UserRoleModel.role_id == RolePermissionModel.role_id)
+                    .join(RoleModel, RoleModel.id == UserRoleModel.role_id)
+                    .where(
+                        UserRoleModel.user_id == user.id,
+                        RoleModel.status == "active",
+                        PermissionModel.status == "active",
+                    )
+                )
+            ).all()
+        )
+        workspaces = frozenset(
             (
                 await session.scalars(
                     select(WorkspaceMemberModel.workspace_id).where(
@@ -48,10 +62,60 @@ class RbacService:
         )
         return AuthenticatedPrincipal(
             user_id=user.id,
-            workspace_ids=workspace_ids,
+            workspace_ids=workspaces,
             roles=roles,
+            permissions=permissions,
             authorization_version=user.authorization_version,
         )
+
+    async def principal_for_username(
+        self, session: AsyncSession, username: str
+    ) -> AuthenticatedPrincipal:
+        """Resolve the authoritative runtime principal from MySQL.
+
+        The signed browser session proves who authenticated; role and workspace
+        membership are deliberately reloaded here so a changed assignment takes
+        effect on the next HTTP request (and on WebSocket guard ticks).
+        """
+        user = await session.scalar(select(UserModel).where(UserModel.username == username))
+        if user is None:
+            raise PermissionError("authenticated user is not active in RBAC")
+        return await self.principal_for_user_id(session, user.id)
+
+    async def role_catalog(self, session: AsyncSession) -> list[RoleModel]:
+        return list((await session.scalars(select(RoleModel).order_by(RoleModel.code))).all())
+
+    async def permission_catalog(self, session: AsyncSession) -> list[PermissionModel]:
+        return list((await session.scalars(select(PermissionModel).order_by(PermissionModel.code))).all())
+
+    async def audit(
+        self,
+        session: AsyncSession,
+        *,
+        actor_user_id: str | None,
+        target_user_id: str | None,
+        decision: str,
+        reason_code: str,
+        permission_code: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        detail: dict | None = None,
+    ) -> None:
+        session.add(
+            AuthorizationAuditLogModel(
+                id=str(uuid.uuid4()), actor_user_id=actor_user_id,
+                target_user_id=target_user_id, decision=decision,
+                reason_code=reason_code, permission_code=permission_code,
+                resource_type=resource_type, resource_id=resource_id,
+                detail_json=detail or {},
+            )
+        )
+
+    async def user_role_codes(self, session: AsyncSession, user_id: str) -> frozenset[str]:
+        user = await session.scalar(select(UserModel.id).where(UserModel.id == user_id))
+        if user is None:
+            raise KeyError(user_id)
+        return await self.roles_for(session, user_id)
     async def roles_for(self, session: AsyncSession, user_id: str) -> frozenset[str]:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         result = await session.execute(
@@ -91,6 +155,19 @@ class RbacService:
         if found_codes != set(role_codes):
             missing = ", ".join(sorted(set(role_codes) - found_codes))
             raise UnknownRoleError(f"unknown or inactive role codes: {missing}")
+        if user_id == assigned_by_user_id and not set(role_codes).issubset(
+            await self.roles_for(session, user_id)
+        ):
+            raise PermissionError("users cannot grant themselves additional roles")
+        current_roles = await self.roles_for(session, user_id)
+        if "developer" in current_roles and "developer" not in found_codes:
+            developer_count = await session.scalar(
+                select(func.count(UserRoleModel.user_id))
+                .join(RoleModel, RoleModel.id == UserRoleModel.role_id)
+                .where(RoleModel.code == "developer", RoleModel.status == "active")
+            )
+            if int(developer_count or 0) <= 1:
+                raise PermissionError("cannot remove the last active developer")
         await session.execute(delete(UserRoleModel).where(UserRoleModel.user_id == user_id))
         session.add_all(
             [
@@ -103,6 +180,17 @@ class RbacService:
             ]
         )
         user.authorization_version += 1
+        await self.audit(
+            session,
+            actor_user_id=assigned_by_user_id,
+            target_user_id=user_id,
+            decision="allow",
+            reason_code="user_roles_replaced",
+            permission_code="system:role:manage",
+            resource_type="user",
+            resource_id=user_id,
+            detail={"before": sorted(current_roles), "after": sorted(found_codes)},
+        )
         await session.flush()
         return frozenset(found_codes)
 

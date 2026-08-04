@@ -118,6 +118,33 @@ class WorkspaceMemberModel(TimestampedModel, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
 
 
+class AuthorizationAuditLogModel(Base):
+    """Append-only authorization decisions and RBAC administration evidence."""
+
+    __tablename__ = "nlp_authorization_audit_logs"
+    __table_args__ = (
+        Index("ix_nlp_authorization_audit_actor_created", "actor_user_id", "created_at"),
+        Index("ix_nlp_authorization_audit_target_created", "target_user_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    actor_user_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="SET NULL"), index=True
+    )
+    target_user_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="SET NULL"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    permission_code: Mapped[str | None] = mapped_column(String(128))
+    resource_type: Mapped[str | None] = mapped_column(String(64))
+    resource_id: Mapped[str | None] = mapped_column(String(128))
+    detail_json: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="('{}')")
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False
+    )
+
+
 class WorkspaceModel(TimestampedModel, Base):
     __tablename__ = "nlp_workspaces"
 

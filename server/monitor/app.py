@@ -16,6 +16,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from configs.settings import settings
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from core.observability.runtime import TelemetryRuntime
 from core.observability.service import ObservabilityService
 from server.web.auth import AuthenticationError, CsrfRejectedError, OriginRejectedError, SameOriginSessionAuth, SessionClaims
@@ -80,8 +81,7 @@ def create_monitor_app(
 
     def principal(session: Annotated[SessionClaims, Depends(claims)]) -> AuthenticatedPrincipal:
         identity = session.principal()
-        if not identity.is_admin:
-            raise AccessDeniedError("administrator role is required")
+        authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         return identity
 
     def write_access(
@@ -91,8 +91,9 @@ def create_monitor_app(
     ) -> SessionClaims:
         auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
         auth.require_csrf(session, csrf)
-        if not session.principal().is_admin:
-            raise AccessDeniedError("administrator role is required")
+        authorization_service.require(
+            session.principal(), Permission.SYSTEM_RUNTIME_MONITOR
+        )
         return session
 
     Principal = Annotated[AuthenticatedPrincipal, Depends(principal)]
@@ -182,8 +183,9 @@ def create_monitor_app(
         try:
             auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
             session = auth.authenticate(websocket.cookies.get(auth.cookie_name))
-            if not session.principal().is_admin:
-                raise AccessDeniedError("administrator role is required")
+            authorization_service.require(
+                session.principal(), Permission.SYSTEM_RUNTIME_MONITOR
+            )
         except AuthenticationError:
             await websocket.close(code=4401, reason="authentication required"); return
         except (OriginRejectedError, AccessDeniedError):

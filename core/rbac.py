@@ -105,6 +105,12 @@ class AuthorizationService:
     """
 
     def permissions_for(self, principal: AuthenticatedPrincipal) -> frozenset[Permission]:
+        if principal.permissions:
+            return frozenset(
+                Permission(code)
+                for code in principal.permissions
+                if code in Permission._value2member_map_
+            )
         permissions: set[Permission] = set()
         for role in principal.roles:
             permissions.update(ROLE_PERMISSIONS.get(role, ()))

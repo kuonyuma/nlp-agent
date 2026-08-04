@@ -16,6 +16,7 @@ from server.infrastructure.mysql.models import (
     RoleModel,
     RolePermissionModel,
     RolePermissionScopeModel,
+    AuthorizationAuditLogModel,
     SessionModel,
     UserModel,
     UserRoleModel,
@@ -78,6 +79,7 @@ def test_rbac_models_define_normalized_role_permission_relationships() -> None:
     assert RolePermissionModel.__tablename__ == "nlp_role_permissions"
     assert RolePermissionScopeModel.__tablename__ == "nlp_role_permission_scopes"
     assert WorkspaceMemberModel.__tablename__ == "nlp_workspace_members"
+    assert AuthorizationAuditLogModel.__tablename__ == "nlp_authorization_audit_logs"
     assert {key.target_fullname for key in UserRoleModel.__table__.foreign_keys} == {
         "nlp_users.id",
         "nlp_roles.id",

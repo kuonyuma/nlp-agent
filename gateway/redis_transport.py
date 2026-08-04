@@ -11,7 +11,7 @@ from typing import Any
 
 from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
 from core.session_context import SessionContext
-from gateway.dispatch import TurnTask
+from gateway.dispatch import ExecutionAuthorizationContext, TurnTask
 from gateway.contracts import GatewayEvent
 from gateway.events import GatewayEventBroker
 
@@ -431,6 +431,14 @@ class TurnTaskCodec:
                 "teaching_materials": task.teaching_materials.model_dump(mode="json") if task.teaching_materials else None,
                 "guided_session_id": task.guided_session_id,
                 "exercise_session_id": task.exercise_session_id,
+                "authorization": (
+                    {
+                        "submitter_user_id": task.authorization.submitter_user_id,
+                        "workspace_id": task.authorization.workspace_id,
+                        "authorization_version": task.authorization.authorization_version,
+                    }
+                    if task.authorization else None
+                ),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -453,4 +461,8 @@ class TurnTaskCodec:
             teaching_materials=TeachingMaterials.model_validate(value["teaching_materials"]) if value["teaching_materials"] else TeachingMaterials(),
             guided_session_id=value.get("guided_session_id"),
             exercise_session_id=value.get("exercise_session_id"),
+            authorization=(
+                ExecutionAuthorizationContext(**value["authorization"])
+                if value.get("authorization") else None
+            ),
         )
