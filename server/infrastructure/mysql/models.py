@@ -145,6 +145,52 @@ class AuthorizationAuditLogModel(Base):
     )
 
 
+class ClassroomModel(TimestampedModel, Base):
+    __tablename__ = "nlp_classrooms"
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_workspaces.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+
+
+class ClassroomMemberModel(TimestampedModel, Base):
+    __tablename__ = "nlp_classroom_members"
+
+    classroom_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_classrooms.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    member_role: Mapped[str] = mapped_column(String(16), nullable=False, server_default="student")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+
+
+class MenuModel(TimestampedModel, Base):
+    __tablename__ = "nlp_menus"
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    parent_id: Mapped[str | None] = mapped_column(UUID, ForeignKey("nlp_menus.id", ondelete="CASCADE"))
+    menu_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    route_path: Mapped[str | None] = mapped_column(String(255))
+    component_key: Mapped[str | None] = mapped_column(String(128))
+    permission_id: Mapped[str | None] = mapped_column(UUID, ForeignKey("nlp_permissions.id", ondelete="SET NULL"))
+    client_scope: Mapped[str | None] = mapped_column(String(16))
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    visible: Mapped[bool] = mapped_column(nullable=False, server_default="1")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+
+
+class RoleMenuModel(Base):
+    __tablename__ = "nlp_role_menus"
+    role_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_roles.id", ondelete="CASCADE"), primary_key=True)
+    menu_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_menus.id", ondelete="CASCADE"), primary_key=True)
+
+
 class WorkspaceModel(TimestampedModel, Base):
     __tablename__ = "nlp_workspaces"
 

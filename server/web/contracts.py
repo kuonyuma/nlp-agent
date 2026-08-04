@@ -30,6 +30,15 @@ class ReplaceUserRolesBody(StrictModel):
     role_codes: set[str] = Field(min_length=1, max_length=16)
 
 
+class ReplaceRolePermissionsBody(StrictModel):
+    permission_codes: set[str] = Field(max_length=128)
+    scopes: dict[str, set[Literal["public", "own", "classroom", "workspace", "system"]]] = Field(default_factory=dict)
+
+
+class ReplaceRoleMenusBody(StrictModel):
+    menu_ids: set[str] = Field(max_length=256)
+
+
 class SubmitChatBody(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)

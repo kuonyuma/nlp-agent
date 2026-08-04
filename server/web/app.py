@@ -35,6 +35,8 @@ from server.web.contracts import (
     CreateSessionBody,
     LoginBody,
     ReplaceUserRolesBody,
+    ReplaceRolePermissionsBody,
+    ReplaceRoleMenusBody,
     InjectChatBody,
     SubmitChatBody,
     ToolApprovalBody,
@@ -433,6 +435,43 @@ def create_app(
                     assigned_by_user_id=principal.user_id,
                 )
         return {"user_id": user_id, "role_codes": sorted(roles)}
+
+    @app.get("/api/v1/system/roles/{role_code}/permissions", tags=["rbac"])
+    async def get_role_permissions(role_code: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            values = await rbac_service.role_permissions(session, role_code)
+        return {"role_code": role_code, "permissions": {key: sorted(value) for key, value in values.items()}}
+
+    @app.put("/api/v1/system/roles/{role_code}/permissions", tags=["rbac"])
+    async def put_role_permissions(role_code: str, body: ReplaceRolePermissionsBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                await rbac_service.replace_role_permissions(session, role_code=role_code, permission_codes=body.permission_codes, scopes=body.scopes, actor_user_id=principal.user_id)
+        return {"role_code": role_code, "permission_codes": sorted(body.permission_codes)}
+
+    @app.get("/api/v1/system/menus", tags=["rbac"])
+    async def get_menus(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            menus = await rbac_service.menus(session)
+        return {"items": [
+            {"id": item.id, "parent_id": item.parent_id, "type": item.menu_type,
+             "name": item.name, "route_path": item.route_path,
+             "component_key": item.component_key, "permission_id": item.permission_id,
+             "client_scope": item.client_scope, "sort_order": item.sort_order,
+             "visible": item.visible, "status": item.status}
+            for item in menus
+        ]}
+
+    @app.put("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])
+    async def put_role_menus(role_code: str, body: ReplaceRoleMenusBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                await rbac_service.replace_role_menus(session, role_code=role_code, menu_ids=body.menu_ids, actor_user_id=principal.user_id)
+        return {"role_code": role_code, "menu_ids": sorted(body.menu_ids)}
 
     @app.get("/api/v1/audit/authorization", tags=["rbac"])
     async def list_authorization_audit(

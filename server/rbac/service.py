@@ -19,6 +19,8 @@ from server.infrastructure.mysql.models import (
     AuthorizationAuditLogModel,
     RolePermissionModel,
     RolePermissionScopeModel,
+    MenuModel,
+    RoleMenuModel,
 )
 
 
@@ -98,6 +100,48 @@ class RbacService:
 
     async def permission_catalog(self, session: AsyncSession) -> list[PermissionModel]:
         return list((await session.scalars(select(PermissionModel).order_by(PermissionModel.code))).all())
+
+    async def role_permissions(self, session: AsyncSession, role_code: str) -> dict[str, frozenset[str]]:
+        rows = await session.execute(
+            select(PermissionModel.code, RolePermissionScopeModel.scope_type)
+            .join(RolePermissionModel, RolePermissionModel.permission_id == PermissionModel.id)
+            .outerjoin(RolePermissionScopeModel, (RolePermissionScopeModel.role_id == RolePermissionModel.role_id) & (RolePermissionScopeModel.permission_id == RolePermissionModel.permission_id))
+            .join(RoleModel, RoleModel.id == RolePermissionModel.role_id)
+            .where(RoleModel.code == role_code)
+        )
+        result: dict[str, frozenset[str]] = {}
+        for code, scope in rows:
+            result[code] = result.get(code, frozenset()) | ({scope} if scope else set())
+        return result
+
+    async def replace_role_permissions(self, session: AsyncSession, *, role_code: str, permission_codes: set[str], scopes: dict[str, set[str]], actor_user_id: str) -> None:
+        role = await session.scalar(select(RoleModel).where(RoleModel.code == role_code).with_for_update())
+        if role is None or role.is_builtin:
+            raise PermissionError("built-in or unknown roles cannot be modified through the API")
+        permissions = list((await session.scalars(select(PermissionModel).where(PermissionModel.code.in_(permission_codes), PermissionModel.status == "active"))).all())
+        if {item.code for item in permissions} != permission_codes:
+            raise UnknownRoleError("unknown permission code")
+        await session.execute(delete(RolePermissionScopeModel).where(RolePermissionScopeModel.role_id == role.id))
+        await session.execute(delete(RolePermissionModel).where(RolePermissionModel.role_id == role.id))
+        for item in permissions:
+            session.add(RolePermissionModel(role_id=role.id, permission_id=item.id, granted_by_user_id=actor_user_id))
+            for scope in scopes.get(item.code, set()):
+                session.add(RolePermissionScopeModel(role_id=role.id, permission_id=item.id, scope_type=scope))
+        await self.audit(session, actor_user_id=actor_user_id, target_user_id=None, decision="allow", reason_code="role_permissions_replaced", permission_code="system:role:manage", resource_type="role", resource_id=role_code)
+
+    async def menus(self, session: AsyncSession) -> list[MenuModel]:
+        return list((await session.scalars(select(MenuModel).where(MenuModel.status == "active").order_by(MenuModel.sort_order))).all())
+
+    async def replace_role_menus(self, session: AsyncSession, *, role_code: str, menu_ids: set[str], actor_user_id: str) -> None:
+        role = await session.scalar(select(RoleModel).where(RoleModel.code == role_code).with_for_update())
+        if role is None:
+            raise KeyError(role_code)
+        menus = list((await session.scalars(select(MenuModel).where(MenuModel.id.in_(menu_ids), MenuModel.status == "active"))).all()) if menu_ids else []
+        if {item.id for item in menus} != menu_ids:
+            raise ValueError("unknown or disabled menu")
+        await session.execute(delete(RoleMenuModel).where(RoleMenuModel.role_id == role.id))
+        session.add_all([RoleMenuModel(role_id=role.id, menu_id=item.id) for item in menus])
+        await self.audit(session, actor_user_id=actor_user_id, target_user_id=None, decision="allow", reason_code="role_menus_replaced", permission_code="system:role:manage", resource_type="role", resource_id=role_code)
 
     async def audit(
         self,
