@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
-from core.rbac import Permission, authorization_service
+from core.rbac import Permission, ResourceRef, authorization_service
 from core.session_context import SessionContext
 from core.learning import LearningContext, TeachingMaterials, default_progress
 from gateway.contracts import (
@@ -526,14 +526,11 @@ class BackendGateway:
         turn = await asyncio.to_thread(self.repository.get_turn, turn_id)
         if turn is None:
             raise ResourceNotFoundError(turn_id)
-        # Turn transcript/event access is always owner-scoped.  Elevated
-        # roles may operate the system but never inherit learner conversation
-        # content merely by holding a developer/admin role.
-        if turn.user_id != principal.user_id or (
-            "*" not in principal.workspace_ids
-            and turn.workspace_id not in principal.workspace_ids
-        ):
-            raise AccessDeniedError(turn_id)
+        authorization_service.require_resource(
+            principal,
+            Permission.AGENT_SESSION_READ,
+            ResourceRef("turn", owner_user_id=turn.user_id, workspace_id=turn.workspace_id),
+        )
         return turn
 
     async def replay_events(

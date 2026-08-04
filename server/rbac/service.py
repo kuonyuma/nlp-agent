@@ -18,6 +18,7 @@ from server.infrastructure.mysql.models import (
     WorkspaceMemberModel,
     AuthorizationAuditLogModel,
     RolePermissionModel,
+    RolePermissionScopeModel,
 )
 
 
@@ -50,6 +51,15 @@ class RbacService:
                 )
             ).all()
         )
+        scope_rows = await session.execute(
+            select(PermissionModel.code, RolePermissionScopeModel.scope_type)
+            .join(RolePermissionScopeModel, RolePermissionScopeModel.permission_id == PermissionModel.id)
+            .join(UserRoleModel, UserRoleModel.role_id == RolePermissionScopeModel.role_id)
+            .where(UserRoleModel.user_id == user.id, PermissionModel.status == "active")
+        )
+        permission_scopes: dict[str, frozenset[str]] = {}
+        for code, scope in scope_rows:
+            permission_scopes[code] = permission_scopes.get(code, frozenset()) | {scope}
         workspaces = frozenset(
             (
                 await session.scalars(
@@ -65,6 +75,7 @@ class RbacService:
             workspace_ids=workspaces,
             roles=roles,
             permissions=permissions,
+            permission_scopes=permission_scopes,
             authorization_version=user.authorization_version,
         )
 

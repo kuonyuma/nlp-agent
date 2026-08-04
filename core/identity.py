@@ -20,6 +20,7 @@ class AuthenticatedPrincipal(BaseModel):
     # Persisted grant codes. Empty retains the compatibility role catalogue for
     # local/test identities that are intentionally not backed by MySQL.
     permissions: frozenset[str] = Field(default_factory=frozenset)
+    permission_scopes: dict[str, frozenset[str]] = Field(default_factory=dict)
     # Incremented whenever role assignments change.  It is carried through
     # the request context so long-lived transports can detect an authz change.
     authorization_version: int = Field(default=0, ge=0)

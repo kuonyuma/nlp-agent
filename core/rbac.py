@@ -9,6 +9,7 @@ decision seam.
 from __future__ import annotations
 
 from enum import StrEnum
+from dataclasses import dataclass
 from typing import Final
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
@@ -44,6 +45,43 @@ class Permission(StrEnum):
     SYSTEM_PERMISSION_READ = "system:permission:read"
     SYSTEM_AUDIT_READ = "system:audit:read"
     SYSTEM_SENSITIVE_DATA_READ = "system:sensitive_data:read"
+
+
+class ScopeType(StrEnum):
+    PUBLIC = "public"
+    OWN = "own"
+    CLASSROOM = "classroom"
+    WORKSPACE = "workspace"
+    SYSTEM = "system"
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceRef:
+    resource_type: str
+    owner_user_id: str | None = None
+    workspace_id: str | None = None
+    is_public: bool = False
+
+
+class ResourcePolicy:
+    """Compiles an effective permission scope into an object-level decision."""
+
+    def allows(
+        self, principal: AuthenticatedPrincipal, scopes: frozenset[str], resource: ResourceRef
+    ) -> bool:
+        if ScopeType.SYSTEM in scopes:
+            return True
+        if resource.is_public and ScopeType.PUBLIC in scopes:
+            return True
+        if resource.owner_user_id == principal.user_id and ScopeType.OWN in scopes:
+            return True
+        if resource.workspace_id and ScopeType.WORKSPACE in scopes:
+            return "*" in principal.workspace_ids or resource.workspace_id in principal.workspace_ids
+        # Classroom membership is intentionally represented by the workspace
+        # membership projection until classroom tables are introduced.
+        if resource.workspace_id and ScopeType.CLASSROOM in scopes:
+            return "*" in principal.workspace_ids or resource.workspace_id in principal.workspace_ids
+        return False
 
 
 _GUEST: Final[frozenset[Permission]] = frozenset(
@@ -136,6 +174,28 @@ class AuthorizationService:
         except AccessDeniedError:
             return False
         return True
+
+    def allowed_resource(
+        self, principal: AuthenticatedPrincipal, permission: Permission | str, resource: ResourceRef
+    ) -> bool:
+        try:
+            required = Permission(permission)
+        except ValueError:
+            return False
+        if required not in self.permissions_for(principal):
+            return False
+        scopes = principal.permission_scopes.get(required.value)
+        if not scopes:
+            # Compatibility identities use the old role packages: agent data
+            # is own-scoped, system controls are system-scoped.
+            scopes = frozenset({"system"}) if required.value.startswith("system:") else frozenset({"own"})
+        return ResourcePolicy().allows(principal, frozenset(scopes), resource)
+
+    def require_resource(
+        self, principal: AuthenticatedPrincipal, permission: Permission | str, resource: ResourceRef
+    ) -> None:
+        if not self.allowed_resource(principal, permission, resource):
+            raise AccessDeniedError(f"permission {permission!s} is required for {resource.resource_type}")
 
     def require(
         self,
