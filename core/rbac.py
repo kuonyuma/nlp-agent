@@ -61,6 +61,7 @@ class ResourceRef:
     owner_user_id: str | None = None
     workspace_id: str | None = None
     is_public: bool = False
+    classroom_id: str | None = None
 
 
 class ResourcePolicy:
@@ -77,10 +78,8 @@ class ResourcePolicy:
             return True
         if resource.workspace_id and ScopeType.WORKSPACE in scopes:
             return "*" in principal.workspace_ids or resource.workspace_id in principal.workspace_ids
-        # Classroom membership is intentionally represented by the workspace
-        # membership projection until classroom tables are introduced.
-        if resource.workspace_id and ScopeType.CLASSROOM in scopes:
-            return "*" in principal.workspace_ids or resource.workspace_id in principal.workspace_ids
+        if resource.classroom_id and ScopeType.CLASSROOM in scopes:
+            return resource.classroom_id in principal.classroom_ids
         return False
 
 

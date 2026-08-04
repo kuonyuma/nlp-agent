@@ -118,6 +118,18 @@ class WebSocketHub:
                 return_exceptions=True,
             )
 
+    async def close_user(
+        self, user_id: str, *, code: int = 4403, reason: str = "authorization changed"
+    ) -> None:
+        """Immediately terminate local sockets after a durable RBAC change.
+
+        The outbox event provides cross-process delivery; the direct close
+        prevents a changed role from retaining a socket until its guard tick.
+        """
+        targets = [item for item in tuple(self._connections) if item.principal.user_id == user_id]
+        if targets:
+            await asyncio.gather(*(item.close(code=code, reason=reason) for item in targets), return_exceptions=True)
+
     async def close(self) -> None:
         connections = list(self._connections)
         self._connections.clear()
@@ -196,7 +208,10 @@ class WebSocketConnection:
 
     async def refresh_authorization(self) -> None:
         if self._authorization_refresh is not None:
-            self.principal = await self._authorization_refresh()
+            refreshed = await self._authorization_refresh()
+            if refreshed.authorization_version != self.principal.authorization_version:
+                raise PermissionError("authorization changed; reconnect required")
+            self.principal = refreshed
 
     async def _session_guard_loop(self) -> None:
         try:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
-from core.rbac import AuthorizationService, Permission
+from core.rbac import AuthorizationService, Permission, ResourceRef
 from server.rbac.catalog import (
     ROLE_NAMES,
     permission_id,
@@ -85,6 +85,19 @@ def test_workspace_scope_is_checked_after_capability() -> None:
             Permission.LEARNING_CONTENT_MANAGE,
             workspace_id="class-b",
         )
+
+
+def test_classroom_scope_requires_an_explicit_membership() -> None:
+    authorization = AuthorizationService()
+    member = AuthenticatedPrincipal(
+        user_id="learner-1", roles=frozenset({"teacher"}),
+        permissions=frozenset({Permission.CLASSROOM_MEMBER_MANAGE}),
+        permission_scopes={Permission.CLASSROOM_MEMBER_MANAGE.value: frozenset({"classroom"})},
+        classroom_ids=frozenset({"classroom-a"}),
+    )
+    resource = ResourceRef("classroom", workspace_id="class-a", classroom_id="classroom-a")
+    assert authorization.allowed_resource(member, Permission.CLASSROOM_MEMBER_MANAGE, resource)
+    assert not authorization.allowed_resource(member, Permission.CLASSROOM_MEMBER_MANAGE, ResourceRef("classroom", workspace_id="class-a", classroom_id="classroom-b"))
 
 
 def test_builtin_catalog_has_stable_ids_and_complete_role_permission_rows() -> None:

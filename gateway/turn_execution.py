@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from gateway.contracts import GatewayEventType, TurnStatus
+from core.rbac import Permission
 from gateway.dispatch import TurnTask
 from gateway.engine import AgentEngine
 from gateway.state import TurnExecutionState
@@ -47,6 +48,10 @@ class InProcessTurnExecutor:
         await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.RUNNING)
         await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_STARTED, {"status": TurnStatus.RUNNING.value})
         try:
+            # A fenced Worker passes its freshly-resolved authorization context.
+            # Re-check immediately before the model/tool execution boundary.
+            if execution_context is not None and hasattr(execution_context, "require"):
+                execution_context.require(Permission.AGENT_TURN_SUBMIT)
             final_text = await self._run_engine(task)
         except asyncio.CancelledError:
             await self._engine.cancel_turn(task.context, task.turn_id)

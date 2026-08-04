@@ -16,6 +16,9 @@ class AuthenticatedPrincipal(BaseModel):
 
     user_id: str
     workspace_ids: frozenset[str] = Field(default_factory=lambda: frozenset({"default"}))
+    # Active classroom memberships are projected into the runtime principal so
+    # object-level classroom grants never have to infer membership from a workspace.
+    classroom_ids: frozenset[str] = Field(default_factory=frozenset)
     roles: frozenset[str] = Field(default_factory=frozenset)
     # Persisted grant codes. Empty retains the compatibility role catalogue for
     # local/test identities that are intentionally not backed by MySQL.

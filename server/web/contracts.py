@@ -39,6 +39,26 @@ class ReplaceRoleMenusBody(StrictModel):
     menu_ids: set[str] = Field(max_length=256)
 
 
+class CreateRoleBody(StrictModel):
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]{1,62}$")
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=500)
+
+
+class UpdateRoleStatusBody(StrictModel):
+    status: Literal["active", "disabled"]
+
+
+class CreateClassroomBody(StrictModel):
+    workspace_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+
+
+class ReplaceClassroomMemberBody(StrictModel):
+    member_role: Literal["student", "teacher"]
+    status: Literal["active", "disabled"] = "active"
+
+
 class SubmitChatBody(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)
