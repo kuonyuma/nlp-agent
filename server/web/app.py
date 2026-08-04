@@ -434,6 +434,29 @@ def create_app(
                 )
         return {"user_id": user_id, "role_codes": sorted(roles)}
 
+    @app.get("/api/v1/audit/authorization", tags=["rbac"])
+    async def list_authorization_audit(
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=100, ge=1, le=500),
+        actor_user_id: str | None = None,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_AUDIT_READ)
+        async with authorization_session_factory(request)() as session:
+            rows = await rbac_service.audit_records(
+                session, limit=limit, actor_user_id=actor_user_id
+            )
+        return {"items": [
+            {
+                "id": row.id, "actor_user_id": row.actor_user_id,
+                "target_user_id": row.target_user_id, "decision": row.decision,
+                "reason_code": row.reason_code, "permission_code": row.permission_code,
+                "resource_type": row.resource_type, "resource_id": row.resource_id,
+                "detail": row.detail_json, "created_at": row.created_at,
+            }
+            for row in rows
+        ]}
+
     @app.delete("/api/v1/auth/session", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"])
     async def delete_auth_session(
         request: Request,

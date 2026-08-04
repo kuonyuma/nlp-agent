@@ -111,6 +111,16 @@ class RbacService:
             )
         )
 
+    async def audit_records(
+        self, session: AsyncSession, *, limit: int = 100, actor_user_id: str | None = None
+    ) -> list[AuthorizationAuditLogModel]:
+        statement = select(AuthorizationAuditLogModel).order_by(
+            AuthorizationAuditLogModel.created_at.desc()
+        ).limit(max(1, min(limit, 500)))
+        if actor_user_id is not None:
+            statement = statement.where(AuthorizationAuditLogModel.actor_user_id == actor_user_id)
+        return list((await session.scalars(statement)).all())
+
     async def user_role_codes(self, session: AsyncSession, user_id: str) -> frozenset[str]:
         user = await session.scalar(select(UserModel.id).where(UserModel.id == user_id))
         if user is None:
