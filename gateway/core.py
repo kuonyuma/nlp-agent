@@ -526,12 +526,12 @@ class BackendGateway:
         turn = await asyncio.to_thread(self.repository.get_turn, turn_id)
         if turn is None:
             raise ResourceNotFoundError(turn_id)
-        if not principal.is_admin and (
-            turn.user_id != principal.user_id
-            or (
-                "*" not in principal.workspace_ids
-                and turn.workspace_id not in principal.workspace_ids
-            )
+        # Turn transcript/event access is always owner-scoped.  Elevated
+        # roles may operate the system but never inherit learner conversation
+        # content merely by holding a developer/admin role.
+        if turn.user_id != principal.user_id or (
+            "*" not in principal.workspace_ids
+            and turn.workspace_id not in principal.workspace_ids
         ):
             raise AccessDeniedError(turn_id)
         return turn

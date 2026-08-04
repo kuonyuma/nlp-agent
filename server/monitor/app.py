@@ -19,6 +19,8 @@ from core.identity import AccessDeniedError, AuthenticatedPrincipal
 from core.rbac import Permission, authorization_service
 from core.observability.runtime import TelemetryRuntime
 from core.observability.service import ObservabilityService
+from server.infrastructure.mysql import MySQLRuntime
+from server.rbac.service import rbac_service
 from server.web.auth import AuthenticationError, CsrfRejectedError, OriginRejectedError, SameOriginSessionAuth, SessionClaims
 from server.monitor.reset import LocalRuntimeResetter
 
@@ -42,14 +44,18 @@ def create_monitor_app(
     service = ObservabilityService(runtime)
     auth = auth or SameOriginSessionAuth.from_config(config)
     resetter = resetter or LocalRuntimeResetter(runtime)
+    rbac_runtime = MySQLRuntime.from_runtime(settings.database_runtime)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.runtime = runtime
         app.state.observability = service
+        app.state.rbac_runtime = rbac_runtime
+        await rbac_runtime.start()
         try:
             yield
         finally:
+            await rbac_runtime.close()
             await runtime.close()
 
     app = FastAPI(
@@ -79,8 +85,12 @@ def create_monitor_app(
     def claims(token: Annotated[str | None, Security(cookie_auth)]) -> SessionClaims:
         return auth.authenticate(token)
 
-    def principal(session: Annotated[SessionClaims, Depends(claims)]) -> AuthenticatedPrincipal:
-        identity = session.principal()
+    async def principal(session: Annotated[SessionClaims, Depends(claims)]) -> AuthenticatedPrincipal:
+        if session.roles == frozenset({"guest"}):
+            identity = session.principal()
+        else:
+            async with rbac_runtime.session_factory() as db_session:
+                identity = await rbac_service.principal_for_username(db_session, session.user_id)
         authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         return identity
 
@@ -183,15 +193,17 @@ def create_monitor_app(
         try:
             auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
             session = auth.authenticate(websocket.cookies.get(auth.cookie_name))
-            authorization_service.require(
-                session.principal(), Permission.SYSTEM_RUNTIME_MONITOR
-            )
+            async with rbac_runtime.session_factory() as db_session:
+                identity = await rbac_service.principal_for_username(
+                    db_session, session.user_id
+                )
+            authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         except AuthenticationError:
             await websocket.close(code=4401, reason="authentication required"); return
         except (OriginRejectedError, AccessDeniedError):
             await websocket.close(code=4403, reason="access rejected"); return
         await websocket.accept()
-        queue = service.subscribe(session.principal())
+        queue = service.subscribe(identity)
         try:
             for row in reversed(await asyncio.to_thread(runtime.repository.recent_events, limit=100)):
                 await asyncio.wait_for(websocket.send_json({"type": "telemetry.event", "payload": row}), timeout=5)
