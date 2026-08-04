@@ -7,7 +7,7 @@ from typing import Any
 
 from configs.settings import BASE_DIR, settings
 from core.identity import AuthenticatedPrincipal
-from server.web.authorization import require_admin
+from core.rbac import Permission, authorization_service
 
 
 _SENSITIVE_PARTS = ("secret", "password", "api_key", "authorization", "access_token")
@@ -82,7 +82,7 @@ def _skills_snapshot() -> list[dict[str, Any]]:
 async def developer_snapshot(
     principal: AuthenticatedPrincipal, gateway: Any
 ) -> dict[str, Any]:
-    require_admin(principal)
+    authorization_service.require(principal, Permission.SYSTEM_RUNTIME_INSPECT)
     health = await gateway.health()
     raw = settings._config
     providers: dict[str, Any] = {}

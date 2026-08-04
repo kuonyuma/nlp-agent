@@ -1,0 +1,151 @@
+"""Role capability checks shared by HTTP, WebSocket and application services.
+
+The current adapter derives roles from the authenticated principal.  The
+database RBAC adapter added with the MySQL foundation will become the source of
+those roles, while this module remains the single capability vocabulary and
+decision seam.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Final
+
+from core.identity import AccessDeniedError, AuthenticatedPrincipal
+
+
+class Permission(StrEnum):
+    IDENTITY_PROFILE_READ_SELF = "identity:profile:read_self"
+    IDENTITY_PROFILE_UPDATE_SELF = "identity:profile:update_self"
+    LEARNING_CONTENT_READ_PUBLIC = "learning:content:read_public"
+    LEARNING_CONTENT_READ_WORKSPACE = "learning:content:read_workspace"
+    LEARNING_EXERCISE_SUBMIT = "learning:exercise:submit"
+    LEARNING_PROGRESS_READ_SELF = "learning:progress:read_self"
+    LEARNING_CONTENT_MANAGE = "learning:content:manage"
+    LEARNING_PROGRESS_READ_CLASSROOM = "learning:progress:read_classroom"
+    LEARNING_FEEDBACK_CREATE = "learning:feedback:create"
+    CLASSROOM_CREATE = "classroom:classroom:create"
+    CLASSROOM_MEMBER_MANAGE = "classroom:member:manage"
+    AGENT_SESSION_CREATE = "agent:session:create"
+    AGENT_SESSION_READ = "agent:session:read"
+    AGENT_SESSION_UPDATE = "agent:session:update"
+    AGENT_SESSION_DELETE = "agent:session:delete"
+    AGENT_TURN_SUBMIT = "agent:turn:submit"
+    AGENT_TURN_CANCEL = "agent:turn:cancel"
+    AGENT_EVENT_REPLAY = "agent:event:replay"
+    AGENT_CHECKPOINT_RESTORE = "agent:checkpoint:restore"
+    SYSTEM_MODEL_PROFILE_MANAGE = "system:model_profile:manage"
+    SYSTEM_PROMPT_TEMPLATE_MANAGE = "system:prompt_template:manage"
+    SYSTEM_TOOL_CONFIG_MANAGE = "system:tool_config:manage"
+    SYSTEM_RUNTIME_MONITOR = "system:runtime:monitor"
+    SYSTEM_RUNTIME_INSPECT = "system:runtime:inspect"
+    SYSTEM_USER_MANAGE = "system:user:manage"
+    SYSTEM_ROLE_MANAGE = "system:role:manage"
+    SYSTEM_PERMISSION_READ = "system:permission:read"
+    SYSTEM_AUDIT_READ = "system:audit:read"
+    SYSTEM_SENSITIVE_DATA_READ = "system:sensitive_data:read"
+
+
+_GUEST: Final[frozenset[Permission]] = frozenset(
+    {
+        Permission.IDENTITY_PROFILE_READ_SELF,
+        Permission.IDENTITY_PROFILE_UPDATE_SELF,
+        Permission.LEARNING_CONTENT_READ_PUBLIC,
+    }
+)
+_STUDENT: Final[frozenset[Permission]] = _GUEST | {
+    Permission.AGENT_SESSION_CREATE,
+    Permission.AGENT_SESSION_READ,
+    Permission.AGENT_SESSION_UPDATE,
+    Permission.AGENT_SESSION_DELETE,
+    Permission.AGENT_TURN_SUBMIT,
+    Permission.AGENT_TURN_CANCEL,
+    Permission.AGENT_EVENT_REPLAY,
+    Permission.AGENT_CHECKPOINT_RESTORE,
+    Permission.LEARNING_CONTENT_READ_WORKSPACE,
+    Permission.LEARNING_EXERCISE_SUBMIT,
+    Permission.LEARNING_PROGRESS_READ_SELF,
+}
+_TEACHER: Final[frozenset[Permission]] = _STUDENT | {
+    Permission.LEARNING_CONTENT_MANAGE,
+    Permission.LEARNING_PROGRESS_READ_CLASSROOM,
+    Permission.LEARNING_FEEDBACK_CREATE,
+    Permission.CLASSROOM_CREATE,
+    Permission.CLASSROOM_MEMBER_MANAGE,
+}
+_DEVELOPER: Final[frozenset[Permission]] = _TEACHER | {
+    Permission.SYSTEM_MODEL_PROFILE_MANAGE,
+    Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE,
+    Permission.SYSTEM_TOOL_CONFIG_MANAGE,
+    Permission.SYSTEM_RUNTIME_MONITOR,
+    Permission.SYSTEM_RUNTIME_INSPECT,
+    Permission.SYSTEM_USER_MANAGE,
+    Permission.SYSTEM_ROLE_MANAGE,
+    Permission.SYSTEM_PERMISSION_READ,
+    Permission.SYSTEM_AUDIT_READ,
+}
+
+ROLE_PERMISSIONS: Final[dict[str, frozenset[Permission]]] = {
+    "guest": _GUEST,
+    "student": _STUDENT,
+    "teacher": _TEACHER,
+    "developer": _DEVELOPER,
+    # Compatibility during the migration from the old fixed role.  New users
+    # must be assigned developer through the RBAC tables instead.
+    "admin": _DEVELOPER,
+}
+
+
+class AuthorizationService:
+    """Small, deterministic capability decision module.
+
+    It deliberately keeps object ownership checks out of the role decision.
+    State services must additionally validate owner/workspace relationships;
+    no role (including developer) bypasses that validation.
+    """
+
+    def permissions_for(self, principal: AuthenticatedPrincipal) -> frozenset[Permission]:
+        permissions: set[Permission] = set()
+        for role in principal.roles:
+            permissions.update(ROLE_PERMISSIONS.get(role, ()))
+        return frozenset(permissions)
+
+    def allowed(
+        self,
+        principal: AuthenticatedPrincipal,
+        permission: Permission | str,
+        *,
+        workspace_id: str | None = None,
+    ) -> bool:
+        try:
+            required = Permission(permission)
+        except ValueError:
+            return False
+        if required not in self.permissions_for(principal):
+            return False
+        if workspace_id is None:
+            return True
+        try:
+            principal.require_workspace(workspace_id)
+        except AccessDeniedError:
+            return False
+        return True
+
+    def require(
+        self,
+        principal: AuthenticatedPrincipal,
+        permission: Permission | str,
+        *,
+        workspace_id: str | None = None,
+    ) -> None:
+        if self.allowed(principal, permission, workspace_id=workspace_id):
+            return
+        if workspace_id is not None:
+            try:
+                principal.require_workspace(workspace_id)
+            except AccessDeniedError:
+                raise
+        raise AccessDeniedError(f"permission {permission!s} is required")
+
+
+authorization_service = AuthorizationService()

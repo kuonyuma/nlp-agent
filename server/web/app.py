@@ -15,6 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from configs.settings import settings
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from gateway.contracts import (
     GatewayNotStartedError,
     InjectMessageRequest,
@@ -44,7 +45,6 @@ from server.web.contracts import (
     WorkerProfileBody,
 )
 from server.web.protocol import control_event
-from server.web.authorization import require_admin
 from server.web.developer import developer_snapshot
 from server.web.developer_runtime import (
     DeveloperConfigurationError,
@@ -61,6 +61,7 @@ from server.web.developer_runtime import (
 )
 from server.teacher.models import ExerciseBlueprint, GuidedBlueprint, ReviewBlueprint, UpdateTeacherCatalog, UpdateTeachingGoals
 from server.teacher.service import teacher_service
+from server.rbac.service import rbac_service
 from server.web.websocket import WebSocketHub, websocket_endpoint
 
 
@@ -181,10 +182,23 @@ def create_app(
     ) -> SessionClaims:
         return auth.authenticate(token)
 
-    def current_principal(
+    async def resolve_principal(
+        request: Request, claims: SessionClaims
+    ) -> AuthenticatedPrincipal:
+        """Resolve roles and workspace membership from MySQL in production."""
+        session_factory = getattr(
+            request.app.state.gateway, "authorization_session_factory", None
+        )
+        if session_factory is None:
+            return claims.principal()
+        async with session_factory() as session:
+            return await rbac_service.principal_for_username(session, claims.user_id)
+
+    async def current_principal(
+        request: Request,
         claims: Annotated[SessionClaims, Depends(current_claims)],
     ) -> AuthenticatedPrincipal:
-        return claims.principal()
+        return await resolve_principal(request, claims)
 
     def write_access(
         request: Request,
@@ -328,11 +342,14 @@ def create_app(
         }
 
     @app.get("/api/v1/auth/session", tags=["auth"])
-    async def get_auth_session(claims: Annotated[SessionClaims, Depends(current_claims)]):
+    async def get_auth_session(
+        request: Request, claims: Annotated[SessionClaims, Depends(current_claims)]
+    ):
+        principal = await resolve_principal(request, claims)
         return {
-            "user_id": claims.user_id,
-            "workspace_ids": sorted(claims.workspace_ids),
-            "roles": sorted(claims.roles),
+            "user_id": principal.user_id,
+            "workspace_ids": sorted(principal.workspace_ids),
+            "roles": sorted(principal.roles),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at,
         }
@@ -542,52 +559,52 @@ def create_app(
 
     @app.put("/api/v1/developer/tools/policies", tags=["developer"])
     async def put_tool_policies(body: UpdateToolPoliciesBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await update_tool_policies(body.policies)
 
     @app.put("/api/v1/developer/tools/custom", tags=["developer"])
     async def put_custom_tools(body: UpdateCustomToolsBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await update_custom_tools(body.custom)
 
     @app.put("/api/v1/developer/mcp/{name}", tags=["developer"])
     async def put_mcp_server(name: str, body: McpServerBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await upsert_mcp_server(name, body.config)
 
     @app.delete("/api/v1/developer/mcp/{name}", tags=["developer"])
     async def remove_mcp_server(name: str, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await delete_mcp_server(name)
 
     @app.post("/api/v1/developer/mcp/{name}/test", tags=["developer"])
     async def post_mcp_test(name: str, body: McpServerBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await test_mcp_server(name, body.config)
 
     @app.put("/api/v1/developer/skills/{name}", tags=["developer"])
     async def put_skill(name: str, body: SkillBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE)
         return await upsert_skill(name, body.content)
 
     @app.get("/api/v1/developer/skills/{name}", tags=["developer"])
     async def get_skill(name: str, principal: Principal):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE)
         return read_skill(name)
 
     @app.delete("/api/v1/developer/skills/{name}", tags=["developer"])
     async def remove_skill(name: str, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE)
         return await delete_skill(name)
 
     @app.put("/api/v1/developer/worker-profiles/{name}", tags=["developer"])
     async def put_worker_profile(name: str, body: WorkerProfileBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
         return await upsert_worker_profile(name, body.profile)
 
     @app.delete("/api/v1/developer/worker-profiles/{name}", tags=["developer"])
     async def remove_worker_profile(name: str, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
         return await delete_worker_profile(name)
 
     @app.get("/api/v1/teacher/overview", tags=["teacher"])
@@ -627,7 +644,9 @@ def create_app(
 
     @app.get("/api/v1/learning/catalog/{workspace_id}", tags=["learning"])
     async def get_learning_catalog(workspace_id: str, request: Request, principal: Principal):
-        principal.require_workspace(workspace_id)
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_READ_WORKSPACE, workspace_id=workspace_id
+        )
         catalog = (await request.app.state.gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
         catalog["topics"] = [
             {
@@ -767,6 +786,7 @@ def create_app(
             max_queue=stream_queue_size,
             send_queue_size=ws_send_queue_size,
             send_timeout_s=ws_send_timeout_s,
+            principal_resolver=lambda claims: resolve_principal(websocket, claims),
         )
 
     static_dir_value = str(web_config.get("static_dir", "")).strip()

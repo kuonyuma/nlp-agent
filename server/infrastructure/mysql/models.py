@@ -22,8 +22,100 @@ class UserModel(TimestampedModel, Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    authorization_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
 
     sessions: Mapped[list["SessionModel"]] = relationship(back_populates="user")
+
+
+class RoleModel(TimestampedModel, Base):
+    __tablename__ = "nlp_roles"
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False, server_default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    is_builtin: Mapped[bool] = mapped_column(nullable=False, server_default="1")
+
+
+class PermissionModel(TimestampedModel, Base):
+    __tablename__ = "nlp_permissions"
+    __table_args__ = (
+        UniqueConstraint("domain_name", "resource_name", "action_name", name="uq_nlp_permissions_triplet"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    domain_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False, server_default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    is_builtin: Mapped[bool] = mapped_column(nullable=False, server_default="1")
+
+
+class UserRoleModel(Base):
+    __tablename__ = "nlp_user_roles"
+
+    user_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_roles.id", ondelete="RESTRICT"), primary_key=True
+    )
+    assigned_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), index=True)
+    assigned_by_user_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="SET NULL")
+    )
+
+
+class RolePermissionModel(Base):
+    __tablename__ = "nlp_role_permissions"
+
+    role_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_roles.id", ondelete="CASCADE"), primary_key=True
+    )
+    permission_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_permissions.id", ondelete="RESTRICT"), primary_key=True
+    )
+    granted_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False
+    )
+    granted_by_user_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="SET NULL")
+    )
+
+
+class RolePermissionScopeModel(Base):
+    __tablename__ = "nlp_role_permission_scopes"
+
+    role_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_roles.id", ondelete="CASCADE"), primary_key=True
+    )
+    permission_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_permissions.id", ondelete="RESTRICT"), primary_key=True
+    )
+    scope_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
+class WorkspaceMemberModel(TimestampedModel, Base):
+    __tablename__ = "nlp_workspace_members"
+    __table_args__ = (Index("ix_nlp_workspace_members_user_status", "user_id", "status"),)
+
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    member_type: Mapped[str] = mapped_column(String(32), nullable=False, server_default="member")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
 
 
 class WorkspaceModel(TimestampedModel, Base):

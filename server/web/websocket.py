@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -139,6 +139,7 @@ class WebSocketConnection:
         session_fingerprint: bytes | None = None,
         session_check: Callable[[], SessionClaims] | None = None,
         session_touch: Callable[[], SessionClaims] | None = None,
+        authorization_refresh: Callable[[], Awaitable[AuthenticatedPrincipal]] | None = None,
         session_check_interval_s: float = 20,
     ) -> None:
         self.websocket = websocket
@@ -156,6 +157,7 @@ class WebSocketConnection:
         self.session_fingerprint = session_fingerprint
         self._session_check = session_check
         self._session_touch = session_touch
+        self._authorization_refresh = authorization_refresh
         self._session_check_interval_s = max(1.0, session_check_interval_s)
         self._sender_task: asyncio.Task[None] | None = None
         self._session_guard_task: asyncio.Task[None] | None = None
@@ -179,13 +181,20 @@ class WebSocketConnection:
         if validator is not None:
             validator()
 
+    async def refresh_authorization(self) -> None:
+        if self._authorization_refresh is not None:
+            self.principal = await self._authorization_refresh()
+
     async def _session_guard_loop(self) -> None:
         try:
             while True:
                 await asyncio.sleep(self._session_check_interval_s)
                 self.require_active_session(touch=False)
+                await self.refresh_authorization()
         except AuthenticationError:
             await self._terminate(code=4401, reason="authentication expired")
+        except PermissionError:
+            await self._terminate(code=4403, reason="authorization revoked")
         except asyncio.CancelledError:
             raise
 
@@ -549,6 +558,7 @@ async def websocket_endpoint(
     max_queue: int,
     send_queue_size: int,
     send_timeout_s: float,
+    principal_resolver: Callable[[SessionClaims], Awaitable[AuthenticatedPrincipal]] | None = None,
 ) -> None:
     try:
         auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
@@ -560,17 +570,32 @@ async def websocket_endpoint(
         await websocket.close(code=4403, reason="origin rejected")
         return
 
+    try:
+        principal = (
+            await principal_resolver(claims)
+            if principal_resolver is not None
+            else claims.principal()
+        )
+    except PermissionError:
+        await websocket.close(code=4403, reason="authorization rejected")
+        return
+
     session_token = websocket.cookies.get(auth.cookie_name)
     connection = WebSocketConnection(
         websocket,
         gateway,
-        claims.principal(),
+        principal,
         max_queue=max_queue,
         send_queue_size=send_queue_size,
         send_timeout_s=send_timeout_s,
         session_fingerprint=auth.token_fingerprint(session_token),
         session_check=lambda: auth.authenticate(session_token, touch=False),
         session_touch=lambda: auth.authenticate(session_token),
+        authorization_refresh=(
+            (lambda: principal_resolver(claims))
+            if principal_resolver is not None
+            else None
+        ),
         session_check_interval_s=min(
             20.0,
             float(getattr(auth, "idle_timeout_s", 900)),
@@ -585,8 +610,8 @@ async def websocket_endpoint(
         control_event(
             "connection.ready",
             payload={
-                "user_id": claims.user_id,
-                "workspace_ids": sorted(claims.workspace_ids),
+                "user_id": principal.user_id,
+                "workspace_ids": sorted(principal.workspace_ids),
                 "protocol_version": "1",
             },
         ),
@@ -619,6 +644,7 @@ async def _receive_commands(
                 command = CommandEnvelope.model_validate(json.loads(raw))
                 request_id = command.request_id
                 connection.require_active_session(touch=command.type != "ping")
+                await connection.refresh_authorization()
                 await _dispatch_command(connection, command)
             except AuthenticationError:
                 await connection.close(code=4401, reason="authentication expired")

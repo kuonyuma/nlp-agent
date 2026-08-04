@@ -11,7 +11,17 @@ from sqlalchemy import text
 from configs.settings import Settings
 from server.infrastructure.mysql import DatabaseConfig, UnitOfWorkFactory, create_engine, create_session_factory
 from server.infrastructure.mysql.runtime import MySQLRuntime
-from server.infrastructure.mysql.models import SessionModel, UserModel, WorkspaceModel
+from server.infrastructure.mysql.models import (
+    PermissionModel,
+    RoleModel,
+    RolePermissionModel,
+    RolePermissionScopeModel,
+    SessionModel,
+    UserModel,
+    UserRoleModel,
+    WorkspaceMemberModel,
+    WorkspaceModel,
+)
 
 
 def test_database_config_requires_aiomysql_and_valid_pool_limits() -> None:
@@ -57,6 +67,28 @@ def test_foundation_models_define_identity_session_foreign_keys() -> None:
     }
     assert {constraint.name for constraint in SessionModel.__table__.constraints if constraint.name} >= {
         "uq_nlp_sessions_token_hash",
+    }
+
+
+def test_rbac_models_define_normalized_role_permission_relationships() -> None:
+    assert UserModel.authorization_version.property.columns[0].server_default.arg == "1"
+    assert RoleModel.__tablename__ == "nlp_roles"
+    assert PermissionModel.__tablename__ == "nlp_permissions"
+    assert UserRoleModel.__tablename__ == "nlp_user_roles"
+    assert RolePermissionModel.__tablename__ == "nlp_role_permissions"
+    assert RolePermissionScopeModel.__tablename__ == "nlp_role_permission_scopes"
+    assert WorkspaceMemberModel.__tablename__ == "nlp_workspace_members"
+    assert {key.target_fullname for key in UserRoleModel.__table__.foreign_keys} == {
+        "nlp_users.id",
+        "nlp_roles.id",
+    }
+    assert "nlp_users.id" in {
+        key.target_fullname for key in UserRoleModel.__table__.foreign_keys
+    }
+    assert {key.target_fullname for key in RolePermissionModel.__table__.foreign_keys} == {
+        "nlp_roles.id",
+        "nlp_permissions.id",
+        "nlp_users.id",
     }
 
 

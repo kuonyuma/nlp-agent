@@ -130,6 +130,28 @@ def web_app(tmp_path):
     return create_app(gateway_factory=gateway_factory, auth=auth), engine
 
 
+@pytest.fixture
+def student_web_app(tmp_path):
+    engine = FakeEngine()
+    sessions = FakeSessions()
+
+    def gateway_factory():
+        return BackendGateway(
+            engine=engine,
+            repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+            sessions=sessions,
+        )
+
+    auth = SameOriginSessionAuth(
+        secret="test-secret-that-is-long-enough-for-hmac",
+        allowed_origins=["http://testserver"],
+        username="nova",
+        password_hash=PasswordHasher().hash("test-password"),
+        roles=frozenset({"student"}),
+    )
+    return create_app(gateway_factory=gateway_factory, auth=auth), engine
+
+
 def authenticate(client: TestClient) -> str:
     response = client.post(
         "/api/v1/auth/login",
@@ -148,6 +170,20 @@ def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_
     app, _engine = web_app
     with TestClient(app) as client:
         assert client.get("/api/v1/sessions").status_code == 401
+
+
+def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
+    app, _engine = student_web_app
+    with TestClient(app) as client:
+        authenticate(client)
+
+        teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
+        developer = client.get("/api/v1/developer/snapshot")
+
+        assert teacher.status_code == 403
+        assert teacher.json()["code"] == "forbidden"
+        assert developer.status_code == 403
+        assert developer.json()["code"] == "forbidden"
         assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
 
         rejected = client.post(
