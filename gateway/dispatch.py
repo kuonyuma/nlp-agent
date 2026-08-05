@@ -33,6 +33,7 @@ class TurnTask:
     teaching_materials: TeachingMaterials
     guided_session_id: str | None
     exercise_session_id: str | None
+    model_profile: str | None = None
     authorization: ExecutionAuthorizationContext | None = None
 
 

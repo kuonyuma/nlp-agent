@@ -12,6 +12,7 @@ from core.coordinator_runtime import CoordinatorRuntime
 from core.session_context import SessionContext
 from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
 from core.task_manager import global_task_manager
+from core.model_runtime.selection import bind_model_profile, current_model_profile
 from core.worker_events import global_worker_event_bus
 from gateway.contracts import GatewayEventType
 
@@ -23,7 +24,7 @@ EngineEventSink = Callable[
 
 class AgentEngine(Protocol):
     async def start(self, event_sink: EngineEventSink) -> None: ...
-    async def run_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None) -> str: ...
+    async def run_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None, model_profile: str | None = None) -> str: ...
     async def inject(self, context: SessionContext, content: str) -> str | None: ...
     async def cancel_turn(self, context: SessionContext, turn_id: str) -> None: ...
     async def delete_session(self, context: SessionContext) -> None: ...
@@ -39,6 +40,7 @@ class LangGraphAgentEngine:
         self._runtime: CoordinatorRuntime | None = None
         self._event_sink: EngineEventSink | None = None
         self._started = False
+        self._session_model_profiles: dict[str, str | None] = {}
 
     async def start(self, event_sink: EngineEventSink) -> None:
         if self._started:
@@ -75,6 +77,22 @@ class LangGraphAgentEngine:
     ) -> None:
         if self._app is None:
             raise RuntimeError("Agent engine is not started")
+        selected_profile = current_model_profile() or self._session_model_profiles.get(
+            context.session_id
+        )
+        if selected_profile is not None and current_model_profile() != selected_profile:
+            with bind_model_profile(selected_profile):
+                await self._invoke(
+                    messages,
+                    context,
+                    background,
+                    turn_id,
+                    learning_context,
+                    learning_progress,
+                    exercise_state,
+                    teaching_materials,
+                )
+            return
         config = {
             "recursion_limit": 64,
             "configurable": {
@@ -83,6 +101,7 @@ class LangGraphAgentEngine:
                 "user_id": context.user_id,
                 "workspace_id": context.workspace_id,
                 "channel": context.channel,
+                "model_profile": selected_profile,
                 "learning_context": learning_context.model_dump(mode="json") if learning_context else None,
                 "learning_progress": learning_progress.model_dump(mode="json") if learning_progress else None,
                 "exercise_state": exercise_state.model_dump(mode="json") if exercise_state else None,
@@ -173,7 +192,31 @@ class LangGraphAgentEngine:
                     )
         await self._apply_pending_snips(context.session_id)
 
-    async def run_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None) -> str:
+    async def run_turn(
+        self,
+        context: SessionContext,
+        turn_id: str,
+        content: str,
+        *,
+        learning_context: LearningContext | None = None,
+        learning_progress: LearningProgress | None = None,
+        exercise_state: ExerciseState | None = None,
+        teaching_materials: TeachingMaterials | None = None,
+        model_profile: str | None = None,
+    ) -> str:
+        self._session_model_profiles[context.session_id] = model_profile
+        with bind_model_profile(model_profile):
+            return await self._run_selected_turn(
+                context,
+                turn_id,
+                content,
+                learning_context=learning_context,
+                learning_progress=learning_progress,
+                exercise_state=exercise_state,
+                teaching_materials=teaching_materials,
+            )
+
+    async def _run_selected_turn(self, context: SessionContext, turn_id: str, content: str, *, learning_context: LearningContext | None = None, learning_progress: LearningProgress | None = None, exercise_state: ExerciseState | None = None, teaching_materials: TeachingMaterials | None = None) -> str:
         if self._runtime is None or self._app is None:
             raise RuntimeError("Agent engine is not started")
         message = HumanMessage(content=content, id=turn_id)
@@ -204,6 +247,7 @@ class LangGraphAgentEngine:
         global_task_manager.cancel_turn(context.session_id, turn_id, reason="gateway_cancelled")
 
     async def delete_session(self, context: SessionContext) -> None:
+        self._session_model_profiles.pop(context.session_id, None)
         if self._runtime is not None:
             await self._runtime.release_session(context.session_id)
         if self._app is not None:

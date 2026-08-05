@@ -12,6 +12,7 @@ from .base import Base, TimestampedModel
 
 
 UUID = String(36, collation="ascii_bin")
+SESSION_IDENTIFIER = String(128, collation="ascii_bin")
 
 
 class UserModel(TimestampedModel, Base):
@@ -295,7 +296,7 @@ class CourseCatalogVersionModel(Base):
 
 class ConversationModel(TimestampedModel, Base):
     __tablename__ = "nlp_conversations"
-    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    id: Mapped[str] = mapped_column(SESSION_IDENTIFIER, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
@@ -307,7 +308,7 @@ class TurnModel(TimestampedModel, Base):
     __tablename__ = "nlp_turns"
     __table_args__ = (UniqueConstraint("user_id", "conversation_id", "idempotency_key", name="uq_nlp_turns_user_conversation_idempotency"),)
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[str] = mapped_column(SESSION_IDENTIFIER, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     workspace_id: Mapped[str] = mapped_column(UUID, nullable=False, index=True)
     user_id: Mapped[str] = mapped_column(UUID, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="accepted")
@@ -329,7 +330,7 @@ class ConversationMessageModel(Base):
     __tablename__ = "nlp_conversation_messages"
     __table_args__ = (UniqueConstraint("conversation_id", "sequence", name="uq_nlp_conversation_messages_conversation_id_sequence"),)
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False)
+    conversation_id: Mapped[str] = mapped_column(SESSION_IDENTIFIER, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False)
     turn_id: Mapped[str | None] = mapped_column(UUID, ForeignKey("nlp_turns.id", ondelete="SET NULL"))
     sequence: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -352,7 +353,7 @@ class TurnEventModel(Base):
 class ExerciseSessionModel(TimestampedModel, Base):
     __tablename__ = "nlp_exercise_sessions"
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    conversation_id: Mapped[str] = mapped_column(SESSION_IDENTIFIER, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     workspace_id: Mapped[str] = mapped_column(UUID, nullable=False)
     user_id: Mapped[str] = mapped_column(UUID, nullable=False)
     topic_id: Mapped[str] = mapped_column(UUID, nullable=False)
@@ -404,7 +405,7 @@ class GuidedSessionModel(TimestampedModel, Base):
     __tablename__ = "nlp_guided_sessions"
     __table_args__ = (Index("ix_nlp_guided_sessions_active", "conversation_id", "topic_id", "status"),)
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False)
+    conversation_id: Mapped[str] = mapped_column(SESSION_IDENTIFIER, ForeignKey("nlp_conversations.id", ondelete="CASCADE"), nullable=False)
     workspace_id: Mapped[str] = mapped_column(UUID, nullable=False)
     user_id: Mapped[str] = mapped_column(UUID, nullable=False)
     topic_id: Mapped[str] = mapped_column(UUID, nullable=False)

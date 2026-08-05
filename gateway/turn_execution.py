@@ -40,9 +40,11 @@ class InProcessTurnExecutor:
         self._engine = engine
         self._repository = repository
         self._emit = emit
-        parameter_count = len(inspect.signature(engine.run_turn).parameters)
+        parameters = inspect.signature(engine.run_turn).parameters
+        parameter_count = len(parameters)
         self._accepts_learning = parameter_count >= 6
         self._accepts_teaching_materials = parameter_count >= 7
+        self._accepts_model_profile = "model_profile" in parameters
 
     async def run(self, task: TurnTask, execution_context: Any | None = None) -> None:
         await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.RUNNING)
@@ -68,11 +70,20 @@ class InProcessTurnExecutor:
         await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_COMPLETED, {"status": TurnStatus.COMPLETED.value, "content": final_text})
 
     async def _run_engine(self, task: TurnTask) -> str:
-        if self._accepts_teaching_materials:
-            return await self._engine.run_turn(task.context, task.turn_id, task.content, learning_context=task.learning_context, learning_progress=task.learning_progress, exercise_state=task.exercise_state, teaching_materials=task.teaching_materials)
+        kwargs: dict[str, Any] = {}
         if self._accepts_learning:
-            return await self._engine.run_turn(task.context, task.turn_id, task.content, learning_context=task.learning_context, learning_progress=task.learning_progress, exercise_state=task.exercise_state)
-        return await self._engine.run_turn(task.context, task.turn_id, task.content)
+            kwargs.update(
+                learning_context=task.learning_context,
+                learning_progress=task.learning_progress,
+                exercise_state=task.exercise_state,
+            )
+        if self._accepts_teaching_materials:
+            kwargs["teaching_materials"] = task.teaching_materials
+        if self._accepts_model_profile:
+            kwargs["model_profile"] = task.model_profile
+        return await self._engine.run_turn(
+            task.context, task.turn_id, task.content, **kwargs
+        )
 
     async def _finalize_learning(self, task: TurnTask, final_text: str) -> tuple[str, object]:
         if task.guided_session_id is not None:

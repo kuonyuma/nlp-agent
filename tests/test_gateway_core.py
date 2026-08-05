@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -217,6 +218,47 @@ async def test_gateway_submits_persisted_turn_to_dispatcher(tmp_path, principal)
     assert task.context == session
     assert task.content == "dispatch me"
     assert repository.get_turn(accepted.turn_id).status == TurnStatus.ACCEPTED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_carries_an_allowed_model_profile_to_the_dispatcher(
+    tmp_path, principal, monkeypatch
+):
+    class ProfileConfig:
+        @staticmethod
+        def profile(name):
+            if name != "qwen":
+                raise KeyError(name)
+            return SimpleNamespace(label="Qwen")
+
+    factory = SimpleNamespace(
+        config=ProfileConfig(),
+        profile_available=lambda name: name == "qwen",
+    )
+    monkeypatch.setattr(
+        "core.model_runtime.factory.get_global_model_factory", lambda: factory
+    )
+    dispatcher = RecordingTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=GatewayRepository(tmp_path / "gateway.sqlite3"),
+        sessions=FakeSessions(),
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    await gateway.submit_turn(
+        principal,
+        SubmitTurnRequest(
+            session_id=session.session_id,
+            content="use qwen",
+            model_profile="qwen",
+        ),
+    )
+
+    assert dispatcher.submissions[0].model_profile == "qwen"
     await gateway.close()
 
 

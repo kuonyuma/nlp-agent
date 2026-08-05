@@ -78,7 +78,11 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
 from core.skill_loader import skill_loader
-from server.agent.llm_factory import get_worker_llm, get_tool_llm
+from server.agent.llm_factory import (
+    get_worker_llm,
+    get_tool_llm,
+    resolve_worker_model_name,
+)
 from core.tool_registry import physical_tool_manager
 from core.tool_runtime import ToolGrantSnapshot, ToolSet
 from core.session_context import SessionContext
@@ -708,7 +712,11 @@ async def spawn_worker(
         return WorkerNotificationSpec(
             task_id=worker_id, status="failed", summary=str(error)
         ).model_dump_json(exclude_none=True)
-    resolved_model = settings._resolve_model_name(agent_name, model or profile.model)
+    resolved_model = resolve_worker_model_name(
+        agent_name,
+        model or profile.model,
+        config.get("configurable", {}).get("model_profile"),
+    )
     sop_prompt = profile.system_prompt
 
     import datetime

@@ -27,7 +27,7 @@ vi.mock("@/platform/http/api", () => ({
   ensureAuth: harness.authenticate,
   api: {
     listSessions: vi.fn().mockResolvedValue({ items: [] }),
-    getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} } }),
+    getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} }, runtime: { default_model_profile: "deepseek", model_profiles: {} } }),
     getLearningCatalog: harness.getLearningCatalog,
   },
 }));

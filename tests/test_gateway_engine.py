@@ -61,10 +61,12 @@ async def test_engine_injects_teacher_topic_and_blueprint_into_graph_config():
         learning_progress=LearningProgress(objective="掌握 Transformer"),
         exercise_state=ExerciseState(blueprint_id="bp", status="awaiting_answer"),
         teaching_materials=materials,
+        model_profile="qwen",
     )
 
     configurable = graph.configs[0]["configurable"]
     assert result == "done"
+    assert configurable["model_profile"] == "qwen"
     assert configurable["learning_topic"]["description"] == "模型结构"
     assert configurable["learning_topic"]["knowledge_points"] == ["QKV"]
     assert configurable["exercise_blueprint"]["instructions"] == "生成一道 QKV 题"

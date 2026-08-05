@@ -79,13 +79,22 @@ class MySQLCheckpointSaver(BaseCheckpointSaver):
                 LangGraphCheckpointWriteModel.checkpoint_ns == row.checkpoint_ns,
                 LangGraphCheckpointWriteModel.checkpoint_id == row.checkpoint_id,
             ).order_by(LangGraphCheckpointWriteModel.task_id, LangGraphCheckpointWriteModel.write_index))).all()
-        values = {blob.channel: self.serde.loads_typed((blob.value_type, blob.value_blob)) for blob in blobs if str(checkpoint["channel_versions"].get(blob.channel)) == blob.version}
+        values = {
+            blob.channel: self.serde.loads_typed((blob.value_type, blob.value_blob))
+            for blob in blobs
+            if str(checkpoint["channel_versions"].get(blob.channel)) == blob.version
+            and blob.value_type != "empty"
+        }
         return CheckpointTuple(
             config={"configurable": {"thread_id": row.thread_id, "checkpoint_ns": row.checkpoint_ns, "checkpoint_id": row.checkpoint_id}},
             checkpoint={**checkpoint, "channel_values": values},
             metadata=metadata,
             parent_config=({"configurable": {"thread_id": row.thread_id, "checkpoint_ns": row.checkpoint_ns, "checkpoint_id": row.parent_checkpoint_id}} if row.parent_checkpoint_id else None),
-            pending_writes=[(item.task_id, item.channel, self.serde.loads_typed((item.value_type, item.value_blob))) for item in writes],
+            pending_writes=[
+                (item.task_id, item.channel, self.serde.loads_typed((item.value_type, item.value_blob)))
+                for item in writes
+                if item.value_type != "empty"
+            ],
         )
 
     async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple | None:

@@ -71,6 +71,7 @@ def test_turn_task_codec_preserves_worker_payload():
         teaching_materials=TeachingMaterials(),
         guided_session_id=None,
         exercise_session_id=None,
+        model_profile="qwen",
         authorization=ExecutionAuthorizationContext(
             submitter_user_id="alice", workspace_id="w1", authorization_version=7
         ),
@@ -79,6 +80,7 @@ def test_turn_task_codec_preserves_worker_payload():
     restored = TurnTaskCodec.loads(TurnTaskCodec.dumps(task))
 
     assert restored == task
+    assert restored.model_profile == "qwen"
 
 
 def test_turn_task_codec_rejects_unknown_protocol_version():

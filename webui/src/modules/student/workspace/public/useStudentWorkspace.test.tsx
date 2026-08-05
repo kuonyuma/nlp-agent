@@ -3,6 +3,14 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { useStudentWorkspace } from "./useStudentWorkspace";
 import { api } from "@/platform/http/api";
 
+const runtime = {
+  default_model_profile: "deepseek",
+  model_profiles: {
+    deepseek: { label: "DeepSeek", provider: "deepseek", available: true },
+    qwen: { label: "Qwen", provider: "dashscope", available: true },
+  },
+};
+
 const { ensureAuthMock, getSettingsMock, createSessionMock } = vi.hoisted(() => ({
   ensureAuthMock: vi.fn(),
   getSettingsMock: vi.fn(),
@@ -37,7 +45,7 @@ describe("useStudentWorkspace settings", () => {
     onChange = undefined;
     document.documentElement.classList.remove("dark");
     ensureAuthMock.mockResolvedValue({ csrf_token: "x", workspace_ids: ["default"] });
-    getSettingsMock.mockResolvedValue({ preferences: { settings: { theme: "system" } } });
+    getSettingsMock.mockResolvedValue({ preferences: { settings: { theme: "system" } }, runtime });
     createSessionMock.mockResolvedValue({ session_id: "session-new", user_id: "user", workspace_id: "default", channel: "web" });
     vi.stubGlobal("matchMedia", vi.fn(() => ({
       get matches() { return dark; },
@@ -83,7 +91,7 @@ describe("useStudentWorkspace settings", () => {
       .mockRejectedValueOnce(new Error("first failed"))
       .mockResolvedValueOnce({ settings: {
         theme: "light", locale: "zh-CN", show_reasoning: true,
-        stream_render_interval_ms: 30, default_workspace_id: "default",
+        stream_render_interval_ms: 30, model_profile: "deepseek", default_workspace_id: "default",
       } });
     const { result } = renderHook(() => useStudentWorkspace());
     await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
@@ -97,6 +105,27 @@ describe("useStudentWorkspace settings", () => {
 
     expect(result.current.settings.theme).toBe("light");
     expect(result.current.settingsError).toBe("");
+  });
+
+  it("loads backend model profiles and prefers the saved profile over the runtime default", async () => {
+    getSettingsMock.mockResolvedValue({
+      preferences: { settings: { theme: "system", model_profile: "qwen" } },
+      runtime,
+    });
+    const { result } = renderHook(() => useStudentWorkspace());
+
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    expect(result.current.settings.model_profile).toBe("qwen");
+    expect(result.current.modelProfiles.qwen.label).toBe("Qwen");
+  });
+
+  it("uses the runtime default model when the user has not saved one", async () => {
+    const { result } = renderHook(() => useStudentWorkspace());
+
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    expect(result.current.settings.model_profile).toBe("deepseek");
   });
 
   it("tracks operating-system theme changes while using system mode", async () => {
@@ -127,7 +156,7 @@ describe("useStudentWorkspace settings", () => {
 
   it("creates new sessions in the authorized default workspace from user settings", async () => {
     ensureAuthMock.mockResolvedValue({ csrf_token: "x", workspace_ids: ["default", "research"] });
-    getSettingsMock.mockResolvedValue({ preferences: { settings: { theme: "system", default_workspace_id: "research" } } });
+    getSettingsMock.mockResolvedValue({ preferences: { settings: { theme: "system", default_workspace_id: "research" } }, runtime });
     createSessionMock.mockResolvedValue({ session_id: "session-research", user_id: "user", workspace_id: "research", channel: "web" });
     const { result } = renderHook(() => useStudentWorkspace());
     await waitFor(() => expect(result.current.bootStatus).toBe("ready"));

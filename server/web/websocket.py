@@ -496,6 +496,7 @@ async def _dispatch_command(
                 content=payload.content,
                 idempotency_key=payload.idempotency_key,
                 learning_context=payload.learning_context,
+                model_profile=payload.model_profile,
             ),
         )
         await connection.send(

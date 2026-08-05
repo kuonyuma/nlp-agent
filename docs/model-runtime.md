@@ -2,16 +2,17 @@
 
 NLP Agent 从 `v0.14.0` 起使用显式 Provider Registry 和类型化模型路由。Coordinator、Worker、Memory 与 Compression 不再直接构造 DeepSeek/OpenAI SDK 对象。
 
-## 四层配置
+## 五层配置
 
-`configs/agent_config.yaml` 将模型配置拆成四层：
+`configs/agent_config.yaml` 将模型配置拆成五层：
 
 1. `providers`：连接协议、Endpoint、密钥环境变量和固定 Header；
 2. `models`：真实模型 ID、上下文窗口、最大输出和能力声明；
 3. `model_presets`：思考、生成、超时、重试和熔断策略；
-4. `model_routes`：Coordinator、Worker、Utility 的主模型和 fallback 链。
+4. `model_routes`：Coordinator、Worker、Utility 的默认主模型和 fallback 链；
+5. `model_profiles`：学生可选择的模型档案，显式绑定同一 Provider 的 Coordinator、Worker 和 Utility preset。
 
-Provider 和 Model 必须显式关联，不通过 URL 或模型名称猜测 Provider。
+Provider 和 Model 必须显式关联，不通过 URL 或模型名称猜测 Provider。模型档案也会在配置加载时校验三个 preset 是否属于其声明的 Provider，避免无意间要求其他厂商的密钥。
 
 ## 默认 DeepSeek 路由
 
@@ -24,6 +25,18 @@ utility:     utility-flash (V4 Flash/non-thinking)
 Utility 用于记忆整理、Context Collapse 和 Auto Compact，避免为确定性摘要支付 Pro/max 的延迟与 Token。
 
 DeepSeek 思考模式通过 `extra_body.thinking.type` 控制。内部统一 effort 枚举为 `none/low/medium/high/max`；DeepSeek Adapter 将 low、medium、high 映射为 `high`，将 max 映射为 `max`。思考模式下会丢弃无效的 temperature/top_p。
+
+## Qwen 适配
+
+Qwen 使用专用 `qwen` Adapter，而不是把兼容接口直接当作通用 OpenAI Provider。Adapter 根据 preset 写入 `extra_body.enable_thinking`；启用思考时同时设置 `preserve_thinking=true`，并将 Qwen3.8 Max 的内部 `high/max` effort 映射为厂商参数 `xhigh`。
+
+流式和非流式响应中的 `reasoning_content` 都会保留。多轮请求会将历史 Assistant 消息的 `reasoning_content` 回传给 Qwen，避免开启 `preserve_thinking` 后丢失推理上下文。缓存 Token、推理 Token 和总用量仍归一化到统一 usage 字段。
+
+## 学生端模型档案
+
+学生端从 Settings API 动态读取 `default_model_profile` 和 `model_profiles`。公开数据只包含档案名称、展示标签、Provider 和可用状态，不会暴露 API Key。缺少对应 Provider 密钥的档案会显示为不可用并禁止选择。
+
+选择结果通过用户设置中的 `model_profile` 持久化，后续 `chat.send` 会携带该值。Gateway 将它作为当前 turn 的本地上下文传递给 Executor 和 LangGraph；Coordinator、Worker、Utility 分别解析档案绑定的 preset，不修改进程级默认模型，也不会影响其他会话。
 
 ## 运行语义
 

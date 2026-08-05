@@ -5,4 +5,5 @@ export const DEFAULT_SETTINGS: UserSettings = {
   theme: "system",
   show_reasoning: false,
   stream_render_interval_ms: 30,
+  model_profile: "deepseek",
 };

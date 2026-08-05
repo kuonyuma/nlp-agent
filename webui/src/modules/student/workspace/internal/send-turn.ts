@@ -2,7 +2,7 @@ import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction 
 
 import { deriveTitle } from "@/platform/storage/learning-preferences";
 import { StudentSocket } from "@/platform/realtime/client";
-import type { ChatMessage, LearningPreferences, SessionLearningMeta } from "@/shared/types";
+import type { ChatMessage, LearningPreferences, SessionLearningMeta, UserSettings } from "@/shared/types";
 import { createUuid } from "@/shared/utils/uuid";
 
 interface TurnSenderOptions {
@@ -11,6 +11,7 @@ interface TurnSenderOptions {
   pendingRequests: MutableRefObject<Map<string, string>>;
   inFlightTurnIds: MutableRefObject<Set<string>>;
   preferences: LearningPreferences;
+  settings: UserSettings;
   messages: ChatMessage[];
   createSession: () => Promise<string>;
   updateSessionMeta: (sessionId: string, patch: Partial<SessionLearningMeta>) => void;
@@ -24,6 +25,7 @@ export function useTurnSender({
   pendingRequests,
   inFlightTurnIds,
   preferences,
+  settings,
   messages,
   createSession,
   updateSessionMeta,
@@ -52,8 +54,8 @@ export function useTurnSender({
       updateSessionMeta(sessionId, { title: deriveTitle(content), topic: preferences.context.topic_name });
     }
     socketRef.current?.setSession(sessionId);
-    socketRef.current?.sendChat(sessionId, content.trim(), requestId, preferences.context);
-  }, [activeSessionRef, createSession, inFlightTurnIds, pendingRequests, preferences.context, preferences.sessions, setMessages, setRequestError, socketRef, updateSessionMeta]);
+    socketRef.current?.sendChat(sessionId, content.trim(), requestId, preferences.context, settings.model_profile);
+  }, [activeSessionRef, createSession, inFlightTurnIds, pendingRequests, preferences.context, preferences.sessions, setMessages, setRequestError, settings.model_profile, socketRef, updateSessionMeta]);
 
   const cancel = useCallback(() => {
     const running = [...messages].reverse().find((message) => message.role === "assistant" && ["accepted", "running"].includes(message.status ?? ""));

@@ -6,7 +6,7 @@ vi.mock("@/platform/http/api", () => ({
     workspace_ids: ["default"],
   }),
   api: {
-    getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} } }),
+    getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} }, runtime: { default_model_profile: "deepseek", model_profiles: {} } }),
     getTeacherOverview: vi.fn().mockResolvedValue({
       workspace_id: "default",
       period_days: 30,

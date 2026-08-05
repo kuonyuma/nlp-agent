@@ -184,5 +184,17 @@ export interface UserSettings {
   theme: "system" | "light" | "dark";
   show_reasoning: boolean;
   stream_render_interval_ms: number;
+  model_profile: string;
   default_workspace_id?: string;
+}
+
+export interface RuntimeModelProfile {
+  label: string;
+  provider: string;
+  available: boolean;
+}
+
+export interface SettingsRuntime {
+  default_model_profile: string;
+  model_profiles: Record<string, RuntimeModelProfile>;
 }

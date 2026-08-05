@@ -127,7 +127,10 @@ def web_app(tmp_path):
         password_hash=PasswordHasher().hash("test-password"),
         roles=frozenset({"admin"}),
     )
-    return create_app(gateway_factory=gateway_factory, auth=auth), engine
+    # Inject testserver so Starlette's TrustedHostMiddleware accepts the
+    # TestClient's default Host: testserver header regardless of the local
+    # .env override of NLP_AGENT_WEB_ALLOWED_HOSTS.
+    return create_app(gateway_factory=gateway_factory, auth=auth, allowed_hosts=["testserver"]), engine
 
 
 @pytest.fixture
@@ -149,7 +152,10 @@ def student_web_app(tmp_path):
         password_hash=PasswordHasher().hash("test-password"),
         roles=frozenset({"student"}),
     )
-    return create_app(gateway_factory=gateway_factory, auth=auth), engine
+    # Inject testserver so Starlette's TrustedHostMiddleware accepts the
+    # TestClient's default Host: testserver header regardless of the local
+    # .env override of NLP_AGENT_WEB_ALLOWED_HOSTS.
+    return create_app(gateway_factory=gateway_factory, auth=auth, allowed_hosts=["testserver"]), engine
 
 
 def authenticate(client: TestClient) -> str:
@@ -271,12 +277,16 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
 
         updated = client.patch(
             "/api/v1/settings",
-            json={"theme": "dark", "show_reasoning": True},
+            json={"theme": "dark", "show_reasoning": True, "model_profile": "qwen"},
             headers=write_headers(csrf),
         )
         # Teaching catalog revisions are isolated from per-user UI settings.
         assert updated.json()["revision"] == 1
-        assert client.get("/api/v1/settings").json()["preferences"]["settings"]["theme"] == "dark"
+        settings_payload = client.get("/api/v1/settings").json()
+        assert settings_payload["preferences"]["settings"]["theme"] == "dark"
+        assert settings_payload["preferences"]["settings"]["model_profile"] == "qwen"
+        assert settings_payload["runtime"]["default_model_profile"] == "deepseek"
+        assert settings_payload["runtime"]["model_profiles"]["qwen"]["label"] == "Qwen"
 
         deleted = client.delete(
             f"/api/v1/sessions/{session_id}",

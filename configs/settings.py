@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     BASE_DIR: Path = BASE_DIR
     DEEPSEEK_API_KEY: str = ""
+    QWEN_API_KEY: str = ""
     TAVILY_API_KEY: str = ""
     NLP_AGENT_WORKER_MODEL: str = ""
     NLP_AGENT_WEB_SECRET: str = ""
@@ -52,11 +53,21 @@ class Settings(BaseSettings):
         presets = self._config.get("model_presets", {})
         models = self._config.get("models", {})
         if name in presets:
-            preset_name, preset, model_name = name, presets[name], presets[name]["model"]
+            preset_name, preset, model_name = (
+                name,
+                presets[name],
+                presets[name]["model"],
+            )
         elif name in models:
-            preset_name, preset, model_name = name, {"generation": {}, "thinking": {}}, name
+            preset_name, preset, model_name = (
+                name,
+                {"generation": {}, "thinking": {}},
+                name,
+            )
         else:
-            raise KeyError(f"Unknown model preset/model {name!r}; presets={list(presets)}")
+            raise KeyError(
+                f"Unknown model preset/model {name!r}; presets={list(presets)}"
+            )
         model = models[model_name]
         provider_name = model["provider"]
         provider = self._config.get("providers", {})[provider_name]
@@ -180,9 +191,13 @@ class Settings(BaseSettings):
             config["host"] = host.strip()
         if port > 0:
             config["port"] = port
-        if values := [item.strip() for item in allowed_hosts.split(",") if item.strip()]:
+        if values := [
+            item.strip() for item in allowed_hosts.split(",") if item.strip()
+        ]:
             config["allowed_hosts"] = values
-        if values := [item.strip() for item in allowed_origins.split(",") if item.strip()]:
+        if values := [
+            item.strip() for item in allowed_origins.split(",") if item.strip()
+        ]:
             config["allowed_origins"] = values
 
     def _resolve_worker_model(
@@ -200,7 +215,9 @@ class Settings(BaseSettings):
         default = self._config.get("defaults", {}).get("worker", "inherit")
         if default != "inherit":
             return str(default)
-        return str(self._config.get("defaults", {}).get("coordinator", "coordinator-pro"))
+        return str(
+            self._config.get("defaults", {}).get("coordinator", "coordinator-pro")
+        )
 
     def _resolve_model_name(
         self,
@@ -212,8 +229,10 @@ class Settings(BaseSettings):
 
     @property
     def planner_llm(self) -> dict:
-        name = self._config.get("model_routes", {}).get("coordinator", {}).get(
-            "primary", "coordinator-pro"
+        name = (
+            self._config.get("model_routes", {})
+            .get("coordinator", {})
+            .get("primary", "coordinator-pro")
         )
         return self._get_llm_config(name)
 

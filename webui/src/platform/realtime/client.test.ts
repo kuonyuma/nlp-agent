@@ -35,11 +35,11 @@ describe("StudentSocket", () => {
     instance.onmessage?.({ data: JSON.stringify({ v: "1", type: "connection.ready", timestamp: new Date().toISOString(), payload: {} }) });
     client.sendChat("session_1", "hello", "request_1", {
       topic: "Transformer", level: "intermediate", mode: "practice",
-    });
+    }, "qwen");
 
     const frames = instance.sent.map((value) => JSON.parse(value) as { type: string; v: string; payload: Record<string, unknown> });
     expect(frames[0]).toMatchObject({ v: "1", type: "session.subscribe", payload: { session_id: "session_1" } });
-    expect(frames[1]).toMatchObject({ v: "1", type: "chat.send", payload: { session_id: "session_1", content: "hello", idempotency_key: "request_1", learning_context: { topic: "Transformer", level: "intermediate", mode: "practice" } } });
+    expect(frames[1]).toMatchObject({ v: "1", type: "chat.send", payload: { session_id: "session_1", content: "hello", idempotency_key: "request_1", model_profile: "qwen", learning_context: { topic: "Transformer", level: "intermediate", mode: "practice" } } });
     client.close();
   });
 

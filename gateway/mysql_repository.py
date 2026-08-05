@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Connection
 
 from core.learning import ExerciseState, LearningContext, LearningProgress
 from gateway.contracts import GatewayEvent, GatewayEventType, TeachingConfigurationError, TurnRecord, TurnStatus
@@ -33,11 +34,50 @@ class MySQLGatewayRepository:
             return dict(row) if row else None
 
     def _record(self, row: dict[str, Any]) -> TurnRecord:
-        state = row.get("learning_state_json") or {}
+        state = self._json(row.get("learning_state_json") or {})
         return TurnRecord(turn_id=row["id"], session_id=row["conversation_id"], workspace_id=row["workspace_id"], user_id=row["user_id"], status=TurnStatus(row["status"]), input_text=row["input_text"], learning_context=LearningContext.model_validate(state["context"]) if state.get("context") else None, learning_progress=LearningProgress.model_validate(state["progress"]) if state.get("progress") else None, exercise_state=ExerciseState.model_validate(state["exercise"]) if state.get("exercise") else None, final_text=row.get("result_text"), error_kind=row.get("error_kind"), error_message=row.get("error_message"), created_at=row["created_at"], started_at=row.get("started_at"), completed_at=row.get("completed_at"))
+
+    @staticmethod
+    def _ensure_conversation(
+        connection: Connection,
+        *,
+        session_id: str,
+        workspace_id: str,
+        user_id: str,
+        title: str,
+    ) -> None:
+        connection.execute(
+            text(
+                "INSERT INTO nlp_conversations(id,workspace_id,owner_user_id,title,status) "
+                "VALUES(:id,:workspace,:user,:title,'active') "
+                "ON DUPLICATE KEY UPDATE id=VALUES(id)"
+            ),
+            {
+                "id": session_id,
+                "workspace": workspace_id,
+                "user": user_id,
+                "title": title[:255],
+            },
+        )
+        identity = connection.execute(
+            text(
+                "SELECT workspace_id,owner_user_id FROM nlp_conversations "
+                "WHERE id=:id"
+            ),
+            {"id": session_id},
+        ).mappings().one()
+        if identity["workspace_id"] != workspace_id or identity["owner_user_id"] != user_id:
+            raise PermissionError("conversation identity does not match the current session")
 
     def create_turn(self, *, turn_id: str, session_id: str, workspace_id: str, user_id: str, input_text: str, idempotency_key: str | None, learning_context=None, learning_progress=None, exercise_state=None, dispatch_payload: str | None = None, **_: Any) -> tuple[TurnRecord, bool]:
         with self._engine.begin() as c:
+            self._ensure_conversation(
+                c,
+                session_id=session_id,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                title=input_text,
+            )
             if idempotency_key:
                 old = c.execute(text("SELECT * FROM nlp_turns WHERE user_id=:u AND conversation_id=:s AND idempotency_key=:k"), {"u": user_id, "s": session_id, "k": idempotency_key}).mappings().first()
                 if old:

@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import text
 
 from configs.settings import Settings
+from core.session_context import SessionContext
 from server.infrastructure.mysql import DatabaseConfig, UnitOfWorkFactory, create_engine, create_session_factory
 from server.infrastructure.mysql.runtime import MySQLRuntime
 from server.infrastructure.mysql.models import (
@@ -17,7 +18,12 @@ from server.infrastructure.mysql.models import (
     RolePermissionModel,
     RolePermissionScopeModel,
     AuthorizationAuditLogModel,
+    ConversationMessageModel,
+    ConversationModel,
+    ExerciseSessionModel,
+    GuidedSessionModel,
     SessionModel,
+    TurnModel,
     UserModel,
     UserRoleModel,
     WorkspaceMemberModel,
@@ -69,6 +75,20 @@ def test_foundation_models_define_identity_session_foreign_keys() -> None:
     assert {constraint.name for constraint in SessionModel.__table__.constraints if constraint.name} >= {
         "uq_nlp_sessions_token_hash",
     }
+
+
+def test_conversation_models_accept_runtime_session_identifiers() -> None:
+    context = SessionContext.create(user_id="student")
+    columns = (
+        ConversationModel.id,
+        TurnModel.conversation_id,
+        ConversationMessageModel.conversation_id,
+        ExerciseSessionModel.conversation_id,
+        GuidedSessionModel.conversation_id,
+    )
+
+    assert len(context.session_id) <= 128
+    assert {column.property.columns[0].type.length for column in columns} == {128}
 
 
 def test_rbac_models_define_normalized_role_permission_relationships() -> None:
