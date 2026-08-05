@@ -1,5 +1,7 @@
 """FastAPI same-origin adapter for the lifecycle-owning BackendGateway."""
 
+import asyncio
+import json
 import secrets
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -16,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from configs.settings import settings
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
 from core.rbac import Permission, ResourceRef, authorization_service
+from core.authorization_audit import begin as begin_authorization_audit, end as end_authorization_audit
 from gateway.contracts import (
     GatewayNotStartedError,
     InjectMessageRequest,
@@ -153,9 +156,40 @@ def create_app(
         gateway = gateway_factory()
         app.state.gateway = gateway
         await gateway.start()
+        redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
+        authorization_channel = str(settings.gateway_runtime.get("redis_authorization_channel", "nlp-agent:authorization"))
+
+        async def consume_authorization_changes() -> None:
+            if redis_client is None:
+                return
+            pubsub = redis_client.pubsub()
+            try:
+                await pubsub.subscribe(authorization_channel)
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    try:
+                        payload = json.loads(message.get("data") or "{}")
+                        user_id = str(payload["user_id"])
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    await hub.close_user(user_id, reason="authorization changed")
+            except asyncio.CancelledError:
+                raise
+            finally:
+                await pubsub.unsubscribe(authorization_channel)
+                await pubsub.aclose()
+
+        authorization_listener = (
+            asyncio.create_task(consume_authorization_changes(), name="authorization-invalidation-listener")
+            if redis_client is not None else None
+        )
         try:
             yield
         finally:
+            if authorization_listener is not None:
+                authorization_listener.cancel()
+                await asyncio.gather(authorization_listener, return_exceptions=True)
             await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()
@@ -177,7 +211,23 @@ def create_app(
     @app.middleware("http")
     async def request_context(request: Request, call_next):
         request.state.request_id = request.headers.get("x-request-id") or secrets.token_hex(16)
-        response = await call_next(request)
+        audit_token, decisions = begin_authorization_audit()
+        try:
+            response = await call_next(request)
+        finally:
+            end_authorization_audit(audit_token)
+        session_factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if session_factory is not None and decisions:
+            async with session_factory() as session:
+                async with session.begin():
+                    for decision in decisions:
+                        await rbac_service.audit(
+                            session, actor_user_id=decision.actor_user_id, target_user_id=None,
+                            decision=decision.decision, reason_code="authorization_required",
+                            permission_code=decision.permission_code, resource_type=decision.resource_type,
+                            resource_id=decision.resource_id,
+                            detail={"workspace_id": decision.workspace_id, "request_id": request.state.request_id},
+                        )
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"

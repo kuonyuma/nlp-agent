@@ -8,6 +8,7 @@ from typing import Any
 
 from gateway.dispatch import TurnTask
 from core.rbac import Permission, authorization_service
+from core.rbac import required_permission_for_high_risk_tool
 from core.identity import AuthenticatedPrincipal
 from server.rbac.service import rbac_service
 from server.application.turn_reliability import TurnReliabilityService
@@ -28,6 +29,9 @@ class TurnExecutionContext:
         if self.principal is None:
             raise PermissionError("worker execution principal is missing")
         authorization_service.require(self.principal, permission, workspace_id=self.workspace_id)
+
+    def require_high_risk_tool(self, tool_name: str) -> None:
+        self.require(required_permission_for_high_risk_tool(tool_name))
 
 
 class FencedTurnExecutor:

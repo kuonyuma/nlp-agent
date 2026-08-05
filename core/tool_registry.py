@@ -20,6 +20,7 @@ from core.tool_runtime import (
     ToolSource,
     global_tool_runtime,
 )
+from core.rbac import required_permission_for_high_risk_tool
 from server.tools.tool_manager import register_builtin_tools
 from utils.logger import get_logger
 
@@ -70,6 +71,11 @@ class PhysicalToolManager:
         max_concurrency: int = 0,
         retry: ToolRetryPolicy | None = None,
     ) -> None:
+        if risk in {ToolRisk.HIGH, ToolRisk.CRITICAL}:
+            # Enforced at registration, before the descriptor can reach a
+            # model-visible ToolSet.  The execution boundary checks the
+            # resulting permission again with the live principal.
+            required_permission_for_high_risk_tool(tool.name)
         descriptor = ToolDescriptor(
             name=tool.name,
             description=tool.description or tool.name,

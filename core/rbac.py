@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.authorization_audit import record as record_authorization_decision
 
 
 class Permission(StrEnum):
@@ -132,6 +133,25 @@ ROLE_PERMISSIONS: Final[dict[str, frozenset[Permission]]] = {
     "admin": _DEVELOPER,
 }
 
+# Every HIGH/CRITICAL tool must be listed here.  Registration is fail-closed
+# so a future side-effecting tool cannot silently inherit a broad runtime grant.
+HIGH_RISK_TOOL_PERMISSIONS: Final[dict[str, Permission]] = {
+    "checkpoint.restore": Permission.AGENT_CHECKPOINT_RESTORE,
+    "classroom.feedback.write": Permission.LEARNING_FEEDBACK_CREATE,
+    "runtime.model_profile.write": Permission.SYSTEM_MODEL_PROFILE_MANAGE,
+    "runtime.prompt_template.write": Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE,
+    "runtime.tool_config.write": Permission.SYSTEM_TOOL_CONFIG_MANAGE,
+}
+
+
+def required_permission_for_high_risk_tool(tool_name: str) -> Permission:
+    try:
+        return HIGH_RISK_TOOL_PERMISSIONS[tool_name]
+    except KeyError as error:
+        raise PermissionError(
+            f"high-risk tool {tool_name!r} has no explicit RBAC permission mapping"
+        ) from error
+
 
 class AuthorizationService:
     """Small, deterministic capability decision module.
@@ -193,7 +213,15 @@ class AuthorizationService:
     def require_resource(
         self, principal: AuthenticatedPrincipal, permission: Permission | str, resource: ResourceRef
     ) -> None:
-        if not self.allowed_resource(principal, permission, resource):
+        allowed = self.allowed_resource(principal, permission, resource)
+        record_authorization_decision(
+            principal,
+            decision="allow" if allowed else "deny",
+            permission_code=str(permission),
+            resource_type=resource.resource_type,
+            workspace_id=resource.workspace_id,
+        )
+        if not allowed:
             raise AccessDeniedError(f"permission {permission!s} is required for {resource.resource_type}")
 
     def require(
@@ -203,7 +231,9 @@ class AuthorizationService:
         *,
         workspace_id: str | None = None,
     ) -> None:
-        if self.allowed(principal, permission, workspace_id=workspace_id):
+        allowed = self.allowed(principal, permission, workspace_id=workspace_id)
+        record_authorization_decision(principal, decision="allow" if allowed else "deny", permission_code=str(permission), workspace_id=workspace_id)
+        if allowed:
             return
         if workspace_id is not None:
             try:

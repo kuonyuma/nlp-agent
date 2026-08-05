@@ -4,6 +4,8 @@ import pytest
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
 from core.rbac import AuthorizationService, Permission, ResourceRef
+from core.authorization_audit import begin, end
+from core.rbac import required_permission_for_high_risk_tool
 from server.rbac.catalog import (
     ROLE_NAMES,
     permission_id,
@@ -69,6 +71,27 @@ def test_require_reports_a_stable_access_denied_error() -> None:
 
     with pytest.raises(AccessDeniedError, match="learning:content:manage"):
         authorization.require(principal("student"), Permission.LEARNING_CONTENT_MANAGE)
+
+
+def test_require_collects_allow_and_deny_decisions_without_io() -> None:
+    authorization = AuthorizationService()
+    token, decisions = begin()
+    try:
+        authorization.require(principal("student"), Permission.AGENT_TURN_SUBMIT)
+        with pytest.raises(AccessDeniedError):
+            authorization.require(principal("student"), Permission.SYSTEM_ROLE_MANAGE)
+    finally:
+        end(token)
+    assert [(item.decision, item.permission_code) for item in decisions] == [
+        ("allow", Permission.AGENT_TURN_SUBMIT.value),
+        ("deny", Permission.SYSTEM_ROLE_MANAGE.value),
+    ]
+
+
+def test_high_risk_tool_mapping_is_explicit_and_fail_closed() -> None:
+    assert required_permission_for_high_risk_tool("checkpoint.restore") is Permission.AGENT_CHECKPOINT_RESTORE
+    with pytest.raises(PermissionError, match="no explicit RBAC permission"):
+        required_permission_for_high_risk_tool("unknown.high_risk_tool")
 
 
 def test_workspace_scope_is_checked_after_capability() -> None:
