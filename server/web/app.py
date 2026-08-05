@@ -1,5 +1,7 @@
 """FastAPI same-origin adapter for the lifecycle-owning BackendGateway."""
 
+import asyncio
+import json
 import secrets
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -15,6 +17,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from configs.settings import settings
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.rbac import Permission, ResourceRef, authorization_service
+from core.authorization_audit import begin as begin_authorization_audit, end as end_authorization_audit
 from gateway.contracts import (
     GatewayNotStartedError,
     InjectMessageRequest,
@@ -33,6 +37,13 @@ from server.web.auth import (
 from server.web.contracts import (
     CreateSessionBody,
     LoginBody,
+    ReplaceUserRolesBody,
+    ReplaceRolePermissionsBody,
+    ReplaceRoleMenusBody,
+    CreateRoleBody,
+    UpdateRoleStatusBody,
+    CreateClassroomBody,
+    ReplaceClassroomMemberBody,
     InjectChatBody,
     SubmitChatBody,
     ToolApprovalBody,
@@ -44,7 +55,6 @@ from server.web.contracts import (
     WorkerProfileBody,
 )
 from server.web.protocol import control_event
-from server.web.authorization import require_admin
 from server.web.developer import developer_snapshot
 from server.web.developer_runtime import (
     DeveloperConfigurationError,
@@ -61,6 +71,7 @@ from server.web.developer_runtime import (
 )
 from server.teacher.models import ExerciseBlueprint, GuidedBlueprint, ReviewBlueprint, UpdateTeacherCatalog, UpdateTeachingGoals
 from server.teacher.service import teacher_service
+from server.rbac.service import rbac_service
 from server.web.websocket import WebSocketHub, websocket_endpoint
 
 
@@ -145,9 +156,40 @@ def create_app(
         gateway = gateway_factory()
         app.state.gateway = gateway
         await gateway.start()
+        redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
+        authorization_channel = str(settings.gateway_runtime.get("redis_authorization_channel", "nlp-agent:authorization"))
+
+        async def consume_authorization_changes() -> None:
+            if redis_client is None:
+                return
+            pubsub = redis_client.pubsub()
+            try:
+                await pubsub.subscribe(authorization_channel)
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    try:
+                        payload = json.loads(message.get("data") or "{}")
+                        user_id = str(payload["user_id"])
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    await hub.close_user(user_id, reason="authorization changed")
+            except asyncio.CancelledError:
+                raise
+            finally:
+                await pubsub.unsubscribe(authorization_channel)
+                await pubsub.aclose()
+
+        authorization_listener = (
+            asyncio.create_task(consume_authorization_changes(), name="authorization-invalidation-listener")
+            if redis_client is not None else None
+        )
         try:
             yield
         finally:
+            if authorization_listener is not None:
+                authorization_listener.cancel()
+                await asyncio.gather(authorization_listener, return_exceptions=True)
             await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()
@@ -169,7 +211,23 @@ def create_app(
     @app.middleware("http")
     async def request_context(request: Request, call_next):
         request.state.request_id = request.headers.get("x-request-id") or secrets.token_hex(16)
-        response = await call_next(request)
+        audit_token, decisions = begin_authorization_audit()
+        try:
+            response = await call_next(request)
+        finally:
+            end_authorization_audit(audit_token)
+        session_factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if session_factory is not None and decisions:
+            async with session_factory() as session:
+                async with session.begin():
+                    for decision in decisions:
+                        await rbac_service.audit(
+                            session, actor_user_id=decision.actor_user_id, target_user_id=None,
+                            decision=decision.decision, reason_code="authorization_required",
+                            permission_code=decision.permission_code, resource_type=decision.resource_type,
+                            resource_id=decision.resource_id,
+                            detail={"workspace_id": decision.workspace_id, "request_id": request.state.request_id},
+                        )
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
@@ -181,10 +239,26 @@ def create_app(
     ) -> SessionClaims:
         return auth.authenticate(token)
 
-    def current_principal(
+    async def resolve_principal(
+        request: Request, claims: SessionClaims
+    ) -> AuthenticatedPrincipal:
+        """Resolve roles and workspace membership from MySQL in production."""
+        # Guests are deliberately anonymous and never require an nlp_users row.
+        if claims.roles == frozenset({"guest"}):
+            return claims.principal()
+        session_factory = getattr(
+            request.app.state.gateway, "authorization_session_factory", None
+        )
+        if session_factory is None:
+            return claims.principal()
+        async with session_factory() as session:
+            return await rbac_service.principal_for_username(session, claims.user_id)
+
+    async def current_principal(
+        request: Request,
         claims: Annotated[SessionClaims, Depends(current_claims)],
     ) -> AuthenticatedPrincipal:
-        return claims.principal()
+        return await resolve_principal(request, claims)
 
     def write_access(
         request: Request,
@@ -227,6 +301,15 @@ def create_app(
 
     @app.exception_handler(AccessDeniedError)
     async def access_error(request: Request, _error: AccessDeniedError):
+        return _problem(
+            request,
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="forbidden",
+            title="Access forbidden",
+        )
+
+    @app.exception_handler(PermissionError)
+    async def permission_error(request: Request, _error: PermissionError):
         return _problem(
             request,
             status_code=status.HTTP_403_FORBIDDEN,
@@ -328,14 +411,204 @@ def create_app(
         }
 
     @app.get("/api/v1/auth/session", tags=["auth"])
-    async def get_auth_session(claims: Annotated[SessionClaims, Depends(current_claims)]):
+    async def get_auth_session(
+        request: Request, claims: Annotated[SessionClaims, Depends(current_claims)]
+    ):
+        principal = await resolve_principal(request, claims)
         return {
-            "user_id": claims.user_id,
-            "workspace_ids": sorted(claims.workspace_ids),
-            "roles": sorted(claims.roles),
+            "user_id": principal.user_id,
+            "workspace_ids": sorted(principal.workspace_ids),
+            "roles": sorted(principal.roles),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at,
         }
+
+    @app.post("/api/v1/auth/guest", status_code=status.HTTP_200_OK, tags=["auth"])
+    async def guest_login(request: Request, response: Response):
+        auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
+        token, claims = auth.issue_guest(
+            previous_token=request.cookies.get(auth.cookie_name)
+        )
+        response.set_cookie(
+            auth.cookie_name, token, max_age=auth.ttl_s, httponly=True,
+            secure=auth.secure, samesite="strict", path="/",
+        )
+        return {
+            "user_id": claims.user_id, "workspace_ids": [], "roles": ["guest"],
+            "csrf_token": claims.csrf_token, "expires_at": claims.expires_at,
+        }
+
+    def authorization_session_factory(request: Request):
+        factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if factory is None:
+            raise RuntimeError("RBAC administration requires MySQL persistence")
+        return factory
+
+    @app.get("/api/v1/roles", tags=["rbac"])
+    async def list_roles(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            roles = await rbac_service.role_catalog(session)
+        return {"items": [
+            {"code": row.code, "name": row.name, "description": row.description,
+             "status": row.status, "is_builtin": row.is_builtin}
+            for row in roles
+        ]}
+
+    @app.post("/api/v1/system/roles", status_code=status.HTTP_201_CREATED, tags=["rbac"])
+    async def create_role(body: CreateRoleBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                role = await rbac_service.create_role(session, code=body.code, name=body.name, description=body.description, actor_user_id=principal.user_id)
+        return {"code": role.code, "name": role.name, "description": role.description, "status": role.status, "is_builtin": role.is_builtin}
+
+    @app.patch("/api/v1/system/roles/{role_code}/status", tags=["rbac"])
+    async def update_role_status(role_code: str, body: UpdateRoleStatusBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                user_ids = await rbac_service.update_role_status(session, role_code=role_code, status=body.status, actor_user_id=principal.user_id)
+        for user_id in user_ids:
+            await hub.close_user(user_id)
+        return {"role_code": role_code, "status": body.status}
+
+    @app.get("/api/v1/permissions", tags=["rbac"])
+    async def list_permissions(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            permissions = await rbac_service.permission_catalog(session)
+        return {"items": [
+            {"code": row.code, "name": row.name, "description": row.description,
+             "status": row.status}
+            for row in permissions
+        ]}
+
+    @app.get("/api/v1/users/{user_id}/roles", tags=["rbac"])
+    async def get_user_roles(user_id: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            roles = await rbac_service.user_role_codes(session, user_id)
+        return {"user_id": user_id, "role_codes": sorted(roles)}
+
+    @app.put("/api/v1/users/{user_id}/roles", tags=["rbac"])
+    async def replace_user_roles(
+        user_id: str,
+        body: ReplaceUserRolesBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                roles = await rbac_service.replace_user_roles(
+                    session, user_id=user_id, role_codes=body.role_codes,
+                    assigned_by_user_id=principal.user_id,
+                )
+        await hub.close_user(user_id)
+        return {"user_id": user_id, "role_codes": sorted(roles)}
+
+    @app.get("/api/v1/system/roles/{role_code}/permissions", tags=["rbac"])
+    async def get_role_permissions(role_code: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            values = await rbac_service.role_permissions(session, role_code)
+        return {"role_code": role_code, "permissions": {key: sorted(value) for key, value in values.items()}}
+
+    @app.put("/api/v1/system/roles/{role_code}/permissions", tags=["rbac"])
+    async def put_role_permissions(role_code: str, body: ReplaceRolePermissionsBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                user_ids = await rbac_service.replace_role_permissions(session, role_code=role_code, permission_codes=body.permission_codes, scopes=body.scopes, actor_user_id=principal.user_id)
+        for user_id in user_ids:
+            await hub.close_user(user_id)
+        return {"role_code": role_code, "permission_codes": sorted(body.permission_codes)}
+
+    @app.get("/api/v1/classrooms", tags=["rbac"])
+    async def list_classrooms(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.LEARNING_PROGRESS_READ_CLASSROOM)
+        async with authorization_session_factory(request)() as session:
+            rows = await rbac_service.classrooms_for_user(session, principal.user_id)
+        return {"items": [{"id": row.id, "workspace_id": row.workspace_id, "name": row.name, "status": row.status} for row in rows]}
+
+    @app.post("/api/v1/classrooms", status_code=status.HTTP_201_CREATED, tags=["rbac"])
+    async def create_classroom(body: CreateClassroomBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.CLASSROOM_CREATE, workspace_id=body.workspace_id)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                row = await rbac_service.create_classroom(session, workspace_id=body.workspace_id, name=body.name, actor_user_id=principal.user_id)
+        return {"id": row.id, "workspace_id": row.workspace_id, "name": row.name, "status": row.status}
+
+    @app.put("/api/v1/classrooms/{classroom_id}/members/{user_id}", tags=["rbac"])
+    async def replace_classroom_member(classroom_id: str, user_id: str, body: ReplaceClassroomMemberBody, request: Request, principal: Principal, _claims: WriteClaims):
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                classroom = await rbac_service.classroom(session, classroom_id)
+                authorization_service.require_resource(principal, Permission.CLASSROOM_MEMBER_MANAGE, ResourceRef("classroom", workspace_id=classroom.workspace_id, classroom_id=classroom.id))
+                await rbac_service.replace_classroom_member(session, classroom_id=classroom_id, user_id=user_id, member_role=body.member_role, status=body.status, actor_user_id=principal.user_id)
+        await hub.close_user(user_id)
+        return {"classroom_id": classroom_id, "user_id": user_id, "member_role": body.member_role, "status": body.status}
+
+    @app.get("/api/v1/system/menus", tags=["rbac"])
+    async def get_menus(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            menus = await rbac_service.menus(session)
+        return {"items": [
+            {"id": item.id, "parent_id": item.parent_id, "type": item.menu_type,
+             "name": item.name, "route_path": item.route_path,
+             "component_key": item.component_key, "permission_id": item.permission_id,
+             "client_scope": item.client_scope, "sort_order": item.sort_order,
+             "visible": item.visible, "status": item.status}
+            for item in menus
+        ]}
+
+    @app.put("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])
+    async def put_role_menus(role_code: str, body: ReplaceRoleMenusBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                await rbac_service.replace_role_menus(session, role_code=role_code, menu_ids=body.menu_ids, actor_user_id=principal.user_id)
+        return {"role_code": role_code, "menu_ids": sorted(body.menu_ids)}
+
+    @app.get("/api/v1/audit/authorization", tags=["rbac"])
+    async def list_authorization_audit(
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=100, ge=1, le=500),
+        actor_user_id: str | None = None,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_AUDIT_READ)
+        async with authorization_session_factory(request)() as session:
+            rows = await rbac_service.audit_records(
+                session, limit=limit, actor_user_id=actor_user_id
+            )
+        return {"items": [
+            {
+                "id": row.id, "actor_user_id": row.actor_user_id,
+                "target_user_id": row.target_user_id, "decision": row.decision,
+                "reason_code": row.reason_code, "permission_code": row.permission_code,
+                "resource_type": row.resource_type, "resource_id": row.resource_id,
+                "detail": row.detail_json, "created_at": row.created_at,
+            }
+            for row in rows
+        ]}
+
+    @app.get("/api/v1/system/sessions/{session_id}/checkpoints/{checkpoint_id}", tags=["rbac"])
+    async def read_sensitive_checkpoint(session_id: str, checkpoint_id: str, request: Request, principal: Principal):
+        # Runtime inspection alone is deliberately insufficient for prompt/output/checkpoint payloads.
+        authorization_service.require(principal, Permission.SYSTEM_SENSITIVE_DATA_READ)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                checkpoint = await rbac_service.read_sensitive_checkpoint(
+                    session, session_id=session_id, checkpoint_id=checkpoint_id,
+                    actor_user_id=principal.user_id,
+                )
+                return {"session_id": checkpoint.session_id, "checkpoint_ns": checkpoint.checkpoint_ns,
+                        "checkpoint_id": checkpoint.checkpoint_id, "checkpoint": checkpoint.checkpoint_json,
+                        "metadata": checkpoint.metadata_json}
 
     @app.delete("/api/v1/auth/session", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"])
     async def delete_auth_session(
@@ -351,6 +624,7 @@ def create_app(
 
     @app.get("/api/v1/sessions", tags=["sessions"])
     async def list_sessions(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         return {"items": await request.app.state.gateway.sessions.list(principal)}
 
     @app.post("/api/v1/sessions", status_code=status.HTTP_201_CREATED, tags=["sessions"])
@@ -377,11 +651,13 @@ def create_app(
 
     @app.get("/api/v1/sessions/{session_id}", tags=["sessions"])
     async def get_session(session_id: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         context = await request.app.state.gateway.sessions.resolve(principal, session_id)
         return context.model_dump(mode="json")
 
     @app.get("/api/v1/sessions/{session_id}/messages", tags=["sessions"])
     async def get_messages(session_id: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         return {
             "items": await request.app.state.gateway.sessions.messages(principal, session_id)
         }
@@ -542,52 +818,52 @@ def create_app(
 
     @app.put("/api/v1/developer/tools/policies", tags=["developer"])
     async def put_tool_policies(body: UpdateToolPoliciesBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await update_tool_policies(body.policies)
 
     @app.put("/api/v1/developer/tools/custom", tags=["developer"])
     async def put_custom_tools(body: UpdateCustomToolsBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await update_custom_tools(body.custom)
 
     @app.put("/api/v1/developer/mcp/{name}", tags=["developer"])
     async def put_mcp_server(name: str, body: McpServerBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await upsert_mcp_server(name, body.config)
 
     @app.delete("/api/v1/developer/mcp/{name}", tags=["developer"])
     async def remove_mcp_server(name: str, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await delete_mcp_server(name)
 
     @app.post("/api/v1/developer/mcp/{name}/test", tags=["developer"])
     async def post_mcp_test(name: str, body: McpServerBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
         return await test_mcp_server(name, body.config)
 
     @app.put("/api/v1/developer/skills/{name}", tags=["developer"])
     async def put_skill(name: str, body: SkillBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE)
         return await upsert_skill(name, body.content)
 
     @app.get("/api/v1/developer/skills/{name}", tags=["developer"])
     async def get_skill(name: str, principal: Principal):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE)
         return read_skill(name)
 
     @app.delete("/api/v1/developer/skills/{name}", tags=["developer"])
     async def remove_skill(name: str, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE)
         return await delete_skill(name)
 
     @app.put("/api/v1/developer/worker-profiles/{name}", tags=["developer"])
     async def put_worker_profile(name: str, body: WorkerProfileBody, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
         return await upsert_worker_profile(name, body.profile)
 
     @app.delete("/api/v1/developer/worker-profiles/{name}", tags=["developer"])
     async def remove_worker_profile(name: str, principal: Principal, _claims: WriteClaims):
-        require_admin(principal)
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
         return await delete_worker_profile(name)
 
     @app.get("/api/v1/teacher/overview", tags=["teacher"])
@@ -627,7 +903,9 @@ def create_app(
 
     @app.get("/api/v1/learning/catalog/{workspace_id}", tags=["learning"])
     async def get_learning_catalog(workspace_id: str, request: Request, principal: Principal):
-        principal.require_workspace(workspace_id)
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_READ_WORKSPACE, workspace_id=workspace_id
+        )
         catalog = (await request.app.state.gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
         catalog["topics"] = [
             {
@@ -767,6 +1045,7 @@ def create_app(
             max_queue=stream_queue_size,
             send_queue_size=ws_send_queue_size,
             send_timeout_s=ws_send_timeout_s,
+            principal_resolver=lambda claims: resolve_principal(websocket, claims),
         )
 
     static_dir_value = str(web_config.get("static_dir", "")).strip()

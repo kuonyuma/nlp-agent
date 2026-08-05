@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from core.session_context import SessionContext, local_context_repository
 from server.agent.session_storage import (
     CHAT_HISTORY_DIR,
@@ -31,6 +32,9 @@ class LocalSessionService:
         workspace_id: str = "default",
         channel: str = "web",
     ) -> SessionContext:
+        authorization_service.require(
+            principal, Permission.AGENT_SESSION_CREATE, workspace_id=workspace_id
+        )
         principal.require_workspace(workspace_id)
         context = SessionContext.create(
             user_id=principal.user_id,
@@ -64,10 +68,14 @@ class LocalSessionService:
             workspace_id=str(metadata.get("workspace_id", "default")),
             channel=str(metadata.get("channel", "local")),
         )
+        authorization_service.require(
+            principal, Permission.AGENT_SESSION_READ, workspace_id=context.workspace_id
+        )
         principal.require_context(context)
         return context
 
     async def list(self, principal: AuthenticatedPrincipal) -> list[dict[str, Any]]:
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         async with self._lock:
             sessions = (await asyncio.to_thread(_load_sessions_index)).get("sessions", {})
         output = []
@@ -108,6 +116,9 @@ class LocalSessionService:
         self, principal: AuthenticatedPrincipal, session_id: str
     ) -> SessionContext:
         context = await self.resolve(principal, session_id)
+        authorization_service.require(
+            principal, Permission.AGENT_SESSION_UPDATE, workspace_id=context.workspace_id
+        )
         async with self._lock:
             index = await asyncio.to_thread(_load_sessions_index)
             metadata = index.get("sessions", {}).get(session_id)
@@ -120,6 +131,9 @@ class LocalSessionService:
         self, principal: AuthenticatedPrincipal, session_id: str
     ) -> SessionContext:
         context = await self.resolve(principal, session_id)
+        authorization_service.require(
+            principal, Permission.AGENT_SESSION_DELETE, workspace_id=context.workspace_id
+        )
         async with self._lock:
             index = await asyncio.to_thread(_load_sessions_index)
             current = index.get("sessions", {}).get(session_id)

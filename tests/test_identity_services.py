@@ -30,7 +30,9 @@ async def test_session_service_filters_and_rejects_foreign_owner(monkeypatch):
         "server.agent.session_service._load_sessions_index", lambda: index
     )
     service = LocalSessionService()
-    alice = AuthenticatedPrincipal(user_id="alice", workspace_ids=frozenset({"w1"}))
+    alice = AuthenticatedPrincipal(
+        user_id="alice", workspace_ids=frozenset({"w1"}), roles=frozenset({"student"})
+    )
 
     sessions = await service.list(alice)
     assert [item["session_id"] for item in sessions] == ["session_alice"]

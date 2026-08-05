@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.learning import TeachingMaterials
+from core.identity import AuthenticatedPrincipal
+from core.rbac import Permission
 from core.session_context import SessionContext
-from gateway.dispatch import TurnTask
+from gateway.dispatch import ExecutionAuthorizationContext, TurnTask
 
 
 @pytest.mark.asyncio
-async def test_fenced_executor_claims_turn_before_invoking_agent() -> None:
+async def test_fenced_executor_claims_turn_before_invoking_agent(monkeypatch) -> None:
     from server.worker.fencing import FencedTurnExecutor
 
     session = AsyncMock()
@@ -22,6 +24,14 @@ async def test_fenced_executor_claims_turn_before_invoking_agent() -> None:
     reliability = AsyncMock()
     reliability.claim_turn.return_value = 4
     execute = AsyncMock()
+    principal = AuthenticatedPrincipal(
+        user_id="user-1", workspace_ids=frozenset({"default"}),
+        permissions=frozenset({Permission.AGENT_TURN_SUBMIT}), authorization_version=3,
+    )
+    monkeypatch.setattr(
+        "server.worker.fencing.rbac_service.principal_for_user_id",
+        AsyncMock(return_value=principal),
+    )
     task = TurnTask(
         context=SessionContext(session_id="session-1"),
         turn_id="turn-1",
@@ -32,6 +42,7 @@ async def test_fenced_executor_claims_turn_before_invoking_agent() -> None:
         teaching_materials=TeachingMaterials(),
         guided_session_id=None,
         exercise_session_id=None,
+        authorization=ExecutionAuthorizationContext("user-1", "default", 3),
     )
 
     claimed = await FencedTurnExecutor(factory, reliability, execute, worker_id="worker-a", lease_s=30)(task)
@@ -69,4 +80,27 @@ async def test_fenced_executor_does_not_execute_turn_lost_to_another_worker() ->
     claimed = await FencedTurnExecutor(factory, reliability, execute, worker_id="worker-a", lease_s=30)(task)
 
     assert claimed is False
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fenced_executor_rejects_legacy_task_without_authorization_context() -> None:
+    from server.worker.fencing import FencedTurnExecutor
+
+    unit_of_work = AsyncMock()
+    unit_of_work.session = AsyncMock()
+    unit_of_work.__aenter__.return_value = unit_of_work
+    factory = MagicMock()
+    factory.begin.return_value = unit_of_work
+    reliability = AsyncMock()
+    reliability.claim_turn.return_value = 1
+    execute = AsyncMock()
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"), turn_id="turn-1", content="hello",
+        learning_context=None, learning_progress=None, exercise_state=None,
+        teaching_materials=TeachingMaterials(), guided_session_id=None, exercise_session_id=None,
+    )
+
+    with pytest.raises(PermissionError, match="lacks authorization context"):
+        await FencedTurnExecutor(factory, reliability, execute, worker_id="worker-a", lease_s=30)(task)
     execute.assert_not_awaited()

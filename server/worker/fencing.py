@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from gateway.dispatch import TurnTask
+from core.rbac import Permission, authorization_service
+from core.rbac import required_permission_for_high_risk_tool
+from core.identity import AuthenticatedPrincipal
+from server.rbac.service import rbac_service
 from server.application.turn_reliability import TurnReliabilityService
 
 
@@ -17,6 +21,17 @@ class TurnExecutionContext:
     turn_id: str
     claim_generation: int
     operation_id: str = "turn.execution"
+    principal: AuthenticatedPrincipal | None = None
+    workspace_id: str | None = None
+
+    def require(self, permission: Permission) -> None:
+        """Second authorization seam for tools/checkpoint operations in Worker."""
+        if self.principal is None:
+            raise PermissionError("worker execution principal is missing")
+        authorization_service.require(self.principal, permission, workspace_id=self.workspace_id)
+
+    def require_high_risk_tool(self, tool_name: str) -> None:
+        self.require(required_permission_for_high_risk_tool(tool_name))
 
 
 class FencedTurnExecutor:
@@ -47,6 +62,25 @@ class FencedTurnExecutor:
             )
             if generation is None:
                 return False
+            if task.authorization is None:
+                raise PermissionError("worker task lacks authorization context")
+            principal = await rbac_service.principal_for_user_id(
+                unit_of_work.session, task.authorization.submitter_user_id
+            )
+            if principal.authorization_version != task.authorization.authorization_version:
+                raise PermissionError("submitter authorization has changed")
+            if task.authorization.workspace_id != task.context.workspace_id:
+                raise PermissionError("worker authorization workspace mismatch")
+            authorization_service.require(
+                principal, Permission.AGENT_TURN_SUBMIT,
+                workspace_id=task.authorization.workspace_id,
+            )
+            await rbac_service.audit(
+                unit_of_work.session, actor_user_id=principal.user_id,
+                target_user_id=None, decision="allow", reason_code="worker_turn_authorized",
+                permission_code=Permission.AGENT_TURN_SUBMIT.value, resource_type="turn",
+                resource_id=task.turn_id,
+            )
             await unit_of_work.commit()
 
         heartbeat = asyncio.create_task(
@@ -58,6 +92,8 @@ class FencedTurnExecutor:
                 TurnExecutionContext(
                     turn_id=task.turn_id,
                     claim_generation=generation,
+                    principal=principal,
+                    workspace_id=task.authorization.workspace_id,
                 ),
             )
             return True

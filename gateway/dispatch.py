@@ -12,6 +12,15 @@ from core.session_context import SessionContext
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionAuthorizationContext:
+    """Submitter identity carried across dispatch boundaries, including Redis."""
+
+    submitter_user_id: str
+    workspace_id: str
+    authorization_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class TurnTask:
     """A persisted turn ready for execution by a dispatcher."""
 
@@ -24,6 +33,7 @@ class TurnTask:
     teaching_materials: TeachingMaterials
     guided_session_id: str | None
     exercise_session_id: str | None
+    authorization: ExecutionAuthorizationContext | None = None
 
 
 class TurnDispatcher(Protocol):

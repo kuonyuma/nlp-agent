@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.rbac import Permission, ResourceRef, authorization_service
 from core.session_context import SessionContext
 from core.learning import LearningContext, TeachingMaterials, default_progress
 from gateway.contracts import (
@@ -28,7 +29,12 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
-from gateway.dispatch import InProcessTurnDispatcher, TurnDispatcher, TurnTask
+from gateway.dispatch import (
+    ExecutionAuthorizationContext,
+    InProcessTurnDispatcher,
+    TurnDispatcher,
+    TurnTask,
+)
 from gateway.engine import AgentEngine, LangGraphAgentEngine
 from gateway.events import GatewayEventBroker, GatewayEventSubscription
 from gateway.repository import GatewayRepository
@@ -161,6 +167,11 @@ class BackendGateway:
         self._started = False
         self._accepting = False
 
+    @property
+    def authorization_session_factory(self):
+        """Optional MySQL session factory used by the web auth adapter."""
+        return self._database_runtime.session_factory if self._database_runtime is not None else None
+
     async def start(self) -> None:
         async with self._lifecycle_lock:
             if self._started:
@@ -222,6 +233,7 @@ class BackendGateway:
         channel: str = "web",
     ) -> SessionContext:
         self._require_started()
+        authorization_service.require(principal, Permission.AGENT_SESSION_CREATE, workspace_id=workspace_id)
         return await self.sessions.create(
             principal, workspace_id=workspace_id, channel=channel
         )
@@ -237,6 +249,7 @@ class BackendGateway:
         self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest
     ) -> TurnAccepted:
         context = await self.sessions.resolve(principal, request.session_id)
+        authorization_service.require(principal, Permission.AGENT_TURN_SUBMIT, workspace_id=context.workspace_id)
         if request.evaluation is not None:
             context = context.model_copy(
                 update={"observability_attributes": request.evaluation.trace_attributes()}
@@ -375,6 +388,11 @@ class BackendGateway:
             teaching_materials=teaching_materials,
             guided_session_id=guided_session.get("id"),
             exercise_session_id=(teaching_session.get("id") if teaching_session is not None else None),
+            authorization=ExecutionAuthorizationContext(
+                submitter_user_id=principal.user_id,
+                workspace_id=context.workspace_id,
+                authorization_version=principal.authorization_version,
+            ),
         )
         turn, duplicate = await asyncio.to_thread(
             self.repository.create_turn,
@@ -429,6 +447,7 @@ class BackendGateway:
             learning_context=task.learning_context, learning_progress=task.learning_progress,
             exercise_state=task.exercise_state, teaching_materials=task.teaching_materials,
             guided_session_id=task.guided_session_id, exercise_session_id=task.exercise_session_id,
+            authorization=task.authorization,
         )
         try:
             await self.dispatcher.submit(task)
@@ -463,6 +482,7 @@ class BackendGateway:
     ) -> TurnAccepted:
         self._require_started()
         context = await self.sessions.resolve(principal, request.session_id)
+        authorization_service.require(principal, Permission.AGENT_SESSION_UPDATE, workspace_id=context.workspace_id)
         if self._remote_execution:
             active = await asyncio.to_thread(
                 self.repository.active_turn_for_session, context.session_id
@@ -491,6 +511,7 @@ class BackendGateway:
         self, principal: AuthenticatedPrincipal, turn_id: str
     ) -> TurnRecord:
         turn = await self.get_turn(principal, turn_id)
+        authorization_service.require(principal, Permission.AGENT_TURN_CANCEL, workspace_id=turn.workspace_id)
         if turn.status not in {TurnStatus.ACCEPTED, TurnStatus.RUNNING}:
             return turn
         context = await self.sessions.resolve(principal, turn.session_id)
@@ -501,17 +522,15 @@ class BackendGateway:
     async def get_turn(
         self, principal: AuthenticatedPrincipal, turn_id: str
     ) -> TurnRecord:
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         turn = await asyncio.to_thread(self.repository.get_turn, turn_id)
         if turn is None:
             raise ResourceNotFoundError(turn_id)
-        if not principal.is_admin and (
-            turn.user_id != principal.user_id
-            or (
-                "*" not in principal.workspace_ids
-                and turn.workspace_id not in principal.workspace_ids
-            )
-        ):
-            raise AccessDeniedError(turn_id)
+        authorization_service.require_resource(
+            principal,
+            Permission.AGENT_SESSION_READ,
+            ResourceRef("turn", owner_user_id=turn.user_id, workspace_id=turn.workspace_id),
+        )
         return turn
 
     async def replay_events(
@@ -522,6 +541,7 @@ class BackendGateway:
         after_sequence: int = 0,
         limit: int = 500,
     ) -> list[GatewayEvent]:
+        authorization_service.require(principal, Permission.AGENT_EVENT_REPLAY)
         await self.get_turn(principal, turn_id)
         return await asyncio.to_thread(
             self.repository.events_after,
@@ -537,7 +557,8 @@ class BackendGateway:
         *,
         limit: int = 100,
     ) -> list[TurnRecord]:
-        await self.sessions.resolve(principal, session_id)
+        context = await self.sessions.resolve(principal, session_id)
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ, workspace_id=context.workspace_id)
         return await asyncio.to_thread(
             self.repository.list_turns,
             session_id,
@@ -552,7 +573,8 @@ class BackendGateway:
         max_queue: int = 500,
     ) -> GatewayEventSubscription:
         self._require_started()
-        await self.sessions.resolve(principal, session_id)
+        context = await self.sessions.resolve(principal, session_id)
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ, workspace_id=context.workspace_id)
         return self.events.open_subscription(
             session_id=session_id,
             maxsize=max_queue,
@@ -669,6 +691,7 @@ class BackendGateway:
     ) -> None:
         async with self._session_turn_locks[session_id]:
             context = await self.sessions.resolve(principal, session_id)
+            authorization_service.require(principal, Permission.AGENT_SESSION_DELETE, workspace_id=context.workspace_id)
             active = await asyncio.to_thread(
                 self.repository.active_turn_for_session, session_id
             )

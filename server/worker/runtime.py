@@ -28,6 +28,7 @@ def redis_config() -> RedisTransportConfig:
         task_group=str(config.get("redis_turn_group", "nlp-agent-workers")),
         event_channel=str(config.get("redis_event_channel", "nlp-agent:events")),
         control_channel=str(config.get("redis_control_channel", "nlp-agent:control")),
+        authorization_channel=str(config.get("redis_authorization_channel", "nlp-agent:authorization")),
         reclaim_idle_ms=int(config.get("redis_reclaim_idle_ms", 60_000)),
         cancel_key_prefix=str(
             config.get("redis_cancel_key_prefix", "nlp-agent:cancel:")
@@ -143,7 +144,7 @@ async def run_worker() -> None:
     )
 
     async def relay_forever() -> None:
-        relay = OutboxRelay(redis, stream=config.task_stream, relay_id=worker_id)
+        relay = OutboxRelay(redis, stream=config.task_stream, relay_id=worker_id, authorization_channel=config.authorization_channel)
         while True:
             async with database_runtime.uow.begin() as unit_of_work:
                 await reliability.recover_stuck_turns(unit_of_work.session)

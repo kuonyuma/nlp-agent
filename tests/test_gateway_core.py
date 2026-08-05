@@ -185,7 +185,9 @@ class ExerciseProtocolEngine(LearningEngine):
 
 @pytest.fixture
 def principal():
-    return AuthenticatedPrincipal(user_id="alice", workspace_ids=frozenset({"w1"}))
+    return AuthenticatedPrincipal(
+        user_id="alice", workspace_ids=frozenset({"w1"}), roles=frozenset({"student"})
+    )
 
 
 @pytest.mark.asyncio
