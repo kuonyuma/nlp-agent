@@ -663,6 +663,9 @@ class BackendGateway:
                 TurnStatus.CANCELLED,
                 TurnStatus.INTERRUPTED,
             }:
+                missing = await self.replay_events(principal, turn_id, after_sequence=last_sequence, limit=2000)
+                for event in missing:
+                    yield event
                 return
             while True:
                 event = await queue.get()
