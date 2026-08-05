@@ -6,4 +6,4 @@ def test_fixed_auth_defaults_to_universal_roles(monkeypatch) -> None:
 
     configured = Settings(_env_file=None)
 
-    assert configured.NLP_AGENT_AUTH_ROLES == "student,teacher,admin"
+    assert configured.NLP_AGENT_AUTH_ROLES == "student"

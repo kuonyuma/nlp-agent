@@ -39,6 +39,10 @@ def create_monitor_app(
     auth: SameOriginSessionAuth | None = None,
     resetter: LocalRuntimeResetter | None = None,
 ) -> FastAPI:
+    # An explicitly injected auth adapter is a self-contained/test deployment
+    # seam. Production construction uses the configured adapter and resolves
+    # roles from MySQL on every request.
+    use_persisted_rbac = auth is None
     config = settings.monitor_runtime
     runtime = runtime or TelemetryRuntime()
     service = ObservabilityService(runtime)
@@ -86,7 +90,7 @@ def create_monitor_app(
         return auth.authenticate(token)
 
     async def principal(session: Annotated[SessionClaims, Depends(claims)]) -> AuthenticatedPrincipal:
-        if session.roles == frozenset({"guest"}):
+        if session.roles == frozenset({"guest"}) or not use_persisted_rbac:
             identity = session.principal()
         else:
             async with rbac_runtime.session_factory() as db_session:
@@ -193,10 +197,13 @@ def create_monitor_app(
         try:
             auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
             session = auth.authenticate(websocket.cookies.get(auth.cookie_name))
-            async with rbac_runtime.session_factory() as db_session:
-                identity = await rbac_service.principal_for_username(
-                    db_session, session.user_id
-                )
+            if use_persisted_rbac:
+                async with rbac_runtime.session_factory() as db_session:
+                    identity = await rbac_service.principal_for_username(
+                        db_session, session.user_id
+                    )
+            else:
+                identity = session.principal()
             authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         except AuthenticationError:
             await websocket.close(code=4401, reason="authentication required"); return
