@@ -188,6 +188,17 @@ class AuthorizationService:
             return False
         if workspace_id is None:
             return True
+        # Dynamic RBAC grants carry a data scope.  A workspace-qualified
+        # capability must compile that scope instead of merely checking that
+        # the user is a member; object-specific own/classroom checks still use
+        # allowed_resource()/require_resource() at the resource boundary.
+        dynamic_scopes = principal.permission_scopes.get(required.value)
+        if dynamic_scopes:
+            return ResourcePolicy().allows(
+                principal,
+                frozenset(dynamic_scopes),
+                ResourceRef("workspace", workspace_id=workspace_id),
+            )
         try:
             principal.require_workspace(workspace_id)
         except AccessDeniedError:

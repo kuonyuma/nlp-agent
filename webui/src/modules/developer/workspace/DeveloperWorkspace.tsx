@@ -110,7 +110,7 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
   const [loading, setLoading] = useState(true);
   const load = useCallback(async () => {
     setLoading(true); setError("");
-    try { const auth = await ensureAuth(); if (!auth.roles.includes("admin")) throw new Error("当前账户没有开发者权限"); setSnapshot(await api.getDeveloperSnapshot()); }
+    try { const auth = await ensureAuth(); if (!auth.roles.includes("developer") && !auth.roles.includes("admin")) throw new Error("当前账户没有开发者权限"); setSnapshot(await api.getDeveloperSnapshot()); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setLoading(false); }
   }, []);

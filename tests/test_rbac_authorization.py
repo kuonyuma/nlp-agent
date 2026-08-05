@@ -110,6 +110,19 @@ def test_workspace_scope_is_checked_after_capability() -> None:
         )
 
 
+def test_workspace_qualified_require_compiles_persisted_scope() -> None:
+    authorization = AuthorizationService()
+    principal_with_own_scope = AuthenticatedPrincipal(
+        user_id="learner-1", workspace_ids=frozenset({"class-a"}),
+        permissions=frozenset({Permission.AGENT_TURN_SUBMIT}),
+        permission_scopes={Permission.AGENT_TURN_SUBMIT.value: frozenset({"own"})},
+    )
+    with pytest.raises(AccessDeniedError):
+        authorization.require(
+            principal_with_own_scope, Permission.AGENT_TURN_SUBMIT, workspace_id="class-a"
+        )
+
+
 def test_classroom_scope_requires_an_explicit_membership() -> None:
     authorization = AuthorizationService()
     member = AuthenticatedPrincipal(
