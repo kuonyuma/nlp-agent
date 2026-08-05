@@ -216,7 +216,8 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
         assert client.get("/api/v1/sessions").status_code == 401
 
 
-def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app):
+def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
+    monkeypatch.setenv("QWEN_API_KEY", "sk-mock-key-for-tests")
     app, engine = web_app
     with TestClient(app) as client:
         assert client.get("/health/live").json() == {"status": "ok"}
