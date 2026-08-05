@@ -1040,9 +1040,17 @@ def create_app(
     ):
         changes = body.model_dump(exclude_none=True)
         if "model_profile" in changes:
+            from fastapi import HTTPException
             from core.model_runtime.factory import get_global_model_factory
 
-            get_global_model_factory().config.profile(changes["model_profile"])
+            factory = get_global_model_factory()
+            profile_name = changes["model_profile"]
+            try:
+                factory.config.profile(profile_name)
+                if not factory.profile_available(profile_name):
+                    raise HTTPException(400, f"Model profile {profile_name!r} is currently unavailable (missing credentials)")
+            except KeyError:
+                raise HTTPException(400, f"Unknown model profile {profile_name!r}")
         if "default_workspace_id" in changes:
             principal.require_workspace(changes["default_workspace_id"])
         updated = await request.app.state.gateway.update_user_settings(principal, changes)
