@@ -1,4 +1,4 @@
-import type { AuthSession, DeveloperSnapshot, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings } from "@/shared/types";
+import type { AuthSession, DeveloperSnapshot, SettingsRuntime, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
 
@@ -66,7 +66,7 @@ export const api = {
     request<{ items: TurnRecord[] }>(`/sessions/${encodeURIComponent(sessionId)}/turns?limit=500`),
   cancelTurn: (turnId: string) =>
     request<TurnRecord>(`/chat/turns/${encodeURIComponent(turnId)}/cancel`, { method: "POST" }),
-  getSettings: () => request<{ preferences: { settings?: Partial<UserSettings> } }>("/settings"),
+  getSettings: () => request<{ preferences: { settings?: Partial<UserSettings> }; runtime: SettingsRuntime }>("/settings"),
   updateSettings: (settings: Partial<UserSettings>) =>
     request<{ settings: UserSettings }>("/settings", {
       method: "PATCH",

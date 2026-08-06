@@ -250,6 +250,13 @@ class BackendGateway:
     ) -> TurnAccepted:
         context = await self.sessions.resolve(principal, request.session_id)
         authorization_service.require(principal, Permission.AGENT_TURN_SUBMIT, workspace_id=context.workspace_id)
+        if request.model_profile is not None:
+            from core.model_runtime.factory import get_global_model_factory
+
+            factory = get_global_model_factory()
+            profile = factory.config.profile(request.model_profile)
+            if not factory.profile_available(request.model_profile):
+                raise ValueError(f"模型 {profile.label} 暂不可用，请联系管理员配置模型服务。")
         if request.evaluation is not None:
             context = context.model_copy(
                 update={"observability_attributes": request.evaluation.trace_attributes()}
@@ -388,6 +395,7 @@ class BackendGateway:
             teaching_materials=teaching_materials,
             guided_session_id=guided_session.get("id"),
             exercise_session_id=(teaching_session.get("id") if teaching_session is not None else None),
+            model_profile=request.model_profile,
             authorization=ExecutionAuthorizationContext(
                 submitter_user_id=principal.user_id,
                 workspace_id=context.workspace_id,
@@ -447,7 +455,7 @@ class BackendGateway:
             learning_context=task.learning_context, learning_progress=task.learning_progress,
             exercise_state=task.exercise_state, teaching_materials=task.teaching_materials,
             guided_session_id=task.guided_session_id, exercise_session_id=task.exercise_session_id,
-            authorization=task.authorization,
+            model_profile=task.model_profile, authorization=task.authorization,
         )
         try:
             await self.dispatcher.submit(task)
@@ -655,6 +663,9 @@ class BackendGateway:
                 TurnStatus.CANCELLED,
                 TurnStatus.INTERRUPTED,
             }:
+                missing = await self.replay_events(principal, turn_id, after_sequence=last_sequence, limit=2000)
+                for event in missing:
+                    yield event
                 return
             while True:
                 event = await queue.get()

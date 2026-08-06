@@ -26,6 +26,11 @@ class ValueInput(BaseModel):
     value: str
 
 
+def test_tool_risk_defines_critical_for_fail_closed_registration() -> None:
+    assert {item.value for item in ToolRisk} >= {"low", "medium", "high", "critical"}
+    assert ToolRisk.CRITICAL in {ToolRisk.HIGH, ToolRisk.CRITICAL}
+
+
 def make_descriptor(
     name,
     coroutine,

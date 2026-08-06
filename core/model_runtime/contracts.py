@@ -101,11 +101,21 @@ class ModelRouteConfig(FrozenModel):
     fallbacks: tuple[str, ...] = ()
 
 
+class ModelProfileConfig(FrozenModel):
+    label: str
+    provider: str
+    coordinator: str
+    worker: str
+    utility: str
+
+
 class ModelRuntimeConfig(FrozenModel):
     providers: dict[str, ProviderConfig]
     models: dict[str, ModelDefinition]
     model_presets: dict[str, ModelPresetConfig]
     model_routes: dict[str, ModelRouteConfig]
+    model_profiles: dict[str, ModelProfileConfig] = Field(default_factory=dict)
+    default_model_profile: str | None = None
 
     @model_validator(mode="after")
     def validate_references(self) -> "ModelRuntimeConfig":
@@ -142,6 +152,32 @@ class ModelRuntimeConfig(FrozenModel):
                     raise ValueError(
                         f"fallback {fallback_name!r} lacks streaming capability required by {route.primary!r}"
                     )
+        for profile_name, profile in self.model_profiles.items():
+            if profile.provider not in self.providers:
+                raise ValueError(
+                    f"model_profiles.{profile_name}.provider references unknown provider "
+                    f"{profile.provider!r}"
+                )
+            for role in ("coordinator", "worker", "utility"):
+                preset_name = getattr(profile, role)
+                if preset_name not in self.model_presets:
+                    raise ValueError(
+                        f"model_profiles.{profile_name}.{role} references unknown preset "
+                        f"{preset_name!r}"
+                    )
+                model = self.models[self.model_presets[preset_name].model]
+                if model.provider != profile.provider:
+                    raise ValueError(
+                        f"model_profiles.{profile_name}.{role} uses provider "
+                        f"{model.provider!r}, expected {profile.provider!r}"
+                    )
+        if (
+            self.default_model_profile is not None
+            and self.default_model_profile not in self.model_profiles
+        ):
+            raise ValueError(
+                f"default model profile {self.default_model_profile!r} is not configured"
+            )
         return self
 
     def route_presets(self, route_name: str) -> tuple[tuple[str, ModelPresetConfig], ...]:
@@ -158,3 +194,9 @@ class ModelRuntimeConfig(FrozenModel):
             return self.model_presets[name]
         except KeyError as error:
             raise KeyError(f"Unknown model preset {name!r}") from error
+
+    def profile(self, name: str) -> ModelProfileConfig:
+        try:
+            return self.model_profiles[name]
+        except KeyError as error:
+            raise KeyError(f"Unknown model profile {name!r}") from error

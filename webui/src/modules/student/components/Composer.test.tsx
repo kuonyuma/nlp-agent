@@ -20,4 +20,30 @@ describe("Composer", () => {
     fireEvent.click(screen.getByLabelText("停止生成"));
     expect(onCancel).toHaveBeenCalledOnce();
   });
+
+  it("offers available backend models and disables selection while running", () => {
+    const onModelProfileChange = vi.fn();
+    const props = {
+      disabled: false,
+      onSend: vi.fn(),
+      onCancel: vi.fn(),
+      modelProfiles: {
+        deepseek: { label: "DeepSeek", provider: "deepseek", available: true },
+        qwen: { label: "Qwen", provider: "dashscope", available: true },
+        offline: { label: "Offline", provider: "local", available: false },
+      },
+      modelProfile: "deepseek",
+      onModelProfileChange,
+    };
+    const { rerender } = render(<Composer {...props} running={false} />);
+    const select = screen.getByRole("combobox", { name: "选择模型" });
+
+    expect(screen.getByRole("option", { name: "Qwen" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "Offline（不可用）" })).toBeDisabled();
+    fireEvent.change(select, { target: { value: "qwen" } });
+    expect(onModelProfileChange).toHaveBeenCalledWith("qwen");
+
+    rerender(<Composer {...props} modelProfile="qwen" running />);
+    expect(screen.getByRole("combobox", { name: "选择模型" })).toBeDisabled();
+  });
 });

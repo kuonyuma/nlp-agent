@@ -47,6 +47,7 @@ class ToolRisk(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    CRITICAL = "critical"
 
 
 class ToolLockScope(str, Enum):
@@ -346,7 +347,7 @@ class ToolPolicyResolver:
                 continue
             if descriptor.capabilities.intersection(request.denied_capabilities):
                 continue
-            if descriptor.risk == ToolRisk.HIGH and not (
+            if descriptor.risk in {ToolRisk.HIGH, ToolRisk.CRITICAL} and not (
                 request.allow_high_risk
                 and self.authorization.is_granted(request.session_id, descriptor.name)
             ):
@@ -391,7 +392,7 @@ class ToolExecutor:
     ) -> ToolExecutionResult:
         started = time.monotonic()
         argument_keys = tuple(sorted(str(key) for key in (arguments or {})))
-        if descriptor.risk == ToolRisk.HIGH and not self.authorization.is_granted(
+        if descriptor.risk in {ToolRisk.HIGH, ToolRisk.CRITICAL} and not self.authorization.is_granted(
             grant.session_id, descriptor.name
         ):
             result = self._failure(
@@ -797,7 +798,7 @@ class ToolRuntime:
         descriptor = self.catalog.get(tool_name)
         if descriptor is None:
             raise ValueError(f"unknown tool: {tool_name}")
-        if descriptor.risk != ToolRisk.HIGH:
+        if descriptor.risk not in {ToolRisk.HIGH, ToolRisk.CRITICAL}:
             raise ValueError(f"tool {tool_name!r} is not high-risk")
         return self.authorization.grant(
             session_id=session_id,

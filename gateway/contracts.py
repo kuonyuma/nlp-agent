@@ -65,6 +65,9 @@ class SubmitTurnRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
     evaluation: EvaluationContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class InjectMessageRequest(BaseModel):

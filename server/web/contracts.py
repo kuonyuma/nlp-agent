@@ -65,6 +65,9 @@ class SubmitChatBody(StrictModel):
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
     evaluation: EvaluationContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class InjectChatBody(StrictModel):
@@ -85,6 +88,9 @@ class UpdateSettingsBody(StrictModel):
     show_reasoning: bool | None = None
     stream_render_interval_ms: int | None = Field(default=None, ge=0, le=1_000)
     default_workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class UpdateToolPoliciesBody(StrictModel):
@@ -119,6 +125,9 @@ class ChatSendPayload(StrictModel):
     content: str = Field(min_length=1, max_length=200_000)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class ChatInjectPayload(StrictModel):

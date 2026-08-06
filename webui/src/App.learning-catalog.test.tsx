@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 const api = vi.hoisted(() => ({
   listSessions: vi.fn().mockResolvedValue({ items: [] }),
-  getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} } }),
+  getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} }, runtime: { default_model_profile: "deepseek", model_profiles: {} } }),
   getLearningCatalog: vi.fn()
     .mockResolvedValueOnce({ catalog: { topics: [{ id: "transformer", name: "Transformer", description: "", status: "enabled", knowledge_points: [] }] } })
     .mockResolvedValueOnce({ catalog: { topics: [] } }),

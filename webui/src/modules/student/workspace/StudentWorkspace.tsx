@@ -98,7 +98,7 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
     if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, { topic: context.topic_name });
   };
   const unavailableModes = (["practice", "review"] as const).filter((mode) => !!learningContext.topic_id && !(mode === "practice" ? learningCatalog?.exercise_blueprints : learningCatalog?.review_blueprints)?.some((blueprint) => blueprint.topic_id === learningContext.topic_id));
-  const composer = (centered = false) => <Composer centered={centered} disabled={!statusOnline} running={workspace.isRunning} onSend={(text) => void workspace.send(text)} onCancel={workspace.cancel} contextControl={<LearningContextBar value={learningContext} onChange={updateContext} topics={courseTopics} unavailableModes={unavailableModes} onUnavailableMode={setModeNotice} />} />;
+  const composer = (centered = false) => <Composer centered={centered} disabled={!statusOnline} running={workspace.isRunning} onSend={(text) => void workspace.send(text)} onCancel={workspace.cancel} modelProfiles={workspace.modelProfiles} modelProfile={workspace.settings.model_profile} onModelProfileChange={(modelProfile) => void workspace.patchSettings({ model_profile: modelProfile })} contextControl={<LearningContextBar value={learningContext} onChange={updateContext} topics={courseTopics} unavailableModes={unavailableModes} onUnavailableMode={setModeNotice} />} />;
 
   return <div className="app-shell">
     {workspace.settingsError && <div className="error-card settings-save-error" role="alert">{workspace.settingsError}</div>}

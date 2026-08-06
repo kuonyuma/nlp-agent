@@ -9,6 +9,7 @@ const settings: UserSettings = {
   locale: "zh-CN",
   show_reasoning: true,
   stream_render_interval_ms: 30,
+  model_profile: "deepseek",
   default_workspace_id: "default",
 };
 

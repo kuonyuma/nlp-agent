@@ -1,7 +1,7 @@
 import { useEffect, type Dispatch, type SetStateAction } from "react";
 
 import { ApiError, api, ensureAuth } from "@/platform/http/api";
-import type { AuthSession, UserSettings } from "@/shared/types";
+import type { AuthSession, RuntimeModelProfile, UserSettings } from "@/shared/types";
 import { resolveWorkspaceId } from "@/shared/utils/workspace";
 
 import { DEFAULT_SETTINGS } from "./constants";
@@ -10,6 +10,7 @@ interface BootstrapOptions {
   authRevision: number;
   loadSessions: () => Promise<unknown>;
   initializeSettings: (settings: UserSettings) => void;
+  setModelProfiles: Dispatch<SetStateAction<Record<string, RuntimeModelProfile>>>;
   setWorkspaceId: Dispatch<SetStateAction<string>>;
   setAuthSession: Dispatch<SetStateAction<AuthSession | null>>;
   setBootStatus: Dispatch<SetStateAction<"loading" | "ready" | "unauthenticated" | "error">>;
@@ -20,6 +21,7 @@ export function useWorkspaceBootstrap({
   authRevision,
   loadSessions,
   initializeSettings,
+  setModelProfiles,
   setWorkspaceId,
   setAuthSession,
   setBootStatus,
@@ -32,8 +34,13 @@ export function useWorkspaceBootstrap({
         const auth = await ensureAuth();
         const [, settingsResponse] = await Promise.all([loadSessions(), api.getSettings()]);
         if (cancelled) return;
-        const loadedSettings = { ...DEFAULT_SETTINGS, ...(settingsResponse.preferences.settings ?? {}) };
+        const loadedSettings = {
+          ...DEFAULT_SETTINGS,
+          model_profile: settingsResponse.runtime.default_model_profile,
+          ...(settingsResponse.preferences.settings ?? {}),
+        };
         initializeSettings(loadedSettings);
+        setModelProfiles(settingsResponse.runtime.model_profiles);
         setWorkspaceId(resolveWorkspaceId(auth, loadedSettings));
         setAuthSession(auth);
         setBootStatus("ready");
@@ -48,5 +55,5 @@ export function useWorkspaceBootstrap({
       }
     })();
     return () => { cancelled = true; };
-  }, [authRevision, initializeSettings, loadSessions, setAuthSession, setBootStatus, setError, setWorkspaceId]);
+  }, [authRevision, initializeSettings, loadSessions, setAuthSession, setBootStatus, setError, setModelProfiles, setWorkspaceId]);
 }

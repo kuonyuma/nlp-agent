@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/platform/http/api";
 import { StudentSocket } from "@/platform/realtime/client";
-import type { AuthSession, ChatMessage } from "@/shared/types";
+import type { AuthSession, ChatMessage, RuntimeModelProfile } from "@/shared/types";
 
 import { useWorkspaceBootstrap } from "../internal/bootstrap";
 import { usePreferencesController } from "../internal/preferences-controller";
@@ -37,6 +37,7 @@ export function useStudentWorkspace() {
     deleteSession,
   } = useSessionController({ preferences, persistPreferences, updateSessionMeta });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [modelProfiles, setModelProfiles] = useState<Record<string, RuntimeModelProfile>>({});
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "unauthenticated" | "error">("loading");
   const [authRevision, setAuthRevision] = useState(0);
@@ -82,6 +83,7 @@ export function useStudentWorkspace() {
     authRevision,
     loadSessions,
     initializeSettings,
+    setModelProfiles,
     setWorkspaceId,
     setAuthSession,
     setBootStatus,
@@ -114,6 +116,7 @@ export function useStudentWorkspace() {
     pendingRequests,
     inFlightTurnIds,
     preferences,
+    settings,
     messages,
     createSession,
     updateSessionMeta,
@@ -135,6 +138,7 @@ export function useStudentWorkspace() {
     setSessions([]);
     setActiveSessionId(null);
     setMessages([]);
+    setModelProfiles({});
     setBootStatus("unauthenticated");
   }, [setActiveSessionId, setSessions]);
 
@@ -147,6 +151,7 @@ export function useStudentWorkspace() {
     preferences,
     activeMeta,
     settings,
+    modelProfiles,
     settingsError,
     bootStatus,
     error,

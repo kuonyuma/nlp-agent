@@ -54,7 +54,15 @@ def test_monitor_is_admin_only_and_queries_observability(tmp_path):
         allowed_origins=["http://testserver"],
     )
     resetter = ResetSpy()
-    app = create_monitor_app(runtime=runtime, auth=auth, resetter=resetter)  # type: ignore[arg-type]
+    # Inject testserver so Starlette's TrustedHostMiddleware accepts the
+    # TestClient's default Host: testserver header regardless of the local
+    # .env override of NLP_AGENT_MONITOR_ALLOWED_HOSTS.
+    app = create_monitor_app(
+        runtime=runtime,
+        auth=auth,
+        resetter=resetter,  # type: ignore[arg-type]
+        allowed_hosts=["testserver"],
+    )
     with TestClient(app) as client:
         assert client.get("/api/v1/observability/overview").status_code == 401
         login = client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"})

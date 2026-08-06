@@ -38,6 +38,7 @@ def create_monitor_app(
     runtime: TelemetryRuntime | None = None,
     auth: SameOriginSessionAuth | None = None,
     resetter: LocalRuntimeResetter | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> FastAPI:
     # An explicitly injected auth adapter is a self-contained/test deployment
     # seam. Production construction uses the configured adapter and resolves
@@ -71,9 +72,18 @@ def create_monitor_app(
         lifespan=lifespan,
     )
     cookie_auth = APIKeyCookie(name=auth.cookie_name, auto_error=False)
+    # An explicit allowed_hosts override (tests/local deployments) wins over the
+    # config-derived whitelist so the app never depends on a gitignored .env
+    # override of NLP_AGENT_MONITOR_ALLOWED_HOSTS; otherwise fall back to the
+    # configured list and finally the loopback default.
+    middleware_hosts = (
+        allowed_hosts
+        if allowed_hosts is not None
+        else list(config.get("allowed_hosts", ["127.0.0.1", "localhost"]))
+    )
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=list(config.get("allowed_hosts", ["127.0.0.1", "localhost"])),
+        allowed_hosts=middleware_hosts,
     )
 
     @app.middleware("http")

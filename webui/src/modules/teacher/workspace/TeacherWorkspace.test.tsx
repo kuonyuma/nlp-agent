@@ -19,12 +19,12 @@ describe("TeacherWorkspace catalog CRUD", () => {
     updateTeacherCatalog.mockClear();
     getTeacherCatalog.mockClear();
     ensureAuthMock.mockResolvedValue({ roles: ["teacher"], workspace_ids: ["default"] });
-    getSettingsMock.mockResolvedValue({ preferences: { settings: {} } });
+    getSettingsMock.mockResolvedValue({ preferences: { settings: {} }, runtime: { default_model_profile: "deepseek", model_profiles: {} } });
   });
 
   it("loads and saves the teacher catalog in the authorized default workspace", async () => {
     ensureAuthMock.mockResolvedValue({ roles: ["teacher"], workspace_ids: ["default", "research"] });
-    getSettingsMock.mockResolvedValue({ preferences: { settings: { default_workspace_id: "research" } } });
+    getSettingsMock.mockResolvedValue({ preferences: { settings: { default_workspace_id: "research" } }, runtime: { default_model_profile: "deepseek", model_profiles: {} } });
     history.replaceState({}, "", "/teacher/topics");
     render(<TeacherWorkspace />);
 

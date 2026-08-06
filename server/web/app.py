@@ -101,7 +101,10 @@ def _problem(
 
 
 def _public_runtime_settings() -> dict[str, Any]:
+    from core.model_runtime.factory import get_global_model_factory
+
     raw = settings._config
+    factory = get_global_model_factory()
     models = {
         name: {
             "provider": item.get("provider"),
@@ -125,6 +128,8 @@ def _public_runtime_settings() -> dict[str, Any]:
         "model_routes": raw.get("model_routes", {}),
         "models": models,
         "model_presets": presets,
+        "default_model_profile": factory.config.default_model_profile,
+        "model_profiles": factory.public_profiles(),
         "protocol": {
             "http": "/api/v1",
             "websocket": "/ws/v1",
@@ -137,6 +142,7 @@ def create_app(
     *,
     gateway_factory: GatewayFactory = BackendGateway,
     auth: SameOriginSessionAuth | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> FastAPI:
     web_config = settings.web_runtime
     auth = auth or SameOriginSessionAuth.from_config(web_config)
@@ -205,8 +211,16 @@ def create_app(
     app.state.auth = auth
     app.state.hub = hub
     cookie_auth = APIKeyCookie(name=auth.cookie_name, auto_error=False)
-    allowed_hosts = list(web_config.get("allowed_hosts", ["127.0.0.1", "localhost"]))
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+    # An explicit allowed_hosts override (tests/local deployments) wins over the
+    # config-derived whitelist so the app never depends on a gitignored .env
+    # override of NLP_AGENT_WEB_ALLOWED_HOSTS; otherwise fall back to the
+    # configured list and finally the loopback default.
+    middleware_hosts = (
+        allowed_hosts
+        if allowed_hosts is not None
+        else list(web_config.get("allowed_hosts", ["127.0.0.1", "localhost"]))
+    )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=middleware_hosts)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -1025,6 +1039,18 @@ def create_app(
         _claims: WriteClaims,
     ):
         changes = body.model_dump(exclude_none=True)
+        if "model_profile" in changes:
+            from fastapi import HTTPException
+            from core.model_runtime.factory import get_global_model_factory
+
+            factory = get_global_model_factory()
+            profile_name = changes["model_profile"]
+            try:
+                factory.config.profile(profile_name)
+                if not factory.profile_available(profile_name):
+                    raise HTTPException(400, f"Model profile {profile_name!r} is currently unavailable (missing credentials)")
+            except KeyError:
+                raise HTTPException(400, f"Unknown model profile {profile_name!r}")
         if "default_workspace_id" in changes:
             principal.require_workspace(changes["default_workspace_id"])
         updated = await request.app.state.gateway.update_user_settings(principal, changes)
