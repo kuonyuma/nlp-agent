@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -9,6 +10,7 @@ from core.identity import AuthenticatedPrincipal
 from core.rbac import Permission
 from core.session_context import SessionContext
 from gateway.dispatch import ExecutionAuthorizationContext, TurnTask
+from server.application.turn_reliability import LostTurnClaimError
 
 
 @pytest.mark.asyncio
@@ -81,6 +83,61 @@ async def test_fenced_executor_does_not_execute_turn_lost_to_another_worker() ->
 
     assert claimed is False
     execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fenced_executor_cancels_execution_when_heartbeat_loses_claim(
+    monkeypatch,
+) -> None:
+    from server.worker.fencing import FencedTurnExecutor
+
+    unit_of_work = AsyncMock()
+    unit_of_work.session = AsyncMock()
+    unit_of_work.__aenter__.return_value = unit_of_work
+    factory = MagicMock()
+    factory.begin.return_value = unit_of_work
+    reliability = AsyncMock()
+    reliability.claim_turn.return_value = 1
+    reliability.heartbeat.side_effect = LostTurnClaimError("claim moved")
+    principal = AuthenticatedPrincipal(
+        user_id="user-1",
+        workspace_ids=frozenset({"default"}),
+        permissions=frozenset({Permission.AGENT_TURN_SUBMIT}),
+        authorization_version=3,
+    )
+    monkeypatch.setattr(
+        "server.worker.fencing.rbac_service.principal_for_user_id",
+        AsyncMock(return_value=principal),
+    )
+    execution_cancelled = asyncio.Event()
+
+    async def execute(_task, _context):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            execution_cancelled.set()
+
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"),
+        turn_id="turn-1",
+        content="hello",
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        teaching_materials=TeachingMaterials(),
+        guided_session_id=None,
+        exercise_session_id=None,
+        authorization=ExecutionAuthorizationContext("user-1", "default", 3),
+    )
+    executor = FencedTurnExecutor(
+        factory, reliability, execute, worker_id="worker-a", lease_s=3
+    )
+    executor._lease_s = 0.03
+
+    with pytest.raises(LostTurnClaimError, match="claim moved"):
+        await asyncio.wait_for(executor(task), timeout=0.3)
+
+    assert execution_cancelled.is_set()
 
 
 @pytest.mark.asyncio

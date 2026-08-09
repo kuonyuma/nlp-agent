@@ -55,6 +55,14 @@ class InProcessTurnExecutor:
             if execution_context is not None and hasattr(execution_context, "require"):
                 execution_context.require(Permission.AGENT_TURN_SUBMIT)
             final_text = await self._run_engine(task)
+            final_text, exercise_state = await self._finalize_learning(task, final_text)
+            await asyncio.to_thread(
+                self._repository.update_turn,
+                task.turn_id,
+                TurnStatus.COMPLETED,
+                final_text=final_text,
+                exercise_state=exercise_state,
+            )
         except asyncio.CancelledError:
             await self._engine.cancel_turn(task.context, task.turn_id)
             await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.CANCELLED)
@@ -64,8 +72,6 @@ class InProcessTurnExecutor:
             await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.FAILED, error_kind=type(error).__name__, error_message=str(error))
             await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_FAILED, {"status": TurnStatus.FAILED.value, "error_kind": type(error).__name__, "message": str(error)[:500]})
             return
-        final_text, exercise_state = await self._finalize_learning(task, final_text)
-        await asyncio.to_thread(self._repository.update_turn, task.turn_id, TurnStatus.COMPLETED, final_text=final_text, exercise_state=exercise_state)
         await self._emit(task.turn_id, task.context.session_id, GatewayEventType.MESSAGE_COMPLETED, {"content": final_text})
         await self._emit(task.turn_id, task.context.session_id, GatewayEventType.TURN_COMPLETED, {"status": TurnStatus.COMPLETED.value, "content": final_text})
 

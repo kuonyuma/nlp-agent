@@ -368,6 +368,48 @@ async def test_gateway_retries_dispatch_failure_for_same_idempotency_key(
 
 
 @pytest.mark.asyncio
+async def test_gateway_rejects_changed_content_when_retrying_an_idempotency_key(
+    tmp_path, principal
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    dispatcher = FlakyTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    with pytest.raises(ConnectionError):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(
+                session_id=session.session_id,
+                content="original request",
+                idempotency_key="same",
+            ),
+        )
+
+    with pytest.raises(TurnConflictError, match="idempotency key"):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(
+                session_id=session.session_id,
+                content="different request",
+                idempotency_key="same",
+            ),
+        )
+
+    original = repository.list_turns(session.session_id)[0]
+    assert original.input_text == "original request"
+    assert dispatcher.attempts == 1
+    await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_gateway_runs_turn_replays_events_and_deduplicates(tmp_path, principal):
     engine = FakeEngine()
     sessions = FakeSessions()

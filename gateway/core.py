@@ -269,6 +269,13 @@ class BackendGateway:
                 session_id=context.session_id,
                 idempotency_key=request.idempotency_key,
             )
+            if (
+                existing is not None
+                and existing.input_text != request.content
+            ):
+                raise TurnConflictError(
+                    "idempotency key was already used for a different request"
+                )
             if existing is not None and not (
                 existing.status == TurnStatus.FAILED
                 and existing.error_kind == "dispatch_failed"
