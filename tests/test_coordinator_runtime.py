@@ -12,6 +12,7 @@ from core.observability.runtime import TelemetryRuntime
 from core.session_context import SessionContext
 from core.task_manager import global_task_manager
 from core.worker_events import WorkerCompletedEvent, WorkerEventBus
+from core.worker_protocol import WorkerWaitPlan
 from core.agent_runtime import global_agent_injections
 from schemas.models import WorkerExecutionResultSpec, WorkerTimingSpec
 
@@ -157,6 +158,33 @@ async def test_wait_barrier_keeps_other_turn_worker_results_out_of_current_turn(
 
     future.cancel()
     await asyncio.gather(future, return_exceptions=True)
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_barrier_does_not_consume_detached_worker_from_same_turn():
+    bus = WorkerEventBus()
+
+    async def invoke(_messages, _context, _background, _turn_id):
+        return None
+
+    runtime = CoordinatorRuntime(bus, invoke)
+    await bus.publish(event("detached", "turn-1"))
+    await bus.publish(event("joined", "turn-1"))
+    plan = WorkerWaitPlan(
+        session_id="session-a",
+        parent_turn_id="turn-1",
+        worker_ids=frozenset({"joined"}),
+        mode="all",
+        quorum=1,
+        timeout_s=1,
+    )
+
+    collected, timed_out = await runtime._collect_barrier_events_unobserved(plan)
+
+    assert timed_out is False
+    assert [item.worker_id for item in collected] == ["joined"]
+    assert [item.worker_id for item in bus.drain("session-a")] == ["detached"]
     await runtime.close()
 
 

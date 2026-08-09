@@ -129,6 +129,8 @@ class LangGraphAgentEngine:
             node = metadata.get("langgraph_node")
             event_name = event.get("event")
             if event_name == "on_chat_model_stream" and node == "coordinator":
+                if background:
+                    continue
                 chunk = event.get("data", {}).get("chunk")
                 if not isinstance(chunk, AIMessageChunk):
                     continue

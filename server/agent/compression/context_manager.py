@@ -16,6 +16,7 @@ from core.session_context import (
 from server.agent.compression.auto_compact import autocompact_if_needed
 from server.agent.compression.context_collapse import CollapseStore, apply_collapses_if_needed
 from server.agent.compression.micro_compact import micro_compact_if_needed
+from server.agent.compression.message_integrity import remove_orphaned_tool_messages
 from utils.logger import get_logger
 from utils.tokens import ContextBudget, rough_estimation_for_messages
 
@@ -128,6 +129,8 @@ class ContextManager:
             if rough_estimation_for_messages(view) > budget.input_limit:
                 view = trim_legal_history(view, budget.input_limit)
                 actions.append("hard_trim")
+            else:
+                view = remove_orphaned_tool_messages(view)
 
             return ContextTransform(
                 session=context,

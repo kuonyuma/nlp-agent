@@ -98,6 +98,14 @@ export function createRealtimeEventHandler({
       return;
     }
     if (["session.created", "session.deleted", "session.updated"].includes(event.type)) void loadSessions();
+    if (event.type === "command.ack" && event.request_id) {
+      const optimisticId = pendingRequests.current.get(event.request_id);
+      if (optimisticId) {
+        if (event.turn_id) { inFlightTurnIds.current.delete(event.request_id); inFlightTurnIds.current.add(event.turn_id); }
+        setMessages((current) => current.map((message) => message.id === optimisticId ? { ...message, turnId: event.turn_id ?? message.turnId } : message));
+        pendingRequests.current.delete(event.request_id);
+      }
+    }
     if (!event.session_id || event.session_id !== activeSessionRef.current || !event.turn_id) return;
     if (event.type === "stream.gap") void loadTurns(event.session_id);
     if (event.type === "chat.completed" && typeof event.payload.content === "string") {
@@ -138,13 +146,5 @@ export function createRealtimeEventHandler({
       next[index] = message;
       return next;
     });
-    if (event.type === "command.ack" && event.request_id) {
-      const optimisticId = pendingRequests.current.get(event.request_id);
-      if (optimisticId) {
-        if (event.turn_id) { inFlightTurnIds.current.delete(event.request_id); inFlightTurnIds.current.add(event.turn_id); }
-        setMessages((current) => current.map((message) => message.id === optimisticId ? { ...message, turnId: event.turn_id ?? message.turnId } : message));
-        pendingRequests.current.delete(event.request_id);
-      }
-    }
   };
 }

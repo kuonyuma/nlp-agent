@@ -123,12 +123,18 @@ class WorkerEventBus:
         return event
 
     async def get_for_turn(
-        self, session_id: str, parent_turn_id: str, timeout_s: float | None = None,
+        self,
+        session_id: str,
+        parent_turn_id: str,
+        timeout_s: float | None = None,
+        worker_ids: frozenset[str] | None = None,
     ) -> WorkerCompletedEvent:
         """Return one completion for a turn without consuming other turns' events."""
         deferred = self._deferred[session_id]
         for index, event in enumerate(deferred):
-            if event.parent_turn_id == parent_turn_id:
+            if event.parent_turn_id == parent_turn_id and (
+                worker_ids is None or event.worker_id in worker_ids
+            ):
                 del deferred[index]
                 self.metrics.consumed += 1
                 return event
@@ -144,7 +150,9 @@ class WorkerEventBus:
                 queue.get(), remaining
             )
             self._refill(session_id)
-            if event.parent_turn_id == parent_turn_id:
+            if event.parent_turn_id == parent_turn_id and (
+                worker_ids is None or event.worker_id in worker_ids
+            ):
                 self.metrics.consumed += 1
                 return event
             deferred.append(event)
@@ -168,7 +176,11 @@ class WorkerEventBus:
         return events
 
     def drain_for_turn(
-        self, session_id: str, parent_turn_id: str, limit: int = 100,
+        self,
+        session_id: str,
+        parent_turn_id: str,
+        limit: int = 100,
+        worker_ids: frozenset[str] | None = None,
     ) -> list[WorkerCompletedEvent]:
         """Drain only one turn while retaining completions for other turns."""
         events: list[WorkerCompletedEvent] = []
@@ -176,7 +188,11 @@ class WorkerEventBus:
         retained: deque[WorkerCompletedEvent] = deque()
         while deferred:
             event = deferred.popleft()
-            if event.parent_turn_id == parent_turn_id and len(events) < limit:
+            if (
+                event.parent_turn_id == parent_turn_id
+                and (worker_ids is None or event.worker_id in worker_ids)
+                and len(events) < limit
+            ):
                 events.append(event)
             else:
                 retained.append(event)
@@ -189,7 +205,9 @@ class WorkerEventBus:
             except asyncio.QueueEmpty:
                 break
             self._refill(session_id)
-            if event.parent_turn_id == parent_turn_id:
+            if event.parent_turn_id == parent_turn_id and (
+                worker_ids is None or event.worker_id in worker_ids
+            ):
                 events.append(event)
             else:
                 deferred.append(event)

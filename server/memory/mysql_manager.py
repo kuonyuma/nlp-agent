@@ -13,6 +13,7 @@ from configs.settings import settings
 from core.session_context import SessionContext
 from server.infrastructure.mysql.models import MemoryArchiveModel, MemoryCursorModel, MemoryDocumentModel
 from server.memory.types import MemoryArchiveRecord, MemoryCuratorOperation, MemoryScopeKind, is_valid_memory_type
+from server.memory.manager import _truncate_to_tokens
 from utils.tokens import rough_token_count_estimation
 
 _SECRET_RE = re.compile(r"(?i)(api[_-]?key|access[_-]?token|password|passwd|private[_-]?key)\s*[:=]")
@@ -121,12 +122,25 @@ class MySQLMemoryManager:
 
     def build_injection_text(self, *, max_tokens: int, max_topics: int, recent_archive_tokens: int) -> str:
         parts = [self.load_memory_index()]
+        topic_budget = max(0, max_tokens - recent_archive_tokens)
         for row in self.scan_memory_headers()[:max_topics]:
             content = self.read_memory_topic(row["filename"], MemoryScopeKind(row["scope"]))
-            if rough_token_count_estimation("\n\n".join([*parts, content])) > max_tokens:
+            if rough_token_count_estimation("\n\n".join([*parts, content])) > topic_budget:
                 break
             parts.append(content)
-        return "\n\n".join(parts)
+        recent = self.read_archives(
+            since_cursor=self.get_curator_cursor(),
+            session_id=self.context.session_id,
+        )
+        if recent and recent_archive_tokens:
+            text = "\n".join(
+                f"- [{row.cursor}] {row.summary}" for row in recent[-20:]
+            )
+            parts.append(
+                "## Current session archived context\n"
+                + _truncate_to_tokens(text, recent_archive_tokens)
+            )
+        return _truncate_to_tokens("\n\n".join(parts), max_tokens)
 
     def apply_curator_operation(self, operation: MemoryCuratorOperation) -> None:
         if operation.operation == "ignore": return

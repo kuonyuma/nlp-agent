@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from core.task_manager import global_task_manager
+from core.session_context import SessionContext
 from core.worker_lifecycle import WorkerResourceBudget, WorkerRetryPolicy
 from schemas.models import (
     WorkerErrorSpec,
@@ -129,6 +130,58 @@ async def test_sandbox_enforces_token_budget(monkeypatch):
     assert result.status == "failed"
     assert result.termination_reason == "token_budget"
     assert result.error.category == "budget"
+
+
+@pytest.mark.asyncio
+async def test_worker_context_preserves_parent_user_and_workspace(monkeypatch):
+    captured = []
+
+    class FakeContextManager:
+        async def prepare(self, context, messages, _budget):
+            captured.append(context)
+            return type(
+                "Transform",
+                (),
+                {
+                    "messages": messages,
+                    "tokens_before": 0,
+                    "tokens_after": 0,
+                    "actions": [],
+                },
+            )()
+
+    class FakeLLM:
+        async def ainvoke(self, _messages):
+            return AIMessage(content="done")
+
+    monkeypatch.setattr(worker_tool, "global_context_manager", FakeContextManager())
+    monkeypatch.setattr(worker_tool, "get_tool_llm", lambda: FakeLLM())
+    monkeypatch.setattr(worker_tool, "record_sidechain_transcript", lambda *_args: None)
+    parent = SessionContext(
+        session_id="s1",
+        user_id="alice",
+        workspace_id="nlp",
+        channel="web",
+    )
+
+    result = await _execute_sandbox_loop(
+        "worker-1",
+        "s1",
+        [],
+        [],
+        context=parent,
+    )
+
+    assert result.status == "completed"
+    assert captured == [
+        SessionContext(
+            session_id="s1",
+            user_id="alice",
+            workspace_id="nlp",
+            channel="worker",
+            agent_id="worker-1",
+        )
+    ]
 
 
 @pytest.mark.asyncio

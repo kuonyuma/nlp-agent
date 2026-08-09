@@ -158,6 +158,7 @@ async def _execute_sandbox_loop(
     *,
     budget: WorkerResourceBudget | None = None,
     attempt: int = 1,
+    context: SessionContext | None = None,
 ) -> WorkerExecutionResultSpec:
     """Execute one isolated Worker attempt under an explicit resource budget."""
     worker_logger = logger.bind(worker_id=worker_id, session_id=session_id)
@@ -193,10 +194,11 @@ async def _execute_sandbox_loop(
         output_reserve=output_reserve,
         tools=toolset.tools,
     )
-    session_context = SessionContext(
-        session_id=session_id,
-        channel="worker",
-        agent_id=worker_id,
+    parent_context = context or SessionContext(session_id=session_id)
+    if parent_context.session_id != session_id:
+        raise ValueError("Worker context must belong to the parent session")
+    session_context = parent_context.model_copy(
+        update={"channel": "worker", "agent_id": worker_id}
     )
 
     def result(
@@ -555,6 +557,7 @@ async def _background_task_wrapper(
     initial_messages: list,
     toolset: ToolSet,
     model_name: str = "",
+    context: SessionContext | None = None,
 ) -> None:
     """Own the complete Worker lifecycle and publish exactly one terminal result."""
     task = global_task_manager.get_active_task(worker_id)
@@ -575,7 +578,7 @@ async def _background_task_wrapper(
             ) as worker_span:
                 result = await _execute_sandbox_loop(
                     worker_id, session_id, initial_messages, toolset, model_name,
-                    budget=task.budget, attempt=attempt,
+                    budget=task.budget, attempt=attempt, context=context,
                 )
                 if worker_span is not None:
                     worker_span.annotate(
@@ -694,6 +697,7 @@ async def spawn_worker(
     runtime_settings = settings.get_agent_runtime("worker")
 
     session_id = config.get("configurable", {}).get("thread_id", "default_session")
+    parent_context = SessionContext.from_config(config, require=True)
     parent_turn_id = config.get("configurable", {}).get("turn_id", "")
     parent_worker_id = config.get("configurable", {}).get("worker_id", "")
     worker_id = create_agent_id(agent_name)
@@ -769,7 +773,14 @@ async def spawn_worker(
     record_sidechain_transcript(session_id, worker_id, initial_messages)
 
     bg_task = asyncio.create_task(
-        _background_task_wrapper(worker_id, session_id, initial_messages, toolset, resolved_model)
+        _background_task_wrapper(
+            worker_id,
+            session_id,
+            initial_messages,
+            toolset,
+            resolved_model,
+            parent_context,
+        )
     )
 
     global_task_manager.register_task(
