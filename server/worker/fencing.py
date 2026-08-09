@@ -86,8 +86,8 @@ class FencedTurnExecutor:
         heartbeat = asyncio.create_task(
             self._heartbeat(task.turn_id, generation), name=f"turn-lease:{task.turn_id}"
         )
-        try:
-            await self._execute(
+        execution = asyncio.create_task(
+            self._execute(
                 task,
                 TurnExecutionContext(
                     turn_id=task.turn_id,
@@ -95,11 +95,26 @@ class FencedTurnExecutor:
                     principal=principal,
                     workspace_id=task.authorization.workspace_id,
                 ),
+            ),
+            name=f"turn-execution:{task.turn_id}",
+        )
+        try:
+            completed, _pending = await asyncio.wait(
+                {execution, heartbeat},
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if heartbeat in completed:
+                error = heartbeat.exception()
+                if error is None:
+                    raise RuntimeError("turn lease heartbeat stopped unexpectedly")
+                raise error
+            await execution
             return True
         finally:
+            if not execution.done():
+                execution.cancel()
             heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
+            await asyncio.gather(execution, heartbeat, return_exceptions=True)
 
     async def _heartbeat(self, turn_id: str, generation: int) -> None:
         while True:

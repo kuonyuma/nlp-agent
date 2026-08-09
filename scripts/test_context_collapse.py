@@ -21,10 +21,6 @@ from server.agent.compression.context_collapse import (
 import server.agent.compression.context_collapse as cc_module
 async def mock_generate_summary(msgs):
     return "This is a mock summary of the span."
-cc_module._generate_span_summary = mock_generate_summary
-async def mock_persist(c):
-    pass
-cc_module._persist_collapse_commit = mock_persist  # Disable JSONL persistence for test
 
 def make_human(content: str):
     return HumanMessage(content=content, id=str(uuid.uuid4()))
@@ -36,7 +32,8 @@ def make_system(content: str):
     return SystemMessage(content=content, id=str(uuid.uuid4()))
 
 @pytest.mark.asyncio
-async def test_context_collapse_flow():
+async def test_context_collapse_flow(monkeypatch):
+    monkeypatch.setattr(cc_module, "_generate_span_summary", mock_generate_summary)
     store = CollapseStore()
     
     # 构造一批消息，每条 20,000 tokens，凑够 160K (不到 162K)

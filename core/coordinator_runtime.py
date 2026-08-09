@@ -270,7 +270,10 @@ class CoordinatorRuntime:
                 return collected, True
             try:
                 event = await self._event_bus.get_for_turn(
-                    plan.session_id, plan.parent_turn_id, timeout_s=remaining
+                    plan.session_id,
+                    plan.parent_turn_id,
+                    timeout_s=remaining,
+                    worker_ids=plan.worker_ids,
                 )
             except asyncio.TimeoutError:
                 return collected, True
@@ -281,7 +284,11 @@ class CoordinatorRuntime:
         # Drain only this turn's events already queued in the same scheduler
         # tick. Other turns remain available for their own Coordinator resume.
         collected.extend(
-            self._event_bus.drain_for_turn(plan.session_id, plan.parent_turn_id)
+            self._event_bus.drain_for_turn(
+                plan.session_id,
+                plan.parent_turn_id,
+                worker_ids=plan.worker_ids,
+            )
         )
         return collected, False
 

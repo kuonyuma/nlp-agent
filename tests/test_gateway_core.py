@@ -192,6 +192,49 @@ def principal():
 
 
 @pytest.mark.asyncio
+async def test_gateway_rejects_student_teaching_catalog_updates(tmp_path, principal):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+
+    with pytest.raises(AccessDeniedError, match="learning:content:manage"):
+        await gateway.update_teaching_catalog(
+            principal,
+            "w1",
+            {
+                "workspace_id": "w1",
+                "topics": [],
+                "exercise_blueprints": [],
+                "review_blueprints": [],
+                "guided_blueprints": [],
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_guest_teaching_catalog_reads(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+    guest = AuthenticatedPrincipal(
+        user_id="guest",
+        workspace_ids=frozenset({"w1"}),
+        roles=frozenset({"guest"}),
+    )
+
+    with pytest.raises(AccessDeniedError, match="learning:content:read_workspace"):
+        await gateway.get_teaching_catalog(guest, "w1")
+
+
+@pytest.mark.asyncio
 async def test_gateway_submits_persisted_turn_to_dispatcher(tmp_path, principal):
     engine = FakeEngine()
     sessions = FakeSessions()
@@ -321,6 +364,48 @@ async def test_gateway_retries_dispatch_failure_for_same_idempotency_key(
     assert dispatcher.attempts == 2
     assert dispatcher.submissions[0].turn_id == retried.turn_id
     assert repository.get_turn(retried.turn_id).status == TurnStatus.ACCEPTED
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_changed_content_when_retrying_an_idempotency_key(
+    tmp_path, principal
+):
+    sessions = FakeSessions()
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    dispatcher = FlakyTurnDispatcher()
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=sessions,
+        dispatcher=dispatcher,
+    )
+    await gateway.start()
+    session = await gateway.create_session(principal, workspace_id="w1")
+
+    with pytest.raises(ConnectionError):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(
+                session_id=session.session_id,
+                content="original request",
+                idempotency_key="same",
+            ),
+        )
+
+    with pytest.raises(TurnConflictError, match="idempotency key"):
+        await gateway.submit_turn(
+            principal,
+            SubmitTurnRequest(
+                session_id=session.session_id,
+                content="different request",
+                idempotency_key="same",
+            ),
+        )
+
+    original = repository.list_turns(session.session_id)[0]
+    assert original.input_text == "original request"
+    assert dispatcher.attempts == 1
     await gateway.close()
 
 

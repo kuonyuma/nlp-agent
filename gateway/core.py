@@ -269,6 +269,13 @@ class BackendGateway:
                 session_id=context.session_id,
                 idempotency_key=request.idempotency_key,
             )
+            if (
+                existing is not None
+                and existing.input_text != request.content
+            ):
+                raise TurnConflictError(
+                    "idempotency key was already used for a different request"
+                )
             if existing is not None and not (
                 existing.status == TurnStatus.FAILED
                 and existing.error_kind == "dispatch_failed"
@@ -620,11 +627,19 @@ class BackendGateway:
         )
 
     async def get_teaching_catalog(self, principal: AuthenticatedPrincipal, workspace_id: str) -> dict[str, Any]:
-        principal.require_workspace(workspace_id)
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_READ_WORKSPACE,
+            workspace_id=workspace_id,
+        )
         return await asyncio.to_thread(self.repository.get_teaching_catalog, workspace_id)
 
     async def update_teaching_catalog(self, principal: AuthenticatedPrincipal, workspace_id: str, catalog: dict[str, Any]) -> dict[str, Any]:
-        principal.require_workspace(workspace_id)
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_MANAGE,
+            workspace_id=workspace_id,
+        )
         return await asyncio.to_thread(self.repository.update_teaching_catalog, workspace_id, catalog)
 
     async def stream_events(
