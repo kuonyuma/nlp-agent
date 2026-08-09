@@ -192,6 +192,49 @@ def principal():
 
 
 @pytest.mark.asyncio
+async def test_gateway_rejects_student_teaching_catalog_updates(tmp_path, principal):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+
+    with pytest.raises(AccessDeniedError, match="learning:content:manage"):
+        await gateway.update_teaching_catalog(
+            principal,
+            "w1",
+            {
+                "workspace_id": "w1",
+                "topics": [],
+                "exercise_blueprints": [],
+                "review_blueprints": [],
+                "guided_blueprints": [],
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_guest_teaching_catalog_reads(tmp_path):
+    repository = GatewayRepository(tmp_path / "gateway.sqlite3")
+    gateway = BackendGateway(
+        engine=FakeEngine(),
+        repository=repository,
+        sessions=FakeSessions(),
+        dispatcher=RecordingTurnDispatcher(),
+    )
+    guest = AuthenticatedPrincipal(
+        user_id="guest",
+        workspace_ids=frozenset({"w1"}),
+        roles=frozenset({"guest"}),
+    )
+
+    with pytest.raises(AccessDeniedError, match="learning:content:read_workspace"):
+        await gateway.get_teaching_catalog(guest, "w1")
+
+
+@pytest.mark.asyncio
 async def test_gateway_submits_persisted_turn_to_dispatcher(tmp_path, principal):
     engine = FakeEngine()
     sessions = FakeSessions()
