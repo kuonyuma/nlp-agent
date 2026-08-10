@@ -1,4 +1,17 @@
 services:
+  # The only public edge. Nova Web stays on the Compose network and is
+  # accessed through this same-origin reverse proxy.
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${NOVA_NGINX_HTTP_PORT:-80}:80"
+    restart: unless-stopped
+    depends_on:
+      nova-web:
+        condition: service_healthy
+
   mysql:
     image: mysql:8.4
     environment:
@@ -54,8 +67,6 @@ services:
       NLP_AGENT_WEB_PORT: 8765
       NLP_AGENT_GATEWAY_TRANSPORT: redis
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
-    ports:
-      - "${NOVA_WEB_HOST_PORT:-8765}:8765"
     restart: unless-stopped
     depends_on:
       nova-migrate:
@@ -94,8 +105,6 @@ services:
     environment:
       NLP_AGENT_MONITOR_HOST: 0.0.0.0
       NLP_AGENT_MONITOR_PORT: 8766
-    ports:
-      - "${NOVA_MONITOR_HOST_PORT:-8766}:8766"
     restart: unless-stopped
     profiles: ["monitor"]
     depends_on:
