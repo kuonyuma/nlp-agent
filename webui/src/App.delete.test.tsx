@@ -2,13 +2,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const api = vi.hoisted(() => ({
   listSessions: vi.fn().mockResolvedValue({ items: [{ session_id: "session_1", user_id: "student", workspace_id: "default", channel: "web" }] }),
-  getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} } }),
+  getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} }, runtime: { default_model_profile: "deepseek", model_profiles: {} } }),
   getLearningCatalog: vi.fn().mockResolvedValue({ catalog: { topics: [] } }),
   deleteSession: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("@/lib/websocket-client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
-vi.mock("@/lib/api", () => ({ ensureAuth: vi.fn().mockResolvedValue({}), api }));
+vi.mock("@/platform/realtime/client", () => ({ StudentSocket: class { connect() {} close() {} setSession() {} sendChat() {} resume() {} cancel() {} } }));
+vi.mock("@/platform/http/api", () => ({ ensureAuth: vi.fn().mockResolvedValue({}), api }));
 
 import { App } from "./App";
 

@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     BASE_DIR: Path = BASE_DIR
     DEEPSEEK_API_KEY: str = ""
+    QWEN_API_KEY: str = ""
     TAVILY_API_KEY: str = ""
     NLP_AGENT_WORKER_MODEL: str = ""
     NLP_AGENT_WEB_SECRET: str = ""
@@ -32,6 +33,15 @@ class Settings(BaseSettings):
     NLP_AGENT_MONITOR_PORT: int = 0
     NLP_AGENT_MONITOR_ALLOWED_HOSTS: str = ""
     NLP_AGENT_MONITOR_ALLOWED_ORIGINS: str = ""
+    NLP_AGENT_GATEWAY_TRANSPORT: str = ""
+    NLP_AGENT_REDIS_URL: str = ""
+    NLP_AGENT_STATE_FACTORY: str = ""
+    NLP_AGENT_DATABASE_URL: str = ""
+    NLP_AGENT_DB_POOL_SIZE: int = 10
+    NLP_AGENT_DB_MAX_OVERFLOW: int = 20
+    NLP_AGENT_DB_POOL_RECYCLE_S: int = 1800
+    NLP_AGENT_DB_CONNECT_TIMEOUT_S: int = 5
+    NLP_AGENT_DB_STATEMENT_TIMEOUT_S: int = 30
 
     _config: dict = {}
 
@@ -43,11 +53,21 @@ class Settings(BaseSettings):
         presets = self._config.get("model_presets", {})
         models = self._config.get("models", {})
         if name in presets:
-            preset_name, preset, model_name = name, presets[name], presets[name]["model"]
+            preset_name, preset, model_name = (
+                name,
+                presets[name],
+                presets[name]["model"],
+            )
         elif name in models:
-            preset_name, preset, model_name = name, {"generation": {}, "thinking": {}}, name
+            preset_name, preset, model_name = (
+                name,
+                {"generation": {}, "thinking": {}},
+                name,
+            )
         else:
-            raise KeyError(f"Unknown model preset/model {name!r}; presets={list(presets)}")
+            raise KeyError(
+                f"Unknown model preset/model {name!r}; presets={list(presets)}"
+            )
         model = models[model_name]
         provider_name = model["provider"]
         provider = self._config.get("providers", {})[provider_name]
@@ -95,7 +115,29 @@ class Settings(BaseSettings):
 
     @property
     def gateway_runtime(self) -> dict:
-        return dict(self._config.get("gateway", {}))
+        config = dict(self._config.get("gateway", {}))
+        if self.NLP_AGENT_GATEWAY_TRANSPORT.strip():
+            config["transport"] = self.NLP_AGENT_GATEWAY_TRANSPORT.strip()
+        if self.NLP_AGENT_REDIS_URL.strip():
+            config["redis_url"] = self.NLP_AGENT_REDIS_URL.strip()
+        if self.NLP_AGENT_STATE_FACTORY.strip():
+            config["state_factory"] = self.NLP_AGENT_STATE_FACTORY.strip()
+        return config
+
+    @property
+    def database_runtime(self) -> dict:
+        config = dict(self._config.get("database", {}))
+        config.update(
+            {
+                "url": self.NLP_AGENT_DATABASE_URL.strip(),
+                "pool_size": self.NLP_AGENT_DB_POOL_SIZE,
+                "max_overflow": self.NLP_AGENT_DB_MAX_OVERFLOW,
+                "pool_recycle_s": self.NLP_AGENT_DB_POOL_RECYCLE_S,
+                "connect_timeout_s": self.NLP_AGENT_DB_CONNECT_TIMEOUT_S,
+                "statement_timeout_s": self.NLP_AGENT_DB_STATEMENT_TIMEOUT_S,
+            }
+        )
+        return config
 
     @property
     def web_runtime(self) -> dict:
@@ -149,9 +191,13 @@ class Settings(BaseSettings):
             config["host"] = host.strip()
         if port > 0:
             config["port"] = port
-        if values := [item.strip() for item in allowed_hosts.split(",") if item.strip()]:
+        if values := [
+            item.strip() for item in allowed_hosts.split(",") if item.strip()
+        ]:
             config["allowed_hosts"] = values
-        if values := [item.strip() for item in allowed_origins.split(",") if item.strip()]:
+        if values := [
+            item.strip() for item in allowed_origins.split(",") if item.strip()
+        ]:
             config["allowed_origins"] = values
 
     def _resolve_worker_model(
@@ -169,7 +215,9 @@ class Settings(BaseSettings):
         default = self._config.get("defaults", {}).get("worker", "inherit")
         if default != "inherit":
             return str(default)
-        return str(self._config.get("defaults", {}).get("coordinator", "coordinator-pro"))
+        return str(
+            self._config.get("defaults", {}).get("coordinator", "coordinator-pro")
+        )
 
     def _resolve_model_name(
         self,
@@ -181,8 +229,10 @@ class Settings(BaseSettings):
 
     @property
     def planner_llm(self) -> dict:
-        name = self._config.get("model_routes", {}).get("coordinator", {}).get(
-            "primary", "coordinator-pro"
+        name = (
+            self._config.get("model_routes", {})
+            .get("coordinator", {})
+            .get("primary", "coordinator-pro")
         )
         return self._get_llm_config(name)
 

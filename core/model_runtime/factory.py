@@ -10,6 +10,7 @@ from dotenv import dotenv_values
 from configs.settings import BASE_DIR, settings
 from core.model_runtime.adapters.deepseek import DeepSeekAdapter
 from core.model_runtime.adapters.openai_compatible import OpenAICompatibleAdapter
+from core.model_runtime.adapters.qwen import QwenAdapter
 from core.model_runtime.contracts import ModelPresetConfig, ModelRuntimeConfig
 from core.model_runtime.registry import ProviderRegistry, global_provider_registry
 from core.model_runtime.runtime import ModelCandidate, ResilientChatModel
@@ -20,6 +21,8 @@ def _register_builtins(registry: ProviderRegistry) -> None:
         registry.register("deepseek", DeepSeekAdapter)
     if "openai_compatible" not in registry.names:
         registry.register("openai_compatible", OpenAICompatibleAdapter)
+    if "qwen" not in registry.names:
+        registry.register("qwen", QwenAdapter)
 
 
 class ModelFactory:
@@ -38,6 +41,8 @@ class ModelFactory:
             "models": raw.get("models", {}),
             "model_presets": raw.get("model_presets", {}),
             "model_routes": raw.get("model_routes", {}),
+            "model_profiles": raw.get("model_profiles", {}),
+            "default_model_profile": raw.get("defaults", {}).get("model_profile"),
         }))
 
     def _api_key(self, env_name: str) -> str:
@@ -105,6 +110,27 @@ class ModelFactory:
                 self._candidate(f"{base_name}@{requested}", override)
             ])
         return self._cache[key]
+
+    def profile_preset(self, profile_name: str, role: str) -> str:
+        profile = self.config.profile(profile_name)
+        if role not in {"coordinator", "worker", "utility"}:
+            raise KeyError(f"Unknown model profile role {role!r}")
+        return str(getattr(profile, role))
+
+    def profile_available(self, profile_name: str) -> bool:
+        profile = self.config.profile(profile_name)
+        provider = self.config.providers[profile.provider]
+        return bool(self._api_key(provider.api_key_env))
+
+    def public_profiles(self) -> dict[str, dict[str, Any]]:
+        return {
+            name: {
+                "label": profile.label,
+                "provider": profile.provider,
+                "available": self.profile_available(name),
+            }
+            for name, profile in self.config.model_profiles.items()
+        }
 
     def route_primary_details(self, route_name: str) -> dict[str, Any]:
         preset_name, preset = self.config.route_presets(route_name)[0]

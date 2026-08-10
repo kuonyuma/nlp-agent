@@ -9,11 +9,13 @@ from server.agent.compression.context_collapse import CollapseCommit
 from server.agent.compression.context_manager import ContextManager
 from server.memory.curator import MemoryCurator
 from server.memory.manager import MemoryManager
+from server.memory.mysql_manager import MySQLMemoryManager
 from server.memory.runtime import MemoryRuntime
 from server.memory.types import (
     MemoryCurationResult,
     MemoryCuratorOperation,
     MemoryRuntimeConfig,
+    MemoryArchiveRecord,
     MemoryScopeKind,
 )
 from utils.tokens import ContextBudget
@@ -92,6 +94,39 @@ def test_archives_are_session_filtered_and_source_idempotent(tmp_path):
         "First session summary"
     ]
     assert [item.cursor for item in second.read_archives()] == [1, 2]
+
+
+def test_mysql_memory_injection_includes_only_current_session_archives(monkeypatch):
+    manager = MySQLMemoryManager.__new__(MySQLMemoryManager)
+    manager.context = context("current")
+    archives = [
+        MemoryArchiveRecord(
+            cursor=1,
+            source_id="current-summary",
+            workspace_id="nlp",
+            user_id="alice",
+            session_id="current",
+            summary="Current session compressed decision.",
+        )
+    ]
+    monkeypatch.setattr(manager, "load_memory_index", lambda: "# Memory Index")
+    monkeypatch.setattr(manager, "scan_memory_headers", lambda: [])
+    monkeypatch.setattr(manager, "get_curator_cursor", lambda: 0)
+
+    def read_archives(*, since_cursor=0, session_id=None):
+        assert since_cursor == 0
+        assert session_id == "current"
+        return archives
+
+    monkeypatch.setattr(manager, "read_archives", read_archives)
+
+    injected = manager.build_injection_text(
+        max_tokens=500,
+        max_topics=0,
+        recent_archive_tokens=200,
+    )
+
+    assert "Current session compressed decision." in injected
 
 
 @pytest.mark.asyncio

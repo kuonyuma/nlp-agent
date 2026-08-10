@@ -18,7 +18,8 @@ class TimeResponse(BaseModel):
 @tool("get_current_time")
 async def get_current_time() -> str:
     """获取当前真实系统时间，返回 ISO 格式的日期、时间、星期。"""
-    now = datetime.datetime.now()
+    shanghai = datetime.timezone(datetime.timedelta(hours=8), name="Asia/Shanghai")
+    now = datetime.datetime.now(shanghai)
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     response = TimeResponse(
         datetime=now.strftime("%Y-%m-%d %H:%M:%S"),

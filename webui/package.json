@@ -34,6 +34,7 @@
     "react-dom": "^18.3.1",
     "react-i18next": "^17.0.4",
     "react-markdown": "^9.0.1",
+    "react-router-dom": "^7.18.2",
     "react-syntax-highlighter": "^16.1.1",
     "rehype-katex": "^7.0.1",
     "remark-breaks": "^4.0.0",
@@ -42,6 +43,8 @@
     "tailwind-merge": "^2.6.0"
   },
   "devDependencies": {
+    "@emnapi/core": "1.11.3",
+    "@emnapi/runtime": "1.11.3",
     "@eslint/js": "^10.0.1",
     "@tailwindcss/typography": "^0.5.19",
     "@testing-library/jest-dom": "^6.6.3",

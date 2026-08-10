@@ -10,6 +10,8 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
+from gateway.dispatch import InProcessTurnDispatcher, TurnDispatcher, TurnTask
+from gateway.redis_transport import RedisTransportConfig, RedisTurnDispatcher
 
 __all__ = [
     "GatewayEvent",
@@ -20,4 +22,9 @@ __all__ = [
     "TurnAccepted",
     "TurnRecord",
     "TurnStatus",
+    "InProcessTurnDispatcher",
+    "TurnDispatcher",
+    "TurnTask",
+    "RedisTransportConfig",
+    "RedisTurnDispatcher",
 ]

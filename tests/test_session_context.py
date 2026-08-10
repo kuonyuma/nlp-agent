@@ -10,6 +10,11 @@ from core.session_context import (
     PersistedContextState,
     SessionContext,
 )
+from server.agent.compression.auto_compact import autocompact_if_needed
+from server.agent.compression.context_collapse import (
+    CollapseStore,
+    apply_collapses_if_needed,
+)
 from server.agent.compression.context_manager import ContextManager, trim_legal_history
 from utils.tokens import (
     build_context_budget,
@@ -92,6 +97,76 @@ def test_hard_trim_preserves_complete_tool_call_turn():
     ids = {message.id for message in trimmed}
     assert {"new-user", "new-ai", "tool-1", "answer"}.issubset(ids)
     assert "old-user" not in ids
+
+
+@pytest.mark.asyncio
+async def test_auto_compact_never_leaves_an_orphaned_tool_result(monkeypatch):
+    async def summarize(_messages):
+        return "older context"
+
+    monkeypatch.setattr(
+        "server.agent.compression.auto_compact._generate_global_summary",
+        summarize,
+    )
+    messages = [
+        HumanMessage(content="old request", id="old-user"),
+        HumanMessage(content="older follow-up", id="older-follow-up"),
+        AIMessage(
+            content="",
+            id="old-tool-call",
+            tool_calls=[{"name": "lookup", "args": {}, "id": "call-1"}],
+        ),
+        ToolMessage(
+            content="result",
+            name="lookup",
+            tool_call_id="call-1",
+            id="old-tool-result",
+        ),
+        *[
+            HumanMessage(content=f"recent {index}", id=f"recent-{index}")
+            for index in range(9)
+        ],
+    ]
+
+    compacted = await autocompact_if_needed(messages, threshold=1)
+
+    declared = {
+        str(call["id"])
+        for message in compacted.messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+        if call.get("id")
+    }
+    assert all(
+        not isinstance(message, ToolMessage)
+        or message.tool_call_id in declared
+        for message in compacted.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_collapse_does_not_commit_when_summary_generation_fails(
+    monkeypatch,
+):
+    class FailingModel:
+        async def ainvoke(self, _messages):
+            raise ConnectionError("summary model unavailable")
+
+    monkeypatch.setattr(
+        "server.agent.llm_factory.get_utility_llm",
+        lambda: FailingModel(),
+    )
+    messages = [
+        HumanMessage(content=f"message {index}", id=f"message-{index}")
+        for index in range(20)
+    ]
+    store = CollapseStore()
+    await apply_collapses_if_needed(messages, store, input_limit=100_000)
+
+    projected = await apply_collapses_if_needed(messages, store, input_limit=1)
+
+    assert store.commits == []
+    assert projected == messages
 
 
 class Query(BaseModel):

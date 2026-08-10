@@ -1,15 +1,17 @@
 import asyncio
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from core.model_runtime.adapters.deepseek import DeepSeekChatModel
+from core.model_runtime.adapters.qwen import QwenAdapter
 from core.model_runtime.contracts import (
     CircuitBreakerPolicy,
     GenerationConfig,
     ModelCapabilities,
     ModelDefinition,
     ModelPresetConfig,
+    ModelProfileConfig,
     ModelRouteConfig,
     ModelRuntimeConfig,
     ProviderConfig,
@@ -115,6 +117,118 @@ def test_typed_config_rejects_incapable_fallback():
             },
             model_routes={"coordinator": ModelRouteConfig(primary="p", fallbacks=("f",))},
         )
+
+
+def test_model_profile_rejects_a_preset_from_another_provider():
+    with pytest.raises(ValueError, match="expected 'qwen'"):
+        ModelRuntimeConfig(
+            providers={
+                "deepseek": ProviderConfig(
+                    adapter="deepseek", base_url="http://deepseek", api_key_env="DEEPSEEK_KEY"
+                ),
+                "qwen": ProviderConfig(
+                    adapter="qwen", base_url="http://qwen", api_key_env="QWEN_KEY"
+                ),
+            },
+            models={
+                "deepseek-model": ModelDefinition(
+                    provider="deepseek", model_id="deepseek", context_window_tokens=100,
+                    max_output_tokens=10,
+                ),
+                "qwen-model": ModelDefinition(
+                    provider="qwen", model_id="qwen", context_window_tokens=100,
+                    max_output_tokens=10,
+                ),
+            },
+            model_presets={
+                "deepseek-preset": ModelPresetConfig(
+                    model="deepseek-model", generation=GenerationConfig(max_output_tokens=10)
+                ),
+                "qwen-preset": ModelPresetConfig(
+                    model="qwen-model", generation=GenerationConfig(max_output_tokens=10)
+                ),
+            },
+            model_routes={},
+            model_profiles={
+                "qwen": ModelProfileConfig(
+                    label="Qwen", provider="qwen", coordinator="qwen-preset",
+                    worker="qwen-preset", utility="deepseek-preset",
+                )
+            },
+            default_model_profile="qwen",
+        )
+
+
+def test_qwen_adapter_translates_thinking_and_preserves_provider_metadata():
+    adapter = QwenAdapter()
+    model = adapter.build(
+        provider_name="qwen",
+        provider=ProviderConfig(
+            adapter="qwen", base_url="https://example.test/v1", api_key_env="QWEN_KEY"
+        ),
+        model_name="qwen-max",
+        model=ModelDefinition(
+            provider="qwen", model_id="qwen3.8-max", context_window_tokens=1000,
+            max_output_tokens=100, capabilities=ModelCapabilities(thinking=True),
+        ),
+        preset_name="qwen-max",
+        preset=ModelPresetConfig(
+            model="qwen-max",
+            thinking=ThinkingConfig(enabled=True, effort="max"),
+            generation=GenerationConfig(max_output_tokens=100),
+        ),
+        api_key="test",
+    )
+
+    payload = model._get_request_payload([
+        HumanMessage(content="first question"),
+        AIMessage(
+            content="first answer",
+            additional_kwargs={"reasoning_content": "历史分析"},
+        ),
+        HumanMessage(content="follow-up question"),
+    ])
+    assert payload["extra_body"] == {
+        "enable_thinking": True,
+        "preserve_thinking": True,
+        "reasoning_effort": "xhigh",
+    }
+    assert payload["messages"][1]["reasoning_content"] == "历史分析"
+
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "choices": [{
+                "delta": {"role": "assistant", "content": "", "reasoning_content": "分析"},
+                "finish_reason": None,
+            }],
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 3,
+                "total_tokens": 7,
+                "prompt_tokens_details": {"cached_tokens": 2},
+                "completion_tokens_details": {"reasoning_tokens": 1},
+            },
+        },
+        AIMessageChunk,
+        None,
+    )
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning_content"] == "分析"
+    assert chunk.message.usage_metadata["input_token_details"]["cache_read"] == 2
+    assert chunk.message.usage_metadata["output_token_details"]["reasoning"] == 1
+
+    result = model._create_chat_result({
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": "答案", "reasoning_content": "完整分析",
+            },
+            "finish_reason": "stop",
+        }],
+        "model": "qwen3.8-max",
+        "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
+    })
+    assert result.generations[0].message.additional_kwargs["reasoning_content"] == "完整分析"
+    assert result.generations[0].message.additional_kwargs["provider_usage"]["total_tokens"] == 7
 
 
 def test_deepseek_usage_normalization_includes_kv_cache():

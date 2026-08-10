@@ -17,6 +17,23 @@ jobs:
   backend:
     name: Backend tests and static checks
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: nlp_agent
+          MYSQL_USER: nlp_agent
+          MYSQL_PASSWORD: nlp_agent
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NLP_AGENT_DATABASE_URL: mysql+aiomysql://nlp_agent:nlp_agent@127.0.0.1:3306/nlp_agent?charset=utf8mb4
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -27,15 +44,32 @@ jobs:
           python-version: "3.12"
       - run: uv sync --frozen --group dev
       - run: uv lock --check
-      - run: uv run ruff check configs core gateway server tests scripts
-      - run: uv run python -m compileall -q configs core gateway server
+      - run: uv run alembic upgrade head
+      - run: uv run ruff check configs core gateway server tests scripts migrations
+      - run: uv run python -m compileall -q configs core gateway server migrations
       - run: uv run pytest
 
   frontend:
     name: Frontend tests, lint and build
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: nlp_agent
+          MYSQL_USER: nlp_agent
+          MYSQL_PASSWORD: nlp_agent
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     env:
       PRO_NLP_PYTHON: ${{ github.workspace }}/.venv/bin/python
+      NLP_AGENT_DATABASE_URL: mysql+aiomysql://nlp_agent:nlp_agent@127.0.0.1:3306/nlp_agent?charset=utf8mb4
     defaults:
       run:
         working-directory: webui
@@ -54,6 +88,9 @@ jobs:
           cache-dependency-path: webui/package-lock.json
       - run: npm ci
       - run: uv sync --frozen --group dev
+        working-directory: .
+      - run: uv run alembic upgrade head
+        working-directory: .
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test

@@ -1,12 +1,25 @@
 defaults:
   coordinator: coordinator-pro
   worker: worker-flash
+  model_profile: deepseek
+
+# MySQL is provisioned through Alembic before application startup. The DSN
+# remains in NLP_AGENT_DATABASE_URL and must never be committed to this file.
+database:
+  driver: mysql
+  dsn_env: NLP_AGENT_DATABASE_URL
+  pool_size: 10
+  max_overflow: 20
+  pool_recycle_s: 1800
+  connect_timeout_s: 5
+  statement_timeout_s: 30
 
 # The local Backend Gateway is the only process allowed to own Agent runtime
 # state. FastAPI/HTTP adapters should connect to it instead of constructing a
 # second LangGraph or Worker runtime.
 gateway:
-  database: .data/gateway/gateway.sqlite3
+  # SQLite is available only to the one-shot migration CLI; no runtime fallback.
+  persistence: mysql
   single_process: true
   stream_queue_size: 500
   shutdown_grace_s: 30
@@ -14,6 +27,21 @@ gateway:
   max_events_per_session: 50000
   retention_cleanup_interval_s: 3600
   knowledge_point_prompt_budget: 12000
+  transport: in_process
+  redis_url: redis://127.0.0.1:6379/0
+  redis_turn_stream: nlp-agent:turns
+  redis_turn_group: nlp-agent-workers
+  redis_event_channel: nlp-agent:events
+  redis_control_channel: nlp-agent:control
+  redis_reclaim_idle_ms: 60000
+  redis_cancel_key_prefix: "nlp-agent:cancel:"
+  redis_cancel_ttl_s: 604800
+  redis_dead_letter_stream: nlp-agent:turns:dead
+  # MySQL is the authoritative claim lease; Redis pending-entry reclaim is not
+  # an execution ownership mechanism.
+  mysql_turn_lease_s: 60
+  # Future MSSQL adapter: package.module:function returning TurnExecutionState.
+  state_factory: ""
 
 # FastAPI is a same-origin network adapter. It owns HTTP/WebSocket concerns,
 # while BackendGateway remains the only owner of Agent runtime state.
@@ -56,6 +84,12 @@ providers:
     api_key_env: DEEPSEEK_API_KEY
     default_headers: {}
 
+  qwen:
+    adapter: qwen
+    base_url: https://ws-okvvhep7qcxtt1xa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    api_key_env: QWEN_API_KEY
+    default_headers: {}
+
 models:
   deepseek-v4-flash:
     provider: deepseek
@@ -70,6 +104,20 @@ models:
     context_window_tokens: 1000000
     max_output_tokens: 384000
     capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: true, json_mode: true}
+
+  qwen3.8-max:
+    provider: qwen
+    model_id: qwen3.8-max
+    context_window_tokens: 32000
+    max_output_tokens: 8192
+    capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: false, json_mode: true}
+
+  qwen3.7-plus:
+    provider: qwen
+    model_id: qwen3.7-plus
+    context_window_tokens: 128000
+    max_output_tokens: 8192
+    capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: false, json_mode: true}
 
 model_presets:
   coordinator-pro:
@@ -112,6 +160,30 @@ model_presets:
     retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
     circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
 
+  coordinator-qwen-max:
+    model: qwen3.8-max
+    thinking: {enabled: true, effort: max}
+    generation: {max_output_tokens: 8000}
+    timeouts: {connect_s: 10, first_token_s: 180, stream_idle_s: 90, total_s: 600}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  worker-qwen-plus:
+    model: qwen3.7-plus
+    thinking: {enabled: true, effort: high}
+    generation: {max_output_tokens: 8000}
+    timeouts: {connect_s: 10, first_token_s: 120, stream_idle_s: 60, total_s: 360}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  utility-qwen-plus:
+    model: qwen3.7-plus
+    thinking: {enabled: false, effort: none}
+    generation: {max_output_tokens: 8000, temperature: 0.1}
+    timeouts: {connect_s: 10, first_token_s: 90, stream_idle_s: 45, total_s: 240}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
 model_routes:
   coordinator:
     primary: coordinator-pro
@@ -122,6 +194,20 @@ model_routes:
   utility:
     primary: utility-flash
     fallbacks: []
+
+model_profiles:
+  deepseek:
+    label: DeepSeek
+    provider: deepseek
+    coordinator: coordinator-pro
+    worker: worker-flash
+    utility: utility-flash
+  qwen:
+    label: Qwen
+    provider: qwen
+    coordinator: coordinator-qwen-max
+    worker: worker-qwen-plus
+    utility: utility-qwen-plus
 
 # Local memory stays under one root (.data/memory) and is internally scoped by
 # workspace/user/session. Durable Markdown is injected directly; no vector RAG.

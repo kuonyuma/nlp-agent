@@ -16,8 +16,11 @@ from starlette.websockets import WebSocketDisconnect
 
 from configs.settings import settings
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from core.observability.runtime import TelemetryRuntime
 from core.observability.service import ObservabilityService
+from server.infrastructure.mysql import MySQLRuntime
+from server.rbac.service import rbac_service
 from server.web.auth import AuthenticationError, CsrfRejectedError, OriginRejectedError, SameOriginSessionAuth, SessionClaims
 from server.monitor.reset import LocalRuntimeResetter
 
@@ -35,20 +38,29 @@ def create_monitor_app(
     runtime: TelemetryRuntime | None = None,
     auth: SameOriginSessionAuth | None = None,
     resetter: LocalRuntimeResetter | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> FastAPI:
+    # An explicitly injected auth adapter is a self-contained/test deployment
+    # seam. Production construction uses the configured adapter and resolves
+    # roles from MySQL on every request.
+    use_persisted_rbac = auth is None
     config = settings.monitor_runtime
     runtime = runtime or TelemetryRuntime()
     service = ObservabilityService(runtime)
     auth = auth or SameOriginSessionAuth.from_config(config)
     resetter = resetter or LocalRuntimeResetter(runtime)
+    rbac_runtime = MySQLRuntime.from_runtime(settings.database_runtime)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.runtime = runtime
         app.state.observability = service
+        app.state.rbac_runtime = rbac_runtime
+        await rbac_runtime.start()
         try:
             yield
         finally:
+            await rbac_runtime.close()
             await runtime.close()
 
     app = FastAPI(
@@ -60,9 +72,18 @@ def create_monitor_app(
         lifespan=lifespan,
     )
     cookie_auth = APIKeyCookie(name=auth.cookie_name, auto_error=False)
+    # An explicit allowed_hosts override (tests/local deployments) wins over the
+    # config-derived whitelist so the app never depends on a gitignored .env
+    # override of NLP_AGENT_MONITOR_ALLOWED_HOSTS; otherwise fall back to the
+    # configured list and finally the loopback default.
+    middleware_hosts = (
+        allowed_hosts
+        if allowed_hosts is not None
+        else list(config.get("allowed_hosts", ["127.0.0.1", "localhost"]))
+    )
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=list(config.get("allowed_hosts", ["127.0.0.1", "localhost"])),
+        allowed_hosts=middleware_hosts,
     )
 
     @app.middleware("http")
@@ -78,10 +99,13 @@ def create_monitor_app(
     def claims(token: Annotated[str | None, Security(cookie_auth)]) -> SessionClaims:
         return auth.authenticate(token)
 
-    def principal(session: Annotated[SessionClaims, Depends(claims)]) -> AuthenticatedPrincipal:
-        identity = session.principal()
-        if not identity.is_admin:
-            raise AccessDeniedError("administrator role is required")
+    async def principal(session: Annotated[SessionClaims, Depends(claims)]) -> AuthenticatedPrincipal:
+        if session.roles == frozenset({"guest"}) or not use_persisted_rbac:
+            identity = session.principal()
+        else:
+            async with rbac_runtime.session_factory() as db_session:
+                identity = await rbac_service.principal_for_username(db_session, session.user_id)
+        authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         return identity
 
     def write_access(
@@ -91,8 +115,9 @@ def create_monitor_app(
     ) -> SessionClaims:
         auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
         auth.require_csrf(session, csrf)
-        if not session.principal().is_admin:
-            raise AccessDeniedError("administrator role is required")
+        authorization_service.require(
+            session.principal(), Permission.SYSTEM_RUNTIME_MONITOR
+        )
         return session
 
     Principal = Annotated[AuthenticatedPrincipal, Depends(principal)]
@@ -182,14 +207,20 @@ def create_monitor_app(
         try:
             auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
             session = auth.authenticate(websocket.cookies.get(auth.cookie_name))
-            if not session.principal().is_admin:
-                raise AccessDeniedError("administrator role is required")
+            if use_persisted_rbac:
+                async with rbac_runtime.session_factory() as db_session:
+                    identity = await rbac_service.principal_for_username(
+                        db_session, session.user_id
+                    )
+            else:
+                identity = session.principal()
+            authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         except AuthenticationError:
             await websocket.close(code=4401, reason="authentication required"); return
         except (OriginRejectedError, AccessDeniedError):
             await websocket.close(code=4403, reason="access rejected"); return
         await websocket.accept()
-        queue = service.subscribe(session.principal())
+        queue = service.subscribe(identity)
         try:
             for row in reversed(await asyncio.to_thread(runtime.repository.recent_events, limit=100)):
                 await asyncio.wait_for(websocket.send_json({"type": "telemetry.event", "payload": row}), timeout=5)

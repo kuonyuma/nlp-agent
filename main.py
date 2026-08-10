@@ -121,8 +121,12 @@ if __name__ == "__main__":
         from server.monitor.__main__ import run
 
         run()
+    elif command == "worker":
+        from server.worker.runtime import run_worker
+
+        asyncio.run(run_worker())
     elif command in {"chat", "--chat", "-c"}:
         asyncio.run(main())
     else:
-        print("Usage: python main.py [chat|serve|monitor]")
+        print("Usage: python main.py [chat|serve|monitor|worker]")
         raise SystemExit(2)

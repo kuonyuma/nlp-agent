@@ -118,10 +118,11 @@ def get_coordinator_toolset(config: RunnableConfig | None = None):
 def _get_llm_with_tools(config: RunnableConfig):
     global _CACHED_LLM_WITH_TOOLS, _CACHED_SNIP_TOOL, _CACHED_TOOLSET_KEY
     toolset = get_coordinator_toolset(config)
-    cache_key = (physical_tool_manager.catalog_revision, toolset.names)
+    model_profile = config.get("configurable", {}).get("model_profile")
+    cache_key = (physical_tool_manager.catalog_revision, toolset.names, model_profile)
     if _CACHED_LLM_WITH_TOOLS is not None and _CACHED_TOOLSET_KEY == cache_key:
         return _CACHED_LLM_WITH_TOOLS
-    _CACHED_LLM_WITH_TOOLS = get_planner_llm().bind_tools(toolset.tools)
+    _CACHED_LLM_WITH_TOOLS = get_planner_llm(model_profile).bind_tools(toolset.tools)
     _CACHED_TOOLSET_KEY = cache_key
     return _CACHED_LLM_WITH_TOOLS
 
@@ -255,7 +256,7 @@ async def coordinator_node(state: AgentState, config: RunnableConfig) -> dict:
         )
         try:
             response = await invoke_model_with_telemetry(
-                get_planner_llm(),
+                get_planner_llm(configurable.get("model_profile")),
                 [*messages, SystemMessage(content=exhaustion_prompt(stop_reason))],
                 config,
                 name="coordinator.finalize_model",

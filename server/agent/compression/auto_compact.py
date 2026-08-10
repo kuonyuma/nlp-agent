@@ -14,6 +14,7 @@ from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AI
 from utils.tokens import rough_estimation_for_messages
 from utils.logger import get_logger
 from core.prompt_runtime import global_prompt_runtime
+from server.agent.compression.message_integrity import remove_orphaned_tool_messages
 
 logger = get_logger("shiliu.auto_compact")
 
@@ -86,6 +87,7 @@ async def autocompact_if_needed(
             new_messages.append(restored_context_msg)
             
         new_messages.extend(recent_kept)
+        new_messages = remove_orphaned_tool_messages(new_messages)
         
         _consecutive_failures[session_id] = 0
         logger.info("Auto-Compact 成功，上下文已大幅压缩并恢复核心状态。")

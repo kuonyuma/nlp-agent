@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from core.coordinator_runtime import CoordinatorRuntime
 from core.learning import ExerciseState, LearningContext, LearningProgress, TeachingMaterials
@@ -33,6 +33,16 @@ class ToolEventGraph(RecordingGraph):
         yield {"event": "on_chain_end", "metadata": {"langgraph_node": "tools"}}
 
 
+class StreamingGraph(RecordingGraph):
+    async def astream_events(self, _state, *, config, version):
+        self.configs.append(config)
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "coordinator"},
+            "data": {"chunk": AIMessageChunk(content="late answer")},
+        }
+
+
 @pytest.mark.asyncio
 async def test_engine_injects_teacher_topic_and_blueprint_into_graph_config():
     graph = RecordingGraph()
@@ -61,10 +71,12 @@ async def test_engine_injects_teacher_topic_and_blueprint_into_graph_config():
         learning_progress=LearningProgress(objective="掌握 Transformer"),
         exercise_state=ExerciseState(blueprint_id="bp", status="awaiting_answer"),
         teaching_materials=materials,
+        model_profile="qwen",
     )
 
     configurable = graph.configs[0]["configurable"]
     assert result == "done"
+    assert configurable["model_profile"] == "qwen"
     assert configurable["learning_topic"]["description"] == "模型结构"
     assert configurable["learning_topic"]["knowledge_points"] == ["QKV"]
     assert configurable["exercise_blueprint"]["instructions"] == "生成一道 QKV 题"
@@ -93,3 +105,22 @@ async def test_engine_emits_named_tool_lifecycle_events_for_the_webui():
         (GatewayEventType.TOOL_STARTED, {"name": "search_docs"}),
         (GatewayEventType.TOOL_COMPLETED, {"name": "search_docs"}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_detached_worker_resume_does_not_mutate_completed_chat_content():
+    engine = LangGraphAgentEngine()
+    engine._app = StreamingGraph()
+    emitted = []
+
+    async def sink(turn_id, session_id, event_type, payload):
+        emitted.append((turn_id, session_id, event_type, payload))
+
+    engine._event_sink = sink
+    context = SessionContext(
+        session_id="session-1", user_id="alice", workspace_id="w1", channel="web"
+    )
+
+    await engine._invoke([], context, True, "completed-turn")
+
+    assert [item[2] for item in emitted] == [GatewayEventType.WORKER_UPDATE]

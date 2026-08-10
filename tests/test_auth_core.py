@@ -22,7 +22,7 @@ def make_auth(**overrides) -> SameOriginSessionAuth:
     return SameOriginSessionAuth(**config)
 
 
-def test_login_issues_stateful_student_session_and_authenticates_it() -> None:
+def test_login_issues_stateful_universal_session_and_authenticates_it() -> None:
     auth = make_auth()
 
     token, claims = auth.login("nova", "correct-password")
@@ -30,7 +30,7 @@ def test_login_issues_stateful_student_session_and_authenticates_it() -> None:
     assert claims.principal() == AuthenticatedPrincipal(
         user_id="nova",
         workspace_ids=frozenset({"default"}),
-        roles=frozenset({"student"}),
+        roles=frozenset({"student", "teacher", "admin"}),
     )
     assert auth.authenticate(token) == claims
     assert "." not in token

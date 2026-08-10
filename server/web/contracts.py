@@ -26,12 +26,48 @@ class LoginBody(StrictModel):
     password: str = Field(min_length=1, max_length=512)
 
 
+class ReplaceUserRolesBody(StrictModel):
+    role_codes: set[str] = Field(min_length=1, max_length=16)
+
+
+class ReplaceRolePermissionsBody(StrictModel):
+    permission_codes: set[str] = Field(max_length=128)
+    scopes: dict[str, set[Literal["public", "own", "classroom", "workspace", "system"]]] = Field(default_factory=dict)
+
+
+class ReplaceRoleMenusBody(StrictModel):
+    menu_ids: set[str] = Field(max_length=256)
+
+
+class CreateRoleBody(StrictModel):
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]{1,62}$")
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=500)
+
+
+class UpdateRoleStatusBody(StrictModel):
+    status: Literal["active", "disabled"]
+
+
+class CreateClassroomBody(StrictModel):
+    workspace_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
+
+
+class ReplaceClassroomMemberBody(StrictModel):
+    member_role: Literal["student", "teacher"]
+    status: Literal["active", "disabled"] = "active"
+
+
 class SubmitChatBody(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
     evaluation: EvaluationContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class InjectChatBody(StrictModel):
@@ -52,6 +88,9 @@ class UpdateSettingsBody(StrictModel):
     show_reasoning: bool | None = None
     stream_render_interval_ms: int | None = Field(default=None, ge=0, le=1_000)
     default_workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class UpdateToolPoliciesBody(StrictModel):
@@ -86,6 +125,9 @@ class ChatSendPayload(StrictModel):
     content: str = Field(min_length=1, max_length=200_000)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
+    model_profile: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
+    )
 
 
 class ChatInjectPayload(StrictModel):

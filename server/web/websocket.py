@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,9 +13,10 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from core.identity import AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from gateway.contracts import GatewayEventType, InjectMessageRequest, SubmitTurnRequest
 from gateway.core import BackendGateway
-from gateway.events import GatewayEventSubscription
+from gateway.events import GatewayEventStreamInterrupted, GatewayEventSubscription
 from server.web.auth import (
     AuthenticationError,
     OriginRejectedError,
@@ -34,6 +35,18 @@ from server.web.contracts import (
     parse_command_payload,
 )
 from server.web.protocol import control_event, gateway_event_envelope
+
+
+# The gateway repeats these checks at its transport-independent boundary.
+# This map keeps the protocol contract visible for WebSocket clients/reviewers.
+WS_COMMAND_PERMISSIONS: dict[str, Permission] = {
+    "chat.send": Permission.AGENT_TURN_SUBMIT,
+    "chat.inject": Permission.AGENT_SESSION_UPDATE,
+    "chat.cancel": Permission.AGENT_TURN_CANCEL,
+    "session.subscribe": Permission.AGENT_SESSION_READ,
+    "session.unsubscribe": Permission.AGENT_SESSION_READ,
+    "stream.resume": Permission.AGENT_EVENT_REPLAY,
+}
 
 
 @dataclass(slots=True)
@@ -105,6 +118,18 @@ class WebSocketHub:
                 return_exceptions=True,
             )
 
+    async def close_user(
+        self, user_id: str, *, code: int = 4403, reason: str = "authorization changed"
+    ) -> None:
+        """Immediately terminate local sockets after a durable RBAC change.
+
+        The outbox event provides cross-process delivery; the direct close
+        prevents a changed role from retaining a socket until its guard tick.
+        """
+        targets = [item for item in tuple(self._connections) if item.principal.user_id == user_id]
+        if targets:
+            await asyncio.gather(*(item.close(code=code, reason=reason) for item in targets), return_exceptions=True)
+
     async def close(self) -> None:
         connections = list(self._connections)
         self._connections.clear()
@@ -139,6 +164,7 @@ class WebSocketConnection:
         session_fingerprint: bytes | None = None,
         session_check: Callable[[], SessionClaims] | None = None,
         session_touch: Callable[[], SessionClaims] | None = None,
+        authorization_refresh: Callable[[], Awaitable[AuthenticatedPrincipal]] | None = None,
         session_check_interval_s: float = 20,
     ) -> None:
         self.websocket = websocket
@@ -156,6 +182,7 @@ class WebSocketConnection:
         self.session_fingerprint = session_fingerprint
         self._session_check = session_check
         self._session_touch = session_touch
+        self._authorization_refresh = authorization_refresh
         self._session_check_interval_s = max(1.0, session_check_interval_s)
         self._sender_task: asyncio.Task[None] | None = None
         self._session_guard_task: asyncio.Task[None] | None = None
@@ -179,13 +206,23 @@ class WebSocketConnection:
         if validator is not None:
             validator()
 
+    async def refresh_authorization(self) -> None:
+        if self._authorization_refresh is not None:
+            refreshed = await self._authorization_refresh()
+            if refreshed.authorization_version != self.principal.authorization_version:
+                raise PermissionError("authorization changed; reconnect required")
+            self.principal = refreshed
+
     async def _session_guard_loop(self) -> None:
         try:
             while True:
                 await asyncio.sleep(self._session_check_interval_s)
                 self.require_active_session(touch=False)
+                await self.refresh_authorization()
         except AuthenticationError:
             await self._terminate(code=4401, reason="authentication expired")
+        except PermissionError:
+            await self._terminate(code=4403, reason="authorization revoked")
         except asyncio.CancelledError:
             raise
 
@@ -283,6 +320,8 @@ class WebSocketConnection:
         try:
             async for event in subscription:
                 await self._deliver_gateway_event(event)
+        except GatewayEventStreamInterrupted:
+            await self._terminate(code=1012, reason="event transport interrupted")
         except asyncio.CancelledError:
             raise
         finally:
@@ -445,6 +484,9 @@ async def _dispatch_command(
     command: CommandEnvelope,
 ) -> None:
     payload = parse_command_payload(command)
+    required = WS_COMMAND_PERMISSIONS.get(command.type)
+    if required is not None:
+        authorization_service.require(connection.principal, required)
     if isinstance(payload, ChatSendPayload):
         await connection.subscribe(payload.session_id)
         accepted = await connection.gateway.submit_turn(
@@ -454,6 +496,7 @@ async def _dispatch_command(
                 content=payload.content,
                 idempotency_key=payload.idempotency_key,
                 learning_context=payload.learning_context,
+                model_profile=payload.model_profile,
             ),
         )
         await connection.send(
@@ -547,6 +590,7 @@ async def websocket_endpoint(
     max_queue: int,
     send_queue_size: int,
     send_timeout_s: float,
+    principal_resolver: Callable[[SessionClaims], Awaitable[AuthenticatedPrincipal]] | None = None,
 ) -> None:
     try:
         auth.require_same_origin(websocket.headers.get("origin"), websocket.headers.get("host"))
@@ -558,17 +602,32 @@ async def websocket_endpoint(
         await websocket.close(code=4403, reason="origin rejected")
         return
 
+    try:
+        principal = (
+            await principal_resolver(claims)
+            if principal_resolver is not None
+            else claims.principal()
+        )
+    except PermissionError:
+        await websocket.close(code=4403, reason="authorization rejected")
+        return
+
     session_token = websocket.cookies.get(auth.cookie_name)
     connection = WebSocketConnection(
         websocket,
         gateway,
-        claims.principal(),
+        principal,
         max_queue=max_queue,
         send_queue_size=send_queue_size,
         send_timeout_s=send_timeout_s,
         session_fingerprint=auth.token_fingerprint(session_token),
         session_check=lambda: auth.authenticate(session_token, touch=False),
         session_touch=lambda: auth.authenticate(session_token),
+        authorization_refresh=(
+            (lambda: principal_resolver(claims))
+            if principal_resolver is not None
+            else None
+        ),
         session_check_interval_s=min(
             20.0,
             float(getattr(auth, "idle_timeout_s", 900)),
@@ -583,8 +642,8 @@ async def websocket_endpoint(
         control_event(
             "connection.ready",
             payload={
-                "user_id": claims.user_id,
-                "workspace_ids": sorted(claims.workspace_ids),
+                "user_id": principal.user_id,
+                "workspace_ids": sorted(principal.workspace_ids),
                 "protocol_version": "1",
             },
         ),
@@ -617,6 +676,7 @@ async def _receive_commands(
                 command = CommandEnvelope.model_validate(json.loads(raw))
                 request_id = command.request_id
                 connection.require_active_session(touch=command.type != "ping")
+                await connection.refresh_authorization()
                 await _dispatch_command(connection, command)
             except AuthenticationError:
                 await connection.close(code=4401, reason="authentication expired")

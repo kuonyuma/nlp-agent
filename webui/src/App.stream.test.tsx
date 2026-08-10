@@ -3,31 +3,47 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 const stream = vi.hoisted(() => {
   let onEvent: ((event: Record<string, unknown>) => void) | undefined;
   let lastRequestId = "";
+  let lastModelProfile = "";
+  const updateSettings = vi.fn(async (patch: Record<string, unknown>) => ({ settings: {
+    locale: "zh-CN", theme: "system", show_reasoning: false,
+    stream_render_interval_ms: 30, model_profile: "deepseek", ...patch,
+  } }));
   return {
     lastRequestId: () => lastRequestId,
+    lastModelProfile: () => lastModelProfile,
+    updateSettings,
     emit(event: Record<string, unknown>) { onEvent?.(event); },
     StudentSocket: class {
       constructor(event: (value: Record<string, unknown>) => void, private readonly onStatus: (status: "connected") => void) { onEvent = event; }
       connect() { this.onStatus("connected"); }
       close() {}
       setSession() {}
-      sendChat(_sessionId: string, _content: string, requestId: string) { lastRequestId = requestId; }
+      sendChat(_sessionId: string, _content: string, requestId: string, _learningContext?: object, modelProfile?: string) { lastRequestId = requestId; lastModelProfile = modelProfile ?? ""; }
       resume() {}
       cancel() {}
     },
   };
 });
 
-vi.mock("@/lib/websocket-client", () => ({ StudentSocket: stream.StudentSocket }));
-vi.mock("@/lib/api", () => ({
+vi.mock("@/platform/realtime/client", () => ({ StudentSocket: stream.StudentSocket }));
+vi.mock("@/platform/http/api", () => ({
   ensureAuth: vi.fn().mockResolvedValue({}),
   api: {
     listSessions: vi.fn().mockResolvedValue({ items: [] }),
-    getSettings: vi.fn().mockResolvedValue({ preferences: { settings: {} } }),
+    getSettings: vi.fn().mockResolvedValue({
+      preferences: { settings: {} },
+      runtime: {
+        default_model_profile: "deepseek",
+        model_profiles: {
+          deepseek: { label: "DeepSeek", provider: "deepseek", available: true },
+          qwen: { label: "Qwen", provider: "dashscope", available: true },
+        },
+      },
+    }),
     getLearningCatalog: vi.fn().mockResolvedValue({ catalog: { topics: [] } }),
     createSession: vi.fn().mockResolvedValue({ session_id: "session_1", user_id: "user", workspace_id: "default", channel: "web" }),
     listTurns: vi.fn().mockResolvedValue({ items: [] }),
-    deleteSession: vi.fn(), updateSettings: vi.fn(),
+    deleteSession: vi.fn(), updateSettings: stream.updateSettings,
   },
 }));
 
@@ -47,6 +63,20 @@ describe("student stream rendering", () => {
     fireEvent.click(screen.getByRole("button", { name: "学习记录" }));
     expect(document.querySelector(".learning-panel.open")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "切换主题" })).toBeInTheDocument();
+  });
+
+  it("selects and saves Qwen for subsequent chat sends", async () => {
+    stream.updateSettings.mockClear();
+    render(<App />);
+    const modelSelect = await screen.findByRole("combobox", { name: "选择模型" });
+
+    fireEvent.change(modelSelect, { target: { value: "qwen" } });
+    await waitFor(() => expect(stream.updateSettings).toHaveBeenCalledWith({ model_profile: "qwen" }));
+
+    const input = screen.getByRole("textbox", { name: "学习问题" });
+    fireEvent.change(input, { target: { value: "解释 Qwen" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(stream.lastModelProfile()).toBe("qwen"));
   });
 
   it("shows a teaching configuration error returned by the Gateway", async () => {

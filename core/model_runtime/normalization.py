@@ -10,19 +10,43 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 
 def normalize_usage(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     raw = dict(metadata or {})
-    input_details = dict(raw.get("input_token_details") or {})
-    output_details = dict(raw.get("output_token_details") or {})
+    input_details = {
+        k: v
+        for k, v in (
+            raw.get("input_token_details") or raw.get("prompt_tokens_details") or {}
+        ).items()
+        if v is not None
+    }
+    output_details = {
+        k: v
+        for k, v in (
+            raw.get("output_token_details") or raw.get("completion_tokens_details") or {}
+        ).items()
+        if v is not None
+    }
     input_tokens = int(raw.get("input_tokens", raw.get("prompt_tokens", 0)) or 0)
     output_tokens = int(raw.get("output_tokens", raw.get("completion_tokens", 0)) or 0)
     cache_read = int(
         raw.get(
             "prompt_cache_hit_tokens",
-            raw.get("cached_tokens", raw.get("cache_read_input_tokens", input_details.get("cache_read", 0))),
+            raw.get(
+                "cached_tokens",
+                raw.get(
+                    "cache_read_input_tokens",
+                    input_details.get("cache_read", input_details.get("cached_tokens", 0)),
+                ),
+            ),
         )
         or 0
     )
     cache_miss = int(raw.get("prompt_cache_miss_tokens", input_details.get("cache_miss", 0)) or 0)
-    reasoning = int(raw.get("reasoning_tokens", output_details.get("reasoning", 0)) or 0)
+    reasoning = int(
+        raw.get(
+            "reasoning_tokens",
+            output_details.get("reasoning", output_details.get("reasoning_tokens", 0)),
+        )
+        or 0
+    )
     total = int(raw.get("total_tokens", input_tokens + output_tokens) or 0)
     return {
         "input_tokens": max(0, input_tokens),

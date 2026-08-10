@@ -27,12 +27,13 @@ def read_local_file(file_path: str, offset: int = 0, limit: int = DEFAULT_READ_L
     """
     # 安全检查：禁止路径穿越
     try:
-        resolved = os.path.abspath(file_path)
-    except Exception:
+        resolved = Path(file_path).resolve()
+        allowed_base = Path(ALLOWED_BASE).resolve()
+    except (OSError, RuntimeError):
         return f"错误：无法解析文件路径 '{file_path}'。"
 
     try:
-        Path(resolved).relative_to(Path(ALLOWED_BASE).resolve())
+        resolved.relative_to(allowed_base)
     except ValueError:
         return (
             f"安全限制：只允许读取 .data/ 目录下的文件。\n"
@@ -40,17 +41,17 @@ def read_local_file(file_path: str, offset: int = 0, limit: int = DEFAULT_READ_L
             f"允许前缀：{ALLOWED_BASE}"
         )
 
-    if not os.path.exists(resolved):
+    if not resolved.exists():
         return f"错误：文件不存在 '{resolved}'。"
 
-    if not os.path.isfile(resolved):
+    if not resolved.is_file():
         return f"错误：路径不是文件 '{resolved}'。"
 
     limit = max(1, min(limit, MAX_READ_LIMIT))
     offset = max(0, offset)
 
     try:
-        with open(resolved, "r", encoding="utf-8") as f:
+        with resolved.open("r", encoding="utf-8") as f:
             lines = f.readlines()
     except UnicodeDecodeError:
         return f"错误：文件不是 UTF-8 文本格式 '{resolved}'。"

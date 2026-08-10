@@ -113,7 +113,7 @@ class SameOriginSessionAuth:
         self.secure = secure
         self.username = username
         self.password_hash = password_hash
-        self.roles = roles or frozenset({"student"})
+        self.roles = roles or frozenset({"student", "teacher", "admin"})
         self.idle_timeout_s = min(max(int(idle_timeout_s), 60), self.ttl_s)
         self._password_hasher = PasswordHasher()
         self._username_rate_limiter = _LoginRateLimiter(max_login_attempts, rate_window_s)
@@ -136,7 +136,9 @@ class SameOriginSessionAuth:
             password_hash=str(config.get("auth_password_hash", "")),
             roles=frozenset(
                 item.strip()
-                for item in str(config.get("auth_roles", "student")).split(",")
+                for item in str(
+                    config.get("auth_roles", "student,teacher,admin")
+                ).split(",")
                 if item.strip()
             ),
             idle_timeout_s=int(config.get("auth_idle_timeout_s", 900)),
@@ -183,6 +185,17 @@ class SameOriginSessionAuth:
                 user_id=self.username,
                 workspace_ids=frozenset({"default"}),
                 roles=self.roles,
+            )
+        )
+
+    def issue_guest(self, *, previous_token: str | None = None) -> tuple[str, SessionClaims]:
+        """Create a limited session for public, read-only guest capabilities."""
+        self.revoke(previous_token)
+        return self.issue(
+            AuthenticatedPrincipal(
+                user_id="guest",
+                workspace_ids=frozenset(),
+                roles=frozenset({"guest"}),
             )
         )
 

@@ -4,7 +4,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from core.identity import AccessDeniedError, AuthenticatedPrincipal
+from core.identity import AuthenticatedPrincipal
+from core.rbac import Permission, authorization_service
 from server.teacher.analytics import analyze
 from server.teacher.models import (
     ExerciseBlueprint,
@@ -19,10 +20,16 @@ from server.teacher.models import (
 
 class TeacherService:
     @staticmethod
-    def require_teacher(principal: AuthenticatedPrincipal, workspace_id: str) -> None:
-        if not (principal.is_admin or "teacher" in principal.roles):
-            raise AccessDeniedError("teacher role is required")
-        principal.require_workspace(workspace_id)
+    def require_teacher(
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        permission: Permission = Permission.LEARNING_CONTENT_MANAGE,
+    ) -> None:
+        authorization_service.require(
+            principal,
+            permission,
+            workspace_id=workspace_id,
+        )
 
     async def goals(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str) -> dict[str, Any]:
         self.require_teacher(principal, workspace_id)
@@ -38,7 +45,9 @@ class TeacherService:
         return {"goals": goals, "revision": result["revision"], "updated_at": result["updated_at"]}
 
     async def catalog(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str) -> dict[str, Any]:
-        self.require_teacher(principal, workspace_id)
+        self.require_teacher(
+            principal, workspace_id, Permission.LEARNING_PROGRESS_READ_CLASSROOM
+        )
         result = await gateway.get_teaching_catalog(principal, workspace_id)
         value = TeacherCatalog.model_validate(result["catalog"])
         return {"catalog": value.model_dump(mode="json"), "revision": result["revision"], "updated_at": result["updated_at"]}
@@ -124,7 +133,9 @@ class TeacherService:
         return await self.update_catalog(principal, gateway, workspace_id, body)
 
     async def analytics(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, days: int = 30, limit: int = 2_000) -> dict[str, Any]:
-        self.require_teacher(principal, workspace_id)
+        self.require_teacher(
+            principal, workspace_id, Permission.LEARNING_PROGRESS_READ_CLASSROOM
+        )
         since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
         rows = await asyncio.to_thread(gateway.repository.list_questions, workspace_id=workspace_id, since=since, limit=limit)
         return {"workspace_id": workspace_id, "period_days": days, **analyze(rows)}

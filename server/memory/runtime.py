@@ -11,7 +11,8 @@ from configs.settings import settings
 from core.session_context import SessionContext
 from core.prompt_runtime import global_prompt_runtime
 from server.memory.curator import MemoryCurator
-from server.memory.manager import MEMORY_DIR, MemoryManager
+from server.memory.manager import MEMORY_DIR
+from server.memory.mysql_manager import MySQLMemoryManager
 from server.memory.types import MemoryRuntimeConfig
 from utils.logger import get_logger
 
@@ -33,8 +34,8 @@ class MemoryRuntime:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
-    def manager(self, context: SessionContext) -> MemoryManager:
-        return MemoryManager(context, self.root)
+    def manager(self, context: SessionContext) -> MySQLMemoryManager:
+        return MySQLMemoryManager(context)
 
     def context_message(self, context: SessionContext) -> SystemMessage | None:
         if not self.config.enabled or context.agent_id != "coordinator":
@@ -76,7 +77,7 @@ class MemoryRuntime:
     def _schedule_if_needed(
         self,
         context: SessionContext,
-        manager: MemoryManager,
+        manager: MySQLMemoryManager,
     ) -> None:
         pending = manager.read_archives(since_cursor=manager.get_curator_cursor())
         if len(pending) < self.config.curate_after_archives:
