@@ -65,6 +65,13 @@ jobs:
           test -n "$DEPLOY_DIR"
           test -f "$DEPLOY_DIR/.env"
           export NOVA_ENV_FILE="$DEPLOY_DIR/.env"
+          test "$NOVA_IMAGE" = "ghcr.io/${{ github.repository_owner }}/nlp-agent"
+          resolved_images="$(docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml config --images)"
+          printf '%s\n' "$resolved_images"
+          printf '%s\n' "$resolved_images" | grep -Fxq "$NOVA_IMAGE:$NOVA_TAG" || {
+            echo "Compose did not resolve the expected published image: $NOVA_IMAGE:$NOVA_TAG"
+            exit 1
+          }
           docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml pull nova-web nova-monitor nginx
           docker compose --profile monitor -p "$COMPOSE_PROJECT_NAME" --env-file "$DEPLOY_DIR/.env" -f compose.yaml up -d --no-build --remove-orphans nova-web nova-monitor nginx
           for attempt in {1..12}; do
