@@ -23,6 +23,11 @@ export function Composer({ disabled, running, centered = false, onSend, onCancel
     setContent("");
     onSend(value);
   };
+  const submitPrompt = (prompt: string) => {
+    if (disabled || running) return;
+    setContent("");
+    onSend(prompt);
+  };
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
@@ -30,7 +35,7 @@ export function Composer({ disabled, running, centered = false, onSend, onCancel
     }
   };
   return <div className={`composer-wrap ${centered ? "centered" : ""}`}>
-    <div className="quick-prompts">{prompts.map((prompt) => <button key={prompt} type="button" onClick={() => setContent((value) => value ? `${value}\n${prompt}` : prompt)}>{prompt}</button>)}</div>
+    <div className="quick-prompts">{prompts.map((prompt) => <button key={prompt} type="button" onClick={() => submitPrompt(prompt)}>{prompt}</button>)}</div>
     <div className="composer">
       <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={keyDown} disabled={disabled} rows={centered ? 3 : 1} placeholder="问一个 NLP 问题……" aria-label="学习问题" />
       <div className="composer-toolbar">

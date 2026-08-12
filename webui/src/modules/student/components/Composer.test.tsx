@@ -14,6 +14,25 @@ describe("Composer", () => {
     expect(onSend).toHaveBeenCalledWith("解释 BERT");
   });
 
+  it("sends preset questions directly instead of stacking them into the input", () => {
+    const onSend = vi.fn();
+    render(<Composer disabled={false} running={false} onSend={onSend} onCancel={vi.fn()} />);
+    const input = screen.getByLabelText("学习问题");
+    fireEvent.change(input, { target: { value: "前一个问题" } });
+    fireEvent.click(screen.getByRole("button", { name: "用简单语言解释" }));
+
+    expect(onSend).toHaveBeenCalledWith("用简单语言解释");
+    expect((input as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("does not send preset questions while a turn is running", () => {
+    const onSend = vi.fn();
+    render(<Composer disabled={false} running onSend={onSend} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "用简单语言解释" }));
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("switches to the backend cancel action while streaming", () => {
     const onCancel = vi.fn();
     render(<Composer disabled={false} running onSend={vi.fn()} onCancel={onCancel} />);
