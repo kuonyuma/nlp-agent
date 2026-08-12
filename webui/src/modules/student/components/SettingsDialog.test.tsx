@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 
 import { SettingsDialog } from "./SettingsDialog";
 import { loadFeedback } from "@/shared/utils/feedback";
+import { APP_NAME, APP_VERSION, APP_VERSION_DATE } from "@/shared/version";
 import type { UserSettings } from "@/shared/types";
 
 const settings: UserSettings = {
@@ -15,6 +16,23 @@ const settings: UserSettings = {
 
 describe("SettingsDialog", () => {
   beforeEach(() => localStorage.clear());
+
+  it("renders the updates section from the single shared app version", () => {
+    render(<SettingsDialog
+      open
+      settings={settings}
+      learningContext={{ topic_id: null, topic_name: "", level: "beginner", mode: "explain" }}
+      onClose={() => {}}
+      onChange={() => {}}
+      onLearningContextChange={() => {}}
+      onOpenDeveloper={() => {}}
+      onOpenTeacher={() => {}}
+    />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(screen.getByText(`${APP_NAME} ${APP_VERSION} · ${APP_VERSION_DATE}`)).toBeVisible();
+    expect(screen.getByText("已是当前版本")).toBeVisible();
+  });
 
   it("persists submitted feedback before reporting success", () => {
     render(<SettingsDialog

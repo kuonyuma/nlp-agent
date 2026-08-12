@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 
 import type { LearningContext, UserSettings } from "@/shared/types";
+import { APP_NAME, APP_RELEASE_NOTES, APP_VERSION, APP_VERSION_DATE } from "@/shared/version";
 import { supportedLocales } from "@/shared/i18n/config";
 import { saveFeedback } from "@/shared/utils/feedback";
 
@@ -63,7 +64,7 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], on
             {section === "data" && <><SettingGroup title="数据存储" description="Pro_NLP 当前采用同域、本地部署。不会从学生设置页暴露 Provider 密钥、工具权限或系统 Trace。"><div className="settings-note">实时事件用于断线恢复；已完成对话可通过学习记录导出。</div></SettingGroup><SettingGroup title="隐私说明" description="学生界面只显示教学语义。运行 Trace、Token、Worker 与工具参数仅在独立的开发者监控平台可见。">{canDevelop && <button className="settings-link-button" type="button" onClick={onOpenDeveloper}>打开开发者工作台 <ChevronRight size={15} /></button>}</SettingGroup></>}
             {section === "advanced" && <><SettingGroup title="开发者配置" description="模型、Provider、MCP、Skills、工具策略、运行状态和调试数据由本产品的开发者工作台统一管理。">{canDevelop && <button className="settings-primary-button" type="button" onClick={onOpenDeveloper}>前往开发者工作台 <ChevronRight size={16} /></button>}</SettingGroup><SettingGroup title="为什么不在这里显示？" description="学生模式避免暴露 API Key、原始 Tool JSON、工作区权限和 Agent 运维细节，以保持教学体验清晰、安全。" /></>}
             {section === "feedback" && <SettingGroup title="提交你的建议" description="欢迎反馈功能建议、学习体验问题或内容改进方向。当前意见会持久保存在此浏览器中。"><div className="feedback-form"><textarea value={feedback} maxLength={1000} placeholder="例如：我希望在学习记录中增加错题复习计划……" onChange={(event) => { setFeedback(event.target.value); setFeedbackSubmitted(false); setFeedbackError(""); }} /><div><small>{feedback.length}/1000</small><button className="settings-primary-button" type="button" disabled={!feedback.trim()} onClick={() => { try { saveFeedback(feedback); setFeedbackSubmitted(true); setFeedback(""); } catch (error) { setFeedbackError(error instanceof Error ? error.message : String(error)); } }}>发布意见</button></div>{feedbackSubmitted && <p className="feedback-success">已将本次意见保存在此浏览器。</p>}{feedbackError && <p className="error-card" role="alert">保存失败：{feedbackError}</p>}</div></SettingGroup>}
-            {section === "updates" && <><SettingGroup title="当前版本" description="NLP 学习助手 v0.19.0 · 2026-07-18"><div className="settings-note"><b>已是当前版本</b><br />学生模式与开发者工作台使用同一套后端运行时。</div></SettingGroup><SettingGroup title="本次更新与修复" description="学生模式界面更新"><ul className="release-notes"><li>侧边栏在进入和刷新页面时默认折叠，学习画布更聚焦。</li><li>会话分类改为由你手动命名、创建，并可从会话菜单自由移动。</li><li>优化学习主题、难度和教学模式的下拉菜单样式与交互。</li><li>接入可切换的阅读语言，并新增版本与更新公告入口。</li></ul></SettingGroup></>}
+            {section === "updates" && <><SettingGroup title="当前版本" description={`${APP_NAME} ${APP_VERSION} · ${APP_VERSION_DATE}`}><div className="settings-note"><b>已是当前版本</b><br />学生模式与开发者工作台使用同一套后端运行时。</div></SettingGroup><SettingGroup title="本次更新与修复" description="学生模式界面更新"><ul className="release-notes">{APP_RELEASE_NOTES.map((note) => <li key={note}>{note}</li>)}</ul></SettingGroup></>}
           </div>
         </div>
       </section>
