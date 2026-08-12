@@ -32,6 +32,7 @@ vi.mock("@/platform/realtime/client", () => ({
     connect() {}
     close() {}
     setSession() {}
+    sendChat() {}
   },
 }));
 
@@ -154,7 +155,19 @@ describe("useStudentWorkspace settings", () => {
     expect(JSON.parse(localStorage.getItem("nlp-agent.learning-preferences.v1") ?? "{}").sessions).toEqual({});
   });
 
-  it("creates new sessions in the authorized default workspace from user settings", async () => {
+  it("starts a new chat without creating a backend session until a message is sent", async () => {
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.createSession(); });
+
+    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(result.current.activeSessionId).toBeNull();
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.loadingMessages).toBe(false);
+  });
+
+  it("creates the backend session in the resolved workspace only on the first message", async () => {
     ensureAuthMock.mockResolvedValue({ csrf_token: "x", workspace_ids: ["default", "research"] });
     getSettingsMock.mockResolvedValue({ preferences: { settings: { theme: "system", default_workspace_id: "research" } }, runtime });
     createSessionMock.mockResolvedValue({ session_id: "session-research", user_id: "user", workspace_id: "research", channel: "web" });
@@ -162,8 +175,12 @@ describe("useStudentWorkspace settings", () => {
     await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
 
     await act(async () => { await result.current.createSession(); });
+    expect(createSessionMock).not.toHaveBeenCalled();
 
-    expect(result.current.workspaceId).toBe("research");
+    await act(async () => { await result.current.send("解释 BERT"); });
+
     expect(createSessionMock).toHaveBeenCalledWith("research");
+    expect(result.current.activeSessionId).toBe("session-research");
+    expect(result.current.messages.some((message) => message.role === "user")).toBe(true);
   });
 });

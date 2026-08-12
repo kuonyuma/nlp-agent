@@ -35,7 +35,7 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     return response.items;
   }, [persistPreferences]);
 
-  const createSession = useCallback(() => {
+  const createBackendSession = useCallback(() => {
     if (creationRef.current) return creationRef.current;
     const creation = (async () => {
       const session = await api.createSession(workspaceId);
@@ -51,6 +51,10 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     );
     return creation;
   }, [preferences.context.topic_name, updateSessionMeta, workspaceId]);
+
+  const startNewChat = useCallback(() => {
+    setActiveSessionId(null);
+  }, []);
 
   const deleteSession = useCallback(async (sessionId: string) => {
     await api.deleteSession(sessionId);
@@ -73,7 +77,8 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     setActiveSessionId,
     activeSessionRef: activeSessionRef as MutableRefObject<string | null>,
     loadSessions,
-    createSession,
+    createBackendSession,
+    startNewChat,
     deleteSession,
   };
 }

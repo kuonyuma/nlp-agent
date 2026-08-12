@@ -33,7 +33,8 @@ export function useStudentWorkspace() {
     setActiveSessionId,
     activeSessionRef,
     loadSessions,
-    createSession,
+    createBackendSession,
+    startNewChat,
     deleteSession,
   } = useSessionController({ preferences, persistPreferences, updateSessionMeta });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -118,11 +119,16 @@ export function useStudentWorkspace() {
     preferences,
     settings,
     messages,
-    createSession,
+    createBackendSession,
     updateSessionMeta,
     setMessages,
     setRequestError,
   });
+  const createSession = useCallback(() => {
+    setMessages([]);
+    setLoadingMessages(false);
+    startNewChat();
+  }, [setMessages, setLoadingMessages, startNewChat]);
   const activeMeta = activeSessionId ? preferences.sessions[activeSessionId] ?? {} : {};
   const isRunning = messages.some((message) => message.role === "assistant" && ["accepted", "running"].includes(message.status ?? ""));
 

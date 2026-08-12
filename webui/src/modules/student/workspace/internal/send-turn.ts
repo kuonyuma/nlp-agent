@@ -13,7 +13,7 @@ interface TurnSenderOptions {
   preferences: LearningPreferences;
   settings: UserSettings;
   messages: ChatMessage[];
-  createSession: () => Promise<string>;
+  createBackendSession: () => Promise<string>;
   updateSessionMeta: (sessionId: string, patch: Partial<SessionLearningMeta>) => void;
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   setRequestError: Dispatch<SetStateAction<string>>;
@@ -27,7 +27,7 @@ export function useTurnSender({
   preferences,
   settings,
   messages,
-  createSession,
+  createBackendSession,
   updateSessionMeta,
   setMessages,
   setRequestError,
@@ -38,7 +38,7 @@ export function useTurnSender({
     inFlightTurnIds.current.add(requestId);
     pendingRequests.current.set(requestId, "");
     let sessionId = activeSessionRef.current;
-    if (!sessionId) sessionId = await createSession();
+    if (!sessionId) sessionId = await createBackendSession();
     if (!pendingRequests.current.has(requestId)) return;
     const optimisticId = `${requestId}:user`;
     pendingRequests.current.set(requestId, optimisticId);
@@ -55,7 +55,7 @@ export function useTurnSender({
     }
     socketRef.current?.setSession(sessionId);
     socketRef.current?.sendChat(sessionId, content.trim(), requestId, preferences.context, settings.model_profile);
-  }, [activeSessionRef, createSession, inFlightTurnIds, pendingRequests, preferences.context, preferences.sessions, setMessages, setRequestError, settings.model_profile, socketRef, updateSessionMeta]);
+  }, [activeSessionRef, createBackendSession, inFlightTurnIds, pendingRequests, preferences.context, preferences.sessions, setMessages, setRequestError, settings.model_profile, socketRef, updateSessionMeta]);
 
   const cancel = useCallback(() => {
     const running = [...messages].reverse().find((message) => message.role === "assistant" && ["accepted", "running"].includes(message.status ?? ""));
