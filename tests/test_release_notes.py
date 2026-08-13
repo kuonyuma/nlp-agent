@@ -41,11 +41,26 @@ async def test_list_published_excludes_drafts() -> None:
 @pytest.mark.asyncio
 async def test_list_include_drafts_passes_both_statuses() -> None:
     crud = AsyncMock(spec=ReleaseNoteCrud)
+    crud.list.return_value = []
     service = _service_with(crud)
 
     await service.list(session=AsyncMock(), include_drafts=True)
 
     assert crud.list.call_args.kwargs["statuses"] == ("draft", "published")
+
+
+@pytest.mark.asyncio
+async def test_list_orders_by_released_at_then_semantic_version_desc() -> None:
+    crud = AsyncMock(spec=ReleaseNoteCrud)
+    crud.list.return_value = [
+        _note(note_id="a", version="1.9.0"),
+        _note(note_id="b", version="1.10.0"),
+    ]
+    service = _service_with(crud)
+
+    rows = await service.list(session=AsyncMock(), include_drafts=False)
+
+    assert [row.version for row in rows] == ["1.10.0", "1.9.0"]
 
 
 @pytest.mark.asyncio

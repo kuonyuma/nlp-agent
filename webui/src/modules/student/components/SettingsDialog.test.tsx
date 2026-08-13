@@ -62,6 +62,15 @@ describe("SettingsDialog", () => {
     expect(await screen.findByText("暂无已发布的更新说明。")).toBeVisible();
   });
 
+  it("shows an error state when release notes fail to load", async () => {
+    listPublishedReleaseNotesMock.mockRejectedValue(new Error("network"));
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("无法读取更新说明，请稍后重试。")).toBeVisible();
+    expect(screen.queryByText("暂无已发布的更新说明。")).not.toBeInTheDocument();
+  });
+
   it("persists submitted feedback before reporting success", () => {
     render(<SettingsDialog {...baseProps} />);
     fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));

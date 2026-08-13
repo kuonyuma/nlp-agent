@@ -18,6 +18,21 @@ from server.infrastructure.mysql.models import ReleaseNoteModel
 VALID_STATUSES = ("draft", "published")
 
 
+def _semver_key(version: str) -> tuple[int, ...]:
+    """Numeric parts so ``1.10.0`` ranks after ``1.9.0`` rather than by string order."""
+    parts: list[int] = []
+    for part in version.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _release_order_key(row: ReleaseNoteModel) -> tuple[object, tuple[int, ...]]:
+    return (row.released_at, _semver_key(row.version))
+
+
 class ReleaseNoteConflictError(ValueError):
     """A release note already exists for the requested version."""
 
@@ -72,7 +87,9 @@ class ReleaseNoteService:
         statuses: tuple[str, ...] = (
             ("draft", "published") if include_drafts else ("published",)
         )
-        return await self._crud_factory(session).list(statuses=statuses)
+        rows = await self._crud_factory(session).list(statuses=statuses)
+        rows.sort(key=_release_order_key, reverse=True)
+        return rows
 
     async def create(
         self,
