@@ -24,10 +24,18 @@ def resolve_worker_model_name(
 ) -> str:
     if settings.NLP_AGENT_WORKER_MODEL:
         return settings.NLP_AGENT_WORKER_MODEL
+    if requested_model not in (None, "", "inherit"):
+        return str(requested_model)
     factory = get_global_model_factory()
     if selected := _selected_profile(model_profile):
         return factory.profile_preset(selected, "worker")
-    return settings._resolve_worker_model(agent_name, requested_model)
+    return settings._resolve_worker_model(agent_name)
+
+
+def worker_model_uses_native_search(model_name: str) -> bool:
+    """Return whether a configured Worker preset enables provider-native search."""
+    preset = get_global_model_factory().config.model_presets.get(model_name)
+    return bool(preset and preset.native_search.enabled)
 
 
 def get_tool_llm(model_profile: str | None = None) -> ResilientChatModel:

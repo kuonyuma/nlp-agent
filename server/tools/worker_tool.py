@@ -77,11 +77,12 @@ from core.worker_protocol import WorkerCommand, WorkerWaitMode
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
-from core.skill_loader import skill_loader
+from core.skill_loader import ResolvedWorkerProfile, skill_loader
 from server.agent.llm_factory import (
     get_worker_llm,
     get_tool_llm,
     resolve_worker_model_name,
+    worker_model_uses_native_search,
 )
 from core.tool_registry import physical_tool_manager
 from core.tool_runtime import ToolGrantSnapshot, ToolSet
@@ -113,6 +114,76 @@ from schemas.models import (
 )
 
 logger = get_logger("shiliu.tools.worker")
+
+
+def _resolve_profile_worker_model(
+    profile: ResolvedWorkerProfile,
+    *,
+    requested_model: str = "",
+    model_profile: str | None = None,
+) -> str:
+    explicit = requested_model.strip()
+    if explicit == "inherit":
+        explicit = ""
+    if profile.model and explicit and explicit != profile.model:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} pins model {profile.model!r}; "
+            f"override {explicit!r} is not allowed"
+        )
+    resolved = resolve_worker_model_name(
+        profile.name,
+        profile.model or explicit or None,
+        model_profile,
+    )
+    if profile.model and resolved != profile.model:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} requires model {profile.model!r}, "
+            f"but the global Worker override selected {resolved!r}"
+        )
+    native_search = worker_model_uses_native_search(resolved)
+    if profile.requires_native_search and not native_search:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} requires a native-search model preset"
+        )
+    if native_search and not profile.requires_native_search:
+        raise ValueError(
+            f"Worker Profile {profile.name!r} is not authorized to use native-search "
+            f"preset {resolved!r}"
+        )
+    return resolved
+
+
+def _build_profile_execution_policies(
+    profile: ResolvedWorkerProfile,
+    *,
+    runtime_settings: dict,
+    max_turns: int,
+    max_duration_s: float,
+    max_tokens: int,
+    max_tool_calls: int,
+    max_attempts: int,
+) -> tuple[WorkerResourceBudget, WorkerRetryPolicy]:
+    one_shot = profile.execution_mode == "one_shot"
+    budget = WorkerResourceBudget(
+        max_turns=1 if one_shot else max_turns,
+        max_duration_s=max_duration_s,
+        max_tokens=max_tokens,
+        max_tool_calls=0 if one_shot else max_tool_calls,
+        max_injections=(
+            0 if one_shot else int(runtime_settings.get("max_injections", 15))
+        ),
+        injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
+        max_tool_result_chars=int(
+            runtime_settings.get("max_tool_result_chars", 50_000)
+        ),
+        finalize_on_exhaustion=(
+            False
+            if one_shot
+            else bool(runtime_settings.get("finalize_on_exhaustion", True))
+        ),
+    )
+    retry = WorkerRetryPolicy(max_attempts=1 if one_shot else max_attempts)
+    return budget, retry
 
 
 @asynccontextmanager
@@ -678,17 +749,17 @@ async def spawn_worker(
     """启动一个新的 Worker 执行任务。使用此工具时，Worker 没有之前的记忆。
 
     Worker 模型解析优先级（由高到低）：
-    1. NLP_AGENT_WORKER_MODEL 环境变量（全局覆盖）
-    2. 本函数的 model 参数（Coordinator 调用时动态指定）
-    3. agent_config.yaml 中 agents.<name>.model
-    4. agent_config.yaml 中 defaults.worker
-    5. inherit → 继承 Coordinator 当前模型
+    1. 声明了 model 的 Worker Profile 固定使用该 preset，不能被参数覆盖；
+       若 NLP_AGENT_WORKER_MODEL 与其冲突，则拒绝启动。
+    2. 其他 Profile 依次采用 NLP_AGENT_WORKER_MODEL、本函数 model 参数、
+       当前会话 model_profile、agents.<name>.model 与 defaults.worker。
+    3. 原生联网 preset 仅允许 requires_native_search=true 的 Profile 使用。
 
     Args:
         agent_name: 技能黄页中存在的技能包名或基础工具名。
         directive: 详尽的操作指令，需包含所有参数。
         config: LangChain RunnableConfig，从中提取 thread_id 作为 session_id。
-        model: 可选的模型覆盖，如 deepseek-v3.2、doubao-1-6-flash。留空走默认解析链。
+        model: 可选的模型 preset/model 覆盖；不能覆盖 Profile 固定模型或借用原生联网 preset。
 
     Returns:
         JSON 字符串（WorkerNotificationSpec），包含 task_id 和 "started" 状态。
@@ -705,22 +776,36 @@ async def spawn_worker(
     try:
         profile = skill_loader.resolve_profile(agent_name)
         skill_loader.validate_tool_references(set(physical_tool_manager.runtime.catalog.names()))
+        resolved_model = _resolve_profile_worker_model(
+            profile,
+            requested_model=model,
+            model_profile=config.get("configurable", {}).get("model_profile"),
+        )
         toolset = physical_tool_manager.get_worker_toolset(
             allowed_names=profile.allowed_tools,
             capabilities=profile.capabilities,
             denied_names=profile.denied_tools,
             session_id=session_id,
             profile=profile.name,
+            inherit_policy=profile.inherit_tool_policy,
+        )
+        if profile.execution_mode == "one_shot" and toolset.tools:
+            raise ValueError(
+                f"one-shot Worker Profile {profile.name!r} cannot receive tools"
+            )
+        worker_budget, worker_retry = _build_profile_execution_policies(
+            profile,
+            runtime_settings=runtime_settings,
+            max_turns=max_turns,
+            max_duration_s=max_duration_s,
+            max_tokens=max_tokens,
+            max_tool_calls=max_tool_calls,
+            max_attempts=max_attempts,
         )
     except ValueError as error:
         return WorkerNotificationSpec(
             task_id=worker_id, status="failed", summary=str(error)
         ).model_dump_json(exclude_none=True)
-    resolved_model = resolve_worker_model_name(
-        agent_name,
-        model or profile.model,
-        config.get("configurable", {}).get("model_profile"),
-    )
     sop_prompt = profile.system_prompt
 
     import datetime
@@ -749,12 +834,12 @@ async def spawn_worker(
         "waitTimeoutS": wait_timeout_s,
         "parentWorkerId": parent_worker_id,
         "budget": {
-            "maxTurns": max_turns,
-            "maxDurationS": max_duration_s,
-            "maxTokens": max_tokens,
-            "maxToolCalls": max_tool_calls,
+            "maxTurns": worker_budget.max_turns,
+            "maxDurationS": worker_budget.max_duration_s,
+            "maxTokens": worker_budget.max_tokens,
+            "maxToolCalls": worker_budget.max_tool_calls,
         },
-        "retry": {"maxAttempts": max_attempts},
+        "retry": {"maxAttempts": worker_retry.max_attempts},
     })
     # Keep orchestration evidence queryable without putting the directive itself
     # (which may contain user data) into observability storage.
@@ -795,17 +880,8 @@ async def spawn_worker(
         wait_mode=wait_mode,
         quorum=quorum,
         wait_timeout_s=wait_timeout_s,
-        budget=WorkerResourceBudget(
-            max_turns=max_turns,
-            max_duration_s=max_duration_s,
-            max_tokens=max_tokens,
-            max_tool_calls=max_tool_calls,
-            max_injections=int(runtime_settings.get("max_injections", 15)),
-            injection_batch_size=int(runtime_settings.get("injection_batch_size", 3)),
-            max_tool_result_chars=int(runtime_settings.get("max_tool_result_chars", 50_000)),
-            finalize_on_exhaustion=bool(runtime_settings.get("finalize_on_exhaustion", True)),
-        ),
-        retry_policy=WorkerRetryPolicy(max_attempts=max_attempts),
+        budget=worker_budget,
+        retry_policy=worker_retry,
     )
 
     return WorkerNotificationSpec(

@@ -14,6 +14,26 @@ import yaml
 BASE_DIR = Path(__file__).resolve().parent.parent
 BASE_CONFIG_PATH = BASE_DIR / "configs" / "agent_config.yaml"
 OVERRIDE_PATH = BASE_DIR / ".data" / "developer" / "runtime-overrides.yaml"
+RESERVED_WORKER_PROFILES = frozenset({"web_researcher", "web_reader"})
+
+
+def _compatible_overrides(value: dict[str, Any]) -> dict[str, Any]:
+    """Drop obsolete or reserved overrides while preserving unrelated UI state."""
+    override = deepcopy(value)
+    profiles = override.get("worker_profiles")
+    if isinstance(profiles, dict):
+        for name in RESERVED_WORKER_PROFILES:
+            profiles.pop(name, None)
+
+    tools = override.get("tools")
+    web = tools.get("web") if isinstance(tools, dict) else None
+    if isinstance(web, dict):
+        for key in ("search", "allow_provider_override", "trusted_service_hosts"):
+            web.pop(key, None)
+        fetch = web.get("fetch")
+        if isinstance(fetch, dict):
+            fetch.pop("remote_reader", None)
+    return override
 
 
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -35,7 +55,7 @@ def load_runtime_config() -> dict[str, Any]:
         override = yaml.safe_load(file) or {}
     if not isinstance(override, dict):
         raise ValueError(f"runtime override must be a mapping: {OVERRIDE_PATH}")
-    return _merge(base, override)
+    return _merge(base, _compatible_overrides(override))
 
 
 def load_runtime_overrides() -> dict[str, Any]:

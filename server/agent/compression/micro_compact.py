@@ -16,7 +16,6 @@ MC_CLEARED_PLACEHOLDER = "[Old tool result content cleared]"
 COMPACTABLE_TOOLS: Set[str] = {
     "read_local_file",
     "get_current_time",
-    "web_search",
 }
 
 

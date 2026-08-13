@@ -32,6 +32,10 @@ Qwen 使用专用 `qwen` Adapter，而不是把兼容接口直接当作通用 Op
 
 流式和非流式响应中的 `reasoning_content` 都会保留。多轮请求会将历史 Assistant 消息的 `reasoning_content` 回传给 Qwen，避免开启 `preserve_thinking` 后丢失推理上下文。缓存 Token、推理 Token 和总用量仍归一化到统一 usage 字段。
 
+Qwen 原生联网搜索是 preset 级的显式能力，不会随 Qwen Provider 全局开启。只有 `worker-qwen-web` 设置 `native_search.enabled=true`；Adapter 才会在 `extra_body` 中写入 `enable_search=true` 和 `search_options`。普通 `coordinator-qwen-max`、`worker-qwen-plus` 与 `utility-qwen-plus` 的请求保持不联网。
+
+Coordinator 仅把最新、实时、新闻、价格、政策、版本或用户明确要求联网检索的问题路由到 `web_researcher`。该 Worker 固定使用 `qwen3.7-plus`、`forced_search=true` 和 `turbo` 策略；运行时禁止模型覆盖及其他 Profile 借用该 preset。它采用 one-shot 执行（单轮、无工具、无 Provider/Worker 重试、预算耗尽不再调用模型），从服务端限制单任务最多一次原生搜索。用户提供明确 URL 时改用 `web_reader`；它继承当前普通 Worker 模型且只获授 `web_fetch`，不会触发 Qwen 原生搜索。两个内建 Web Profile 不继承全局 Worker 工具授权，也不能被 Developer UI 覆盖。兼容模式的模型回答不保证包含结构化来源 URL，因此运行时不得补造引用。
+
 ## 学生端模型档案
 
 学生端从 Settings API 动态读取 `default_model_profile` 和 `model_profiles`。公开数据只包含档案名称、展示标签、Provider 和可用状态，不会暴露 API Key。缺少对应 Provider 密钥的档案会显示为不可用并禁止选择。

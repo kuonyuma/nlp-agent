@@ -1,6 +1,6 @@
 from server.tools.api.file_read_tool import read_local_file
 from server.tools.api.time_tool import get_current_time
-from server.tools.api.web_search_tool import web_search
+from server.tools.api.web_fetch_tool import web_fetch
 from core.tool_runtime import (
     ToolCatalog,
     ToolDescriptor,
@@ -15,7 +15,7 @@ from core.tool_runtime import (
 ALL_AVAILABLE_TOOLS = [
     read_local_file,
     get_current_time,
-    web_search,
+    web_fetch,
 ]
 
 
@@ -49,19 +49,19 @@ def register_builtin_tools(catalog: ToolCatalog | None = None) -> list[str]:
             factory=lambda: get_current_time.model_copy(deep=True),
         ),
         ToolDescriptor(
-            name=web_search.name,
-            description=web_search.description,
+            name=web_fetch.name,
+            description=web_fetch.description,
             source=ToolSource.BUILTIN,
-            provider="tavily",
+            provider="web-access",
             scopes=frozenset({ToolScope.WORKER}),
-            capabilities=frozenset({"web.search"}),
-            risk=ToolRisk.LOW,
+            capabilities=frozenset({"web.fetch"}),
+            risk=ToolRisk.MEDIUM,
             read_only=True,
             concurrency_safe=True,
-            timeout_s=25,
-            max_concurrency=4,
-            retry=ToolRetryPolicy(max_attempts=3, base_delay_s=0.5),
-            factory=lambda: web_search.model_copy(deep=True),
+            timeout_s=35,
+            max_concurrency=2,
+            retry=ToolRetryPolicy(max_attempts=2),
+            factory=lambda: web_fetch.model_copy(deep=True),
         ),
     ]
     registered: list[str] = []

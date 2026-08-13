@@ -55,6 +55,9 @@ class ResolvedWorkerProfile(BaseModel):
     name: str
     description: str = ""
     model: str | None = None
+    execution_mode: str = "react"
+    requires_native_search: bool = False
+    inherit_tool_policy: bool = True
     skills: tuple[str, ...] = ()
     capabilities: frozenset[str] = Field(default_factory=frozenset)
     allowed_tools: frozenset[str] = Field(default_factory=frozenset)
@@ -164,6 +167,9 @@ class SkillLoader:
             skill_names = configured.skills
             description = configured.description
             model = configured.model
+            execution_mode = configured.execution_mode
+            requires_native_search = configured.requires_native_search
+            inherit_tool_policy = configured.inherit_tool_policy
             allowed_tools = set(configured.allowed_tools)
             capabilities = set(configured.capabilities)
             denied_tools = set(configured.denied_tools)
@@ -171,6 +177,9 @@ class SkillLoader:
             skill_names = [name]
             description = self.skills[name].description
             model = None
+            execution_mode = "react"
+            requires_native_search = False
+            inherit_tool_policy = True
             allowed_tools = set()
             capabilities = set()
             denied_tools = set()
@@ -201,6 +210,9 @@ class SkillLoader:
             name=name,
             description=description,
             model=model,
+            execution_mode=execution_mode,
+            requires_native_search=requires_native_search,
+            inherit_tool_policy=inherit_tool_policy,
             skills=tuple(skill_names),
             capabilities=frozenset(capabilities),
             allowed_tools=frozenset(allowed_tools),
