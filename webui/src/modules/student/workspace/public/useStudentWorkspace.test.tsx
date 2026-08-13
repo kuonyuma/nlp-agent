@@ -11,10 +11,11 @@ const runtime = {
   },
 };
 
-const { ensureAuthMock, getSettingsMock, createSessionMock } = vi.hoisted(() => ({
+const { ensureAuthMock, getSettingsMock, createSessionMock, deleteSessionMock } = vi.hoisted(() => ({
   ensureAuthMock: vi.fn(),
   getSettingsMock: vi.fn(),
   createSessionMock: vi.fn(),
+  deleteSessionMock: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/platform/http/api", () => ({
@@ -23,6 +24,7 @@ vi.mock("@/platform/http/api", () => ({
     listSessions: vi.fn(async () => ({ items: [] })),
     getSettings: getSettingsMock,
     createSession: createSessionMock,
+    deleteSession: deleteSessionMock,
     updateSettings: vi.fn(),
   },
 }));
@@ -55,6 +57,8 @@ describe("useStudentWorkspace settings", () => {
     })));
     vi.mocked(api.updateSettings).mockReset();
     vi.mocked(api.listSessions).mockResolvedValue({ items: [] });
+    createSessionMock.mockClear();
+    deleteSessionMock.mockClear();
   });
 
   it("rolls back optimistic settings and exposes a visible error on network failure", async () => {
@@ -159,7 +163,7 @@ describe("useStudentWorkspace settings", () => {
     const { result } = renderHook(() => useStudentWorkspace());
     await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
 
-    await act(async () => { await result.current.createSession(); });
+    await act(async () => { await result.current.startNewChat(); });
 
     expect(createSessionMock).not.toHaveBeenCalled();
     expect(result.current.activeSessionId).toBeNull();
@@ -174,7 +178,7 @@ describe("useStudentWorkspace settings", () => {
     const { result } = renderHook(() => useStudentWorkspace());
     await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
 
-    await act(async () => { await result.current.createSession(); });
+    await act(async () => { await result.current.startNewChat(); });
     expect(createSessionMock).not.toHaveBeenCalled();
 
     await act(async () => { await result.current.send("解释 BERT"); });
@@ -182,5 +186,33 @@ describe("useStudentWorkspace settings", () => {
     expect(createSessionMock).toHaveBeenCalledWith("research");
     expect(result.current.activeSessionId).toBe("session-research");
     expect(result.current.messages.some((message) => message.role === "user")).toBe(true);
+  });
+
+  it("starts a fresh backend session after a new chat while a previous creation is in flight", async () => {
+    let resolveCreate: (session: { session_id: string; user_id: string; workspace_id: string; channel: string }) => void = () => undefined;
+    createSessionMock.mockReturnValue(new Promise((resolve) => { resolveCreate = resolve; }));
+    deleteSessionMock.mockClear();
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    let firstSend!: Promise<void>;
+    await act(async () => { firstSend = result.current.send("第一个问题"); });
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => { result.current.startNewChat(); });
+
+    await act(async () => {
+      resolveCreate({ session_id: "session-stale", user_id: "user", workspace_id: "default", channel: "web" });
+      await firstSend;
+    });
+
+    expect(deleteSessionMock).toHaveBeenCalledWith("session-stale");
+    expect(result.current.activeSessionId).toBeNull();
+
+    createSessionMock.mockResolvedValue({ session_id: "session-fresh", user_id: "user", workspace_id: "default", channel: "web" });
+    await act(async () => { await result.current.send("第二个问题"); });
+
+    expect(createSessionMock).toHaveBeenCalledTimes(2);
+    expect(result.current.activeSessionId).toBe("session-fresh");
   });
 });

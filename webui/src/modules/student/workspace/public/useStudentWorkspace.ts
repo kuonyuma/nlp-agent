@@ -107,7 +107,10 @@ export function useStudentWorkspace() {
     socketRef.current?.setSession(activeSessionId);
     queueMicrotask(() => {
       if (activeSessionId) void loadTurns(activeSessionId).catch((reason) => setError(String(reason)));
-      else setMessages([]);
+      else {
+        setMessages([]);
+        setLoadingMessages(false);
+      }
     });
   }, [activeSessionId, loadTurns]);
 
@@ -124,11 +127,6 @@ export function useStudentWorkspace() {
     setMessages,
     setRequestError,
   });
-  const createSession = useCallback(() => {
-    setMessages([]);
-    setLoadingMessages(false);
-    startNewChat();
-  }, [setMessages, setLoadingMessages, startNewChat]);
   const activeMeta = activeSessionId ? preferences.sessions[activeSessionId] ?? {} : {};
   const isRunning = messages.some((message) => message.role === "assistant" && ["accepted", "running"].includes(message.status ?? ""));
 
@@ -166,7 +164,7 @@ export function useStudentWorkspace() {
     socketStatus,
     loadingMessages,
     isRunning,
-    createSession,
+    startNewChat,
     send,
     cancel,
     deleteSession,
