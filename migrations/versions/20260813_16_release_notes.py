@@ -5,7 +5,7 @@ Revises: 20260805_15
 Create Date: 2026-08-13 00:00:00
 """
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql
 
@@ -61,21 +61,60 @@ def upgrade() -> None:
         sa.column("scope_type", sa.String()),
     )
 
-    op.bulk_insert(permissions_table, [permission_row(RELEASE_NOTES_PERMISSION)])
     developer_role_id = role_id("developer")
     manage_permission_id = permission_id(RELEASE_NOTES_PERMISSION)
-    op.bulk_insert(
-        role_permissions_table,
-        [{"role_id": developer_role_id, "permission_id": manage_permission_id}],
-    )
-    op.bulk_insert(
-        role_permission_scopes_table,
-        [{
-            "role_id": developer_role_id,
-            "permission_id": manage_permission_id,
-            "scope_type": permission_scope(RELEASE_NOTES_PERMISSION),
-        }],
-    )
+    scope_type = permission_scope(RELEASE_NOTES_PERMISSION)
+
+    # The RBAC foundation migration (20260804_12) seeds every Permission enum
+    # member, so a freshly-created database already contains this permission and
+    # its developer grant/scope. Seed only what is missing so this migration is
+    # idempotent across fresh databases (CI) and databases migrated from the
+    # pre-release-notes enum. In offline mode there is no live bind to query, so
+    # fall back to plain inserts as the rendered SQL is not auto-executed.
+    if context.is_offline_mode():
+        op.bulk_insert(permissions_table, [permission_row(RELEASE_NOTES_PERMISSION)])
+        op.bulk_insert(
+            role_permissions_table,
+            [{"role_id": developer_role_id, "permission_id": manage_permission_id}],
+        )
+        op.bulk_insert(
+            role_permission_scopes_table,
+            [{"role_id": developer_role_id, "permission_id": manage_permission_id, "scope_type": scope_type}],
+        )
+        return
+
+    bind = op.get_bind()
+
+    permission_exists = bind.execute(
+        sa.select(permissions_table.c.id).where(permissions_table.c.id == manage_permission_id)
+    ).first() is not None
+    if not permission_exists:
+        op.bulk_insert(permissions_table, [permission_row(RELEASE_NOTES_PERMISSION)])
+
+    grant_exists = bind.execute(
+        sa.select(role_permissions_table.c.permission_id).where(
+            role_permissions_table.c.role_id == developer_role_id,
+            role_permissions_table.c.permission_id == manage_permission_id,
+        )
+    ).first() is not None
+    if not grant_exists:
+        op.bulk_insert(
+            role_permissions_table,
+            [{"role_id": developer_role_id, "permission_id": manage_permission_id}],
+        )
+
+    scope_exists = bind.execute(
+        sa.select(role_permission_scopes_table.c.permission_id).where(
+            role_permission_scopes_table.c.role_id == developer_role_id,
+            role_permission_scopes_table.c.permission_id == manage_permission_id,
+            role_permission_scopes_table.c.scope_type == scope_type,
+        )
+    ).first() is not None
+    if not scope_exists:
+        op.bulk_insert(
+            role_permission_scopes_table,
+            [{"role_id": developer_role_id, "permission_id": manage_permission_id, "scope_type": scope_type}],
+        )
 
 
 def downgrade() -> None:
