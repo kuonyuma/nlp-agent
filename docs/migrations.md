@@ -35,3 +35,4 @@ CI 每次在全新 MySQL 上跑 `alembic upgrade head`，所以这类迁移在 C
 ## 相关文档
 
 - `docs/mysql-foundation-baseline.md` —— MySQL 阶段基线。
+- `server/rbac/catalog.py` —— 权限/角色 ID 与种子行的唯一来源（`uuid5` 稳定 ID）。
