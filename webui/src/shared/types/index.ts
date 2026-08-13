@@ -198,3 +198,11 @@ export interface SettingsRuntime {
   default_model_profile: string;
   model_profiles: Record<string, RuntimeModelProfile>;
 }
+
+export interface ReleaseNoteEntry {
+  id: string;
+  version: string;
+  released_at: string;
+  notes: string[];
+  status: "draft" | "published";
+}

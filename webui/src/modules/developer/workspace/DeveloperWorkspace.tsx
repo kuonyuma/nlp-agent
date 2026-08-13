@@ -1,14 +1,14 @@
 import {
   Activity, AppWindow, Bot, Box, ChevronLeft, Clock3, Code2, Database,
-  ExternalLink, FileKey2, Gauge, Globe2, KeyRound, PlugZap, RefreshCw,
-  Settings2, ShieldCheck, Sparkles, TerminalSquare, Wrench,
+  ExternalLink, FileKey2, Gauge, Globe2, KeyRound, Newspaper, PlugZap,
+  RefreshCw, Settings2, ShieldCheck, Sparkles, TerminalSquare, Wrench,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, ensureAuth } from "@/platform/http/api";
-import type { DeveloperSnapshot } from "@/shared/types";
+import type { DeveloperSnapshot, ReleaseNoteEntry } from "@/shared/types";
 
-export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "automations" | "settings";
+export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "settings";
 
 const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge }> = [
   { page: "overview", label: "工作台", icon: Gauge },
@@ -17,6 +17,7 @@ const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge }> = [
   { page: "models", label: "模型与 Provider", icon: Sparkles },
   { page: "mcp", label: "MCP", icon: PlugZap },
   { page: "skills", label: "Skills", icon: Code2 },
+  { page: "release-notes", label: "发布说明", icon: Newspaper },
   { page: "automations", label: "Apps 与自动化", icon: Clock3 },
   { page: "settings", label: "运行时设置", icon: Settings2 },
 ];
@@ -103,6 +104,56 @@ function RuntimeSettings({ snapshot }: { snapshot: DeveloperSnapshot }) {
   return <><Section title="网络与协议"><JsonBlock value={snapshot.web} /></Section><Section title="Workspace 本地数据权限"><div className="developer-list">{snapshot.workspace.roots.map((root) => <article key={root.name}><Database size={18} /><span><strong>{root.name}</strong><small>{root.path}</small></span><StatusPill ok={root.exists}>{root.exists ? "可用" : "未创建"}</StatusPill></article>)}</div></Section><Section title="敏感配置规则" hint="浏览器只能读取脱敏快照。"><div className="developer-callout"><ShieldCheck /><p>Provider 密钥、MCP headers/env、Cookie secret 和 Authorization 字段不会通过开发者 API 返回。配置写入继续由本地 YAML/.env 管理。</p></div></Section></>;
 }
 
+export function ReleaseNotes() {
+  const [items, setItems] = useState<ReleaseNoteEntry[] | null>(null);
+  const [error, setError] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [version, setVersion] = useState("");
+  const [releasedAt, setReleasedAt] = useState("");
+  const [notes, setNotes] = useState("");
+  const [status, setStatus] = useState<"draft" | "published">("published");
+  const [message, setMessage] = useState("");
+
+  const load = useCallback(async () => {
+    setItems(null); setError("");
+    try { setItems((await api.listReleaseNotes()).items); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  }, []);
+  useEffect(() => { queueMicrotask(() => void load()); }, [load]);
+
+  const resetForm = () => { setEditingId(null); setVersion(""); setReleasedAt(""); setNotes(""); setStatus("published"); setMessage(""); };
+  const startEdit = (item: ReleaseNoteEntry) => { setEditingId(item.id); setVersion(item.version); setReleasedAt(item.released_at.slice(0, 10)); setNotes(item.notes.join("\n")); setStatus(item.status); setMessage(""); };
+  const save = async () => {
+    const note: Omit<ReleaseNoteEntry, "id"> = {
+      version,
+      released_at: releasedAt,
+      notes: notes.split("\n").map((item) => item.trim()).filter(Boolean),
+      status,
+    };
+    try {
+      if (editingId) await api.updateReleaseNote(editingId, note);
+      else await api.createReleaseNote(note);
+      resetForm(); await load();
+    } catch (reason) { setMessage(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const remove = async (item: ReleaseNoteEntry) => {
+    if (!confirm(`删除发布说明 v${item.version}？`)) return;
+    try { await api.deleteReleaseNote(item.id); await load(); }
+    catch (reason) { setMessage(reason instanceof Error ? reason.message : String(reason)); }
+  };
+
+  return <><Section title="发布说明" hint="每个版本一条记录；学生端「版本与更新」只展示已发布的条目。版本号来自构建，这里只需维护更新与修复文案。">
+    {error && <div className="developer-error"><ShieldCheck /><strong>无法读取发布说明</strong><p>{error}</p></div>}
+    <div className="developer-editor">
+      <div className="developer-inline-form"><input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="版本，例如 1.0.0" disabled={Boolean(editingId)} /><input type="date" value={releasedAt} onChange={(event) => setReleasedAt(event.target.value)} aria-label="发布日期" /></div>
+      <textarea value={notes} onChange={(event) => setNotes(event.target.value)} spellCheck={false} placeholder="每行一条更新与修复说明" />
+      <div><select value={status} onChange={(event) => setStatus(event.target.value as "draft" | "published")} aria-label="发布状态"><option value="draft">草稿</option><option value="published">已发布</option></select><button type="button" onClick={() => void save()} disabled={!version.trim() || !notes.trim()}>{editingId ? "保存修改" : "新建发布说明"}</button>{editingId && <button type="button" onClick={resetForm}>取消编辑</button>}{message && <small>{message}</small>}</div>
+    </div>
+    <div className="developer-list">{(items ?? []).map((item) => <article key={item.id}><Newspaper size={18} /><span><strong>v{item.version} · {item.released_at.slice(0, 10)}</strong><small>{item.notes.join("；")}</small></span><StatusPill ok={item.status === "published"}>{item.status === "published" ? "已发布" : "草稿"}</StatusPill><button type="button" onClick={() => startEdit(item)}>编辑</button><button className="danger" type="button" onClick={() => void remove(item)}>删除</button></article>)}</div>
+    {items && items.length === 0 && <div className="developer-empty"><Newspaper /><strong>暂无发布说明</strong><p>新建一条记录，学生端即可在「版本与更新」中看到。</p></div>}
+  </Section></>;
+}
+
 export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: DeveloperPage; onNavigate?: (page: DeveloperPage) => void }) {
   const [page, setPage] = useState<DeveloperPage>(routedPage ?? currentPage);
   const [snapshot, setSnapshot] = useState<DeveloperSnapshot | null>(null);
@@ -123,6 +174,7 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
     if (page === "models") return <Models snapshot={snapshot} />;
     if (page === "mcp") return <Mcp snapshot={snapshot} refresh={load} />;
     if (page === "skills") return <Skills snapshot={snapshot} refresh={load} />;
+    if (page === "release-notes") return <ReleaseNotes />;
     if (page === "automations") return <Automations snapshot={snapshot} />;
     if (page === "settings") return <RuntimeSettings snapshot={snapshot} />;
     return <Overview snapshot={snapshot} />;

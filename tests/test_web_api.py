@@ -186,6 +186,7 @@ def test_guest_session_has_only_guest_capabilities(web_app):
         assert response.status_code == 200
         assert response.json()["roles"] == ["guest"]
         assert client.get("/api/v1/sessions").status_code == 403
+        assert client.get("/api/v1/developer/release-notes").status_code == 403
 
 
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
@@ -195,11 +196,14 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
 
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         developer = client.get("/api/v1/developer/snapshot")
+        release_notes = client.get("/api/v1/developer/release-notes")
 
         assert teacher.status_code == 403
         assert teacher.json()["code"] == "forbidden"
         assert developer.status_code == 403
         assert developer.json()["code"] == "forbidden"
+        assert release_notes.status_code == 403
+        assert release_notes.json()["code"] == "forbidden"
         assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
 
         rejected = client.post(

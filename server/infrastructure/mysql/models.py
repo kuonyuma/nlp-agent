@@ -576,6 +576,22 @@ class MemoryDocumentModel(TimestampedModel, Base):
     revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
 
 
+class ReleaseNoteModel(TimestampedModel, Base):
+    """Single-source versioned changelog edited by developers and read by students."""
+
+    __tablename__ = "nlp_release_notes"
+    __table_args__ = (
+        UniqueConstraint("version", name="uq_nlp_release_notes_version"),
+        Index("ix_nlp_release_notes_status_released_at", "status", "released_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    released_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    notes_json: Mapped[list] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="published")
+
+
 class MemoryArchiveModel(TimestampedModel, Base):
     __tablename__ = "nlp_memory_archives"
     __table_args__ = (UniqueConstraint("user_id", "workspace_id", "source_id", name="uq_nlp_memory_archive_source"),)
