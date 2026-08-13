@@ -4,7 +4,7 @@
 
 - 目标版本：MySQL 8.4 LTS、InnoDB、`utf8mb4`、UTC。
 - 默认 Python 驱动：`aiomysql`；DSN 仅由 `NLP_AGENT_DATABASE_URL` 提供。
-- 运行时 schema 仅由 Alembic 管理；应用不会调用 `create_all` 或执行运行时 DDL。
+- 运行时 schema 仅由 Alembic 管理；应用不会调用 `create_all` 或执行运行时 DDL。迁移编写约定见 `docs/migrations.md`（尤其 RBAC 权限播种必须幂等）。
 
 ## 当前持久化入口
 
