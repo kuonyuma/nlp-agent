@@ -25,6 +25,8 @@ export function Composer({ disabled, running, centered = false, onSend, onCancel
   };
   const submit = () => sendValue(content);
   const submitPrompt = (prompt: string) => {
+    // Preserve any in-progress input by appending the preset on a new line,
+    // then flow through the shared sendValue path for trim/guard handling.
     const existing = content.trim();
     sendValue(existing ? `${existing}\n${prompt}` : prompt);
   };
