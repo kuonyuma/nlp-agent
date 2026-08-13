@@ -278,9 +278,7 @@ def test_web_fetch_descriptor_is_registered_medium_risk():
     assert descriptor.concurrency_safe is True
     assert "web.fetch" in descriptor.capabilities
 
-    search_descriptor = global_tool_runtime.catalog.get("web_search")
-    assert search_descriptor.provider == "web-access"
-    assert "web.search" in search_descriptor.capabilities
+    assert global_tool_runtime.catalog.get("web_search") is None
 
 
 def test_runtime_classifies_fetch_transient_errors_as_retryable():

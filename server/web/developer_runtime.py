@@ -8,7 +8,12 @@ from typing import Any
 
 import yaml
 
-from core.runtime_config import BASE_DIR, load_runtime_overrides, save_runtime_overrides
+from core.runtime_config import (
+    BASE_DIR,
+    RESERVED_WORKER_PROFILES,
+    load_runtime_overrides,
+    save_runtime_overrides,
+)
 from core.tool_config import CustomToolsConfig, MCPServerConfig, ToolPoliciesConfig, WorkerProfileSpec
 from core.tool_runtime import ToolCatalog
 
@@ -161,6 +166,10 @@ async def delete_skill(name: str) -> dict[str, Any]:
 
 async def upsert_worker_profile(name: str, profile: dict[str, Any]) -> dict[str, Any]:
     name = _require_name(name, "Worker profile name")
+    if name in RESERVED_WORKER_PROFILES:
+        raise DeveloperConfigurationError(
+            f"Worker profile {name!r} is reserved by the runtime"
+        )
     validated = WorkerProfileSpec.model_validate({"name": name, **profile})
     overrides = _section("worker_profiles")
     overrides["worker_profiles"][name] = validated.model_dump(mode="json", exclude={"name"})
@@ -170,6 +179,10 @@ async def upsert_worker_profile(name: str, profile: dict[str, Any]) -> dict[str,
 
 async def delete_worker_profile(name: str) -> dict[str, Any]:
     name = _require_name(name, "Worker profile name")
+    if name in RESERVED_WORKER_PROFILES:
+        raise DeveloperConfigurationError(
+            f"Worker profile {name!r} is reserved by the runtime"
+        )
     overrides = _section("worker_profiles")
     overrides["worker_profiles"].pop(name, None)
     save_runtime_overrides(overrides)

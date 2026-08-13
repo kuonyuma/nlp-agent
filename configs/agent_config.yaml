@@ -176,6 +176,15 @@ model_presets:
     retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
     circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
 
+  worker-qwen-web:
+    model: qwen3.7-plus
+    thinking: {enabled: false, effort: none}
+    generation: {max_output_tokens: 8000}
+    native_search: {enabled: true, forced: true, strategy: turbo}
+    timeouts: {connect_s: 10, first_token_s: 120, stream_idle_s: 60, total_s: 360}
+    retry: {max_attempts: 1, base_delay_s: 0, max_delay_s: 0, jitter: none}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
   utility-qwen-plus:
     model: qwen3.7-plus
     thinking: {enabled: false, effort: none}
@@ -262,8 +271,7 @@ tools:
         - business.write
     worker:
       allowed_tools: []
-      allowed_capabilities:
-        - nlp.analyze
+      allowed_capabilities: []
       denied_tools: []
       denied_capabilities:
         - runtime.control
@@ -284,15 +292,12 @@ tools:
     #     capabilities: [nlp.analyze]
     #     risk: low
   mcp_servers: {}
-  # Web Access 能力包：web_search（可配置搜索提供者）与 web_fetch（受控链接读取）。
-  # 凭据只保存在环境变量中（见 api_key_env/base_url_env 引用的变量名），
-  # 不回显到工具结果、日志或审计文件。
+  # Web Access 仅保留受控链接读取 web_fetch。查最新资料由专用 Qwen
+  # preset 的原生联网搜索完成，不配置 Tavily、博查或 SearXNG。
   web:
     enabled: true
     proxy_url: ""                          # 只允许运维配置
-    user_agent: "Nova/1.0 (+web-research)"
-    allow_provider_override: false
-    trusted_service_hosts: []              # 仅 SearXNG 等运维服务的精确主机名可豁免内网限制
+    user_agent: "Nova/1.0 (+web-fetch)"
     network:
       connect_timeout_s: 5
       read_timeout_s: 20
@@ -309,27 +314,10 @@ tools:
         - "::1/128"
         - "fc00::/7"
         - "fe80::/10"
-    search:
-      default_provider: tavily
-      fallback_providers: [searxng]
-      cache_ttl_s: 60
-      providers:
-        tavily:
-          enabled: true
-          api_key_env: TAVILY_API_KEY
-          timeout_s: 20
-        searxng:
-          enabled: false
-          base_url_env: NLP_AGENT_SEARXNG_BASE_URL
-          api_key_env: NLP_AGENT_SEARXNG_API_KEY
-          timeout_s: 15
     fetch:
       max_chars: 20000
       cache_ttl_s: 300
       allowed_content_types: [text/html, text/plain, application/json]
-      remote_reader:
-        enabled: false                     # 第三方网页阅读中转默认关闭
-        provider: jina
   # 示例：
   # mcp_servers:
   #   filesystem:
@@ -350,10 +338,18 @@ tools:
 # Profile 只组合 Skill、能力与工具授权；Skill 本身负责 SOP 指令。
 worker_profiles:
   web_researcher:
-    description: "检索公开资料、阅读指定公开链接并附上来源。"
-    capabilities: [web.search, web.fetch]
+    description: "仅用于最新、实时、新闻、价格、政策、版本，或用户明确要求联网检索的公开信息；使用 Qwen 原生联网搜索，不用于读取指定 URL。"
+    model: worker-qwen-web
+    execution_mode: one_shot
+    requires_native_search: true
+    inherit_tool_policy: false
+    capabilities: []
+    allowed_tools: []
+  web_reader:
+    description: "仅在用户给出明确的公开 http(s) URL 并要求阅读、提取或总结时使用；直接读取链接，不额外搜索。"
+    inherit_tool_policy: false
+    capabilities: [web.fetch]
     allowed_tools:
-      - web_search
       - web_fetch
   nlp_calculator:
     description: "执行独立、确定性的 NLP 教学计算（TF-IDF、PR 曲线、Precision@N、N-gram、BLEU）。"

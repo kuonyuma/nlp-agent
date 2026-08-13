@@ -230,6 +230,77 @@ async def test_sandbox_finalizes_usefully_after_turn_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        AIMessage(content=""),
+        AIMessage(content="partial", response_metadata={"finish_reason": "length"}),
+    ],
+)
+async def test_one_shot_sandbox_never_requeries_or_finalizes(monkeypatch, response):
+    class CountingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            return response
+
+    llm = CountingLLM()
+    monkeypatch.setattr(worker_tool, "get_worker_llm", lambda **_kwargs: llm)
+    monkeypatch.setattr(worker_tool, "record_sidechain_transcript", lambda *_args: None)
+    result = await _execute_sandbox_loop(
+        "native-search-worker",
+        "s1",
+        [],
+        [],
+        model_name="worker-qwen-web",
+        budget=WorkerResourceBudget(
+            max_turns=1,
+            max_tool_calls=0,
+            max_injections=0,
+            finalize_on_exhaustion=False,
+        ),
+    )
+
+    assert llm.calls == 1
+    assert result.status == "failed"
+    assert result.termination_reason == "max_turns"
+
+
+@pytest.mark.asyncio
+async def test_one_shot_sandbox_makes_one_call_on_a_transient_failure(monkeypatch):
+    class FailingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            raise TimeoutError("provider timeout")
+
+    llm = FailingLLM()
+    monkeypatch.setattr(worker_tool, "get_worker_llm", lambda **_kwargs: llm)
+    monkeypatch.setattr(worker_tool.global_telemetry, "event", lambda *_args, **_kwargs: None)
+    result = await _execute_sandbox_loop(
+        "native-search-worker",
+        "s1",
+        [],
+        [],
+        model_name="worker-qwen-web",
+        budget=WorkerResourceBudget(
+            max_turns=1,
+            max_tool_calls=0,
+            max_injections=0,
+            finalize_on_exhaustion=False,
+        ),
+    )
+
+    assert llm.calls == 1
+    assert result.status == "timed_out"
+    assert result.error is not None and result.error.retryable is True
+
+
+@pytest.mark.asyncio
 async def test_send_message_rejects_completed_worker_without_restarting():
     result = await worker_tool.send_message.ainvoke(
         {"to_agent_id": "completed-worker", "message": "please continue"},

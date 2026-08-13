@@ -138,44 +138,19 @@ class WebNetworkConfig(StrictConfigModel):
         return values
 
 
-class WebSearchProviderConfig(StrictConfigModel):
-    enabled: bool = False
-    api_key_env: str = ""
-    base_url_env: str = ""
-    timeout_s: float = Field(default=20.0, gt=0, le=120)
-
-
-class WebSearchConfig(StrictConfigModel):
-    default_provider: str = "tavily"
-    fallback_providers: list[str] = Field(default_factory=list)
-    cache_ttl_s: int = Field(default=60, ge=0, le=3600)
-    providers: dict[str, WebSearchProviderConfig] = Field(default_factory=dict)
-
-
-class WebRemoteReaderConfig(StrictConfigModel):
-    enabled: bool = False
-    provider: str = "jina"
-
-
 class WebFetchConfig(StrictConfigModel):
     max_chars: int = Field(default=20_000, ge=500, le=50_000)
     cache_ttl_s: int = Field(default=300, ge=0, le=3600)
     allowed_content_types: list[str] = Field(
         default_factory=lambda: ["text/html", "text/plain", "application/json"]
     )
-    remote_reader: WebRemoteReaderConfig = Field(
-        default_factory=WebRemoteReaderConfig
-    )
 
 
 class WebToolsConfig(StrictConfigModel):
     enabled: bool = True
     proxy_url: str = ""
-    user_agent: str = "Nova/1.0 (+web-research)"
-    allow_provider_override: bool = False
-    trusted_service_hosts: list[str] = Field(default_factory=list)
+    user_agent: str = "Nova/1.0 (+web-fetch)"
     network: WebNetworkConfig = Field(default_factory=WebNetworkConfig)
-    search: WebSearchConfig = Field(default_factory=WebSearchConfig)
     fetch: WebFetchConfig = Field(default_factory=WebFetchConfig)
 
 
@@ -190,10 +165,23 @@ class WorkerProfileSpec(StrictConfigModel):
     name: str
     description: str = ""
     model: str | None = None
+    execution_mode: Literal["react", "one_shot"] = "react"
+    requires_native_search: bool = False
+    inherit_tool_policy: bool = True
     skills: list[str] = Field(default_factory=list)
     capabilities: set[str] = Field(default_factory=set)
     allowed_tools: set[str] = Field(default_factory=set)
     denied_tools: set[str] = Field(default_factory=set)
+
+    @model_validator(mode="after")
+    def validate_native_search_profile(self) -> "WorkerProfileSpec":
+        if self.requires_native_search and not self.model:
+            raise ValueError("native-search Worker Profile requires an explicit model preset")
+        if self.requires_native_search and self.execution_mode != "one_shot":
+            raise ValueError("native-search Worker Profile must use execution_mode=one_shot")
+        if self.requires_native_search and self.inherit_tool_policy:
+            raise ValueError("native-search Worker Profile cannot inherit global tool grants")
+        return self
 
 
 class AgentRuntimeConfig(StrictConfigModel):

@@ -9,7 +9,7 @@ from server.agent.compression.micro_compact import (
 )
 
 
-def _tool_message(index: int, name: str = "web_search") -> ToolMessage:
+def _tool_message(index: int, name: str = "web_fetch") -> ToolMessage:
     return ToolMessage(
         content="x" * 1000,
         tool_call_id=f"call-{index}",
@@ -21,7 +21,6 @@ def test_only_generic_replayable_tools_are_registered():
     assert get_compactable_tool_names() == {
         "read_local_file",
         "get_current_time",
-        "web_search",
         "web_fetch",
     }
 

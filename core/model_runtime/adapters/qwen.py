@@ -124,6 +124,12 @@ class QwenAdapter:
                 ReasoningEffort.HIGH: "xhigh",
                 ReasoningEffort.MAX: "xhigh",
             }[preset.thinking.effort]
+        if preset.native_search.enabled:
+            body["enable_search"] = True
+            body["search_options"] = {
+                "forced_search": preset.native_search.forced,
+                "search_strategy": preset.native_search.strategy,
+            }
         return body
 
     def build(

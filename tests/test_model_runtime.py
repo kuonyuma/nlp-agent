@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
@@ -14,6 +15,7 @@ from core.model_runtime.contracts import (
     ModelProfileConfig,
     ModelRouteConfig,
     ModelRuntimeConfig,
+    NativeSearchConfig,
     ProviderConfig,
     RetryPolicy,
     ThinkingConfig,
@@ -159,6 +161,64 @@ def test_model_profile_rejects_a_preset_from_another_provider():
         )
 
 
+def test_native_search_requires_an_enabled_qwen_preset():
+    with pytest.raises(ValueError, match="requires native_search.enabled=true"):
+        NativeSearchConfig(enabled=False, forced=True)
+    with pytest.raises(ValueError, match="Input should be 'turbo' or 'max'"):
+        NativeSearchConfig(enabled=True, strategy="agent")
+
+    with pytest.raises(ValueError, match="unsupported adapter 'deepseek'"):
+        ModelRuntimeConfig(
+            providers={
+                "deepseek": ProviderConfig(
+                    adapter="deepseek", base_url="http://deepseek", api_key_env="KEY"
+                )
+            },
+            models={
+                "model": ModelDefinition(
+                    provider="deepseek", model_id="model", context_window_tokens=100,
+                    max_output_tokens=10,
+                )
+            },
+            model_presets={
+                "web": ModelPresetConfig(
+                    model="model",
+                    generation=GenerationConfig(max_output_tokens=10),
+                    native_search=NativeSearchConfig(enabled=True),
+                )
+            },
+            model_routes={},
+        )
+
+
+def test_project_qwen_web_preset_is_valid_and_other_qwen_presets_stay_offline():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    raw = yaml.safe_load(
+        (root / "configs" / "agent_config.yaml").read_text(encoding="utf-8")
+    )
+    config = ModelRuntimeConfig.model_validate(
+        {
+            "providers": raw["providers"],
+            "models": raw["models"],
+            "model_presets": raw["model_presets"],
+            "model_routes": raw["model_routes"],
+            "model_profiles": raw["model_profiles"],
+            "default_model_profile": raw["defaults"]["model_profile"],
+        }
+    )
+
+    web_preset = config.preset("worker-qwen-web")
+    assert web_preset.native_search == NativeSearchConfig(
+        enabled=True, forced=True, strategy="turbo"
+    )
+    assert web_preset.retry.max_attempts == 1
+    assert config.preset("worker-qwen-plus").native_search.enabled is False
+    assert config.preset("coordinator-qwen-max").native_search.enabled is False
+    assert config.preset("utility-qwen-plus").native_search.enabled is False
+
+
 def test_qwen_adapter_translates_thinking_and_preserves_provider_metadata():
     adapter = QwenAdapter()
     model = adapter.build(
@@ -229,6 +289,40 @@ def test_qwen_adapter_translates_thinking_and_preserves_provider_metadata():
     })
     assert result.generations[0].message.additional_kwargs["reasoning_content"] == "完整分析"
     assert result.generations[0].message.additional_kwargs["provider_usage"]["total_tokens"] == 7
+
+
+def test_qwen_adapter_adds_search_only_for_an_opted_in_preset():
+    model = QwenAdapter().build(
+        provider_name="qwen",
+        provider=ProviderConfig(
+            adapter="qwen", base_url="https://example.test/v1", api_key_env="QWEN_KEY"
+        ),
+        model_name="qwen-plus",
+        model=ModelDefinition(
+            provider="qwen", model_id="qwen3.7-plus", context_window_tokens=1000,
+            max_output_tokens=100, capabilities=ModelCapabilities(thinking=True),
+        ),
+        preset_name="qwen-web",
+        preset=ModelPresetConfig(
+            model="qwen-plus",
+            generation=GenerationConfig(max_output_tokens=100),
+            native_search=NativeSearchConfig(
+                enabled=True, forced=True, strategy="turbo"
+            ),
+        ),
+        api_key="test",
+    )
+
+    payload = model._get_request_payload([HumanMessage(content="今天有什么新闻？")])
+    assert payload["extra_body"] == {
+        "enable_thinking": False,
+        "preserve_thinking": False,
+        "enable_search": True,
+        "search_options": {
+            "forced_search": True,
+            "search_strategy": "turbo",
+        },
+    }
 
 
 def test_deepseek_usage_normalization_includes_kv_cache():

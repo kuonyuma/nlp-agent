@@ -145,9 +145,9 @@ async def test_resolve_and_check_blocks_when_any_address_is_private(monkeypatch)
 
 async def test_trusted_host_bypasses_cidr_blocks(monkeypatch):
     monkeypatch.setattr(network_safety, "resolve_addresses", _fake_resolver("10.0.0.5"))
-    parsed = validate_url("http://searxng.internal:8080/", allowed_ports=frozenset())
+    parsed = validate_url("http://reader.internal:8080/", allowed_ports=frozenset())
     resolved = await resolve_and_check(
-        parsed, trusted_hosts=frozenset({"searxng.internal"})
+        parsed, trusted_hosts=frozenset({"reader.internal"})
     )
     assert resolved == ["10.0.0.5"]
 

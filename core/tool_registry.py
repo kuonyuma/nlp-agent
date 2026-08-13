@@ -168,17 +168,20 @@ class PhysicalToolManager:
         denied_names: Iterable[str] = (),
         session_id: str = "",
         profile: str = "",
+        inherit_policy: bool = True,
         allow_high_risk: bool = False,
     ) -> ToolSet:
         policy = self.config.tools.policies.worker
+        policy_tools = policy.allowed_tools if inherit_policy else set()
+        policy_capabilities = policy.allowed_capabilities if inherit_policy else set()
         return self.runtime.build_toolset(
             ToolGrantRequest(
                 role=ToolScope.WORKER,
                 session_id=session_id,
                 profile=profile,
-                allowed_tools=frozenset({*policy.allowed_tools, *allowed_names}),
+                allowed_tools=frozenset({*policy_tools, *allowed_names}),
                 allowed_capabilities=frozenset(
-                    {*policy.allowed_capabilities, *capabilities}
+                    {*policy_capabilities, *capabilities}
                 ),
                 denied_tools=frozenset({*policy.denied_tools, *denied_names}),
                 denied_capabilities=frozenset(policy.denied_capabilities),

@@ -62,6 +62,20 @@ class GenerationConfig(FrozenModel):
     top_p: float | None = Field(default=None, gt=0, le=1)
 
 
+class NativeSearchConfig(FrozenModel):
+    """Provider-native web search options for an explicitly opted-in preset."""
+
+    enabled: bool = False
+    forced: bool = False
+    strategy: Literal["turbo", "max"] = "turbo"
+
+    @model_validator(mode="after")
+    def validate_forced_search(self) -> "NativeSearchConfig":
+        if self.forced and not self.enabled:
+            raise ValueError("native_search.forced requires native_search.enabled=true")
+        return self
+
+
 class TimeoutPolicy(FrozenModel):
     connect_s: float = Field(default=10, gt=0, le=300)
     first_token_s: float = Field(default=120, gt=0, le=1800)
@@ -91,6 +105,7 @@ class ModelPresetConfig(FrozenModel):
     model: str
     thinking: ThinkingConfig = Field(default_factory=ThinkingConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    native_search: NativeSearchConfig = Field(default_factory=NativeSearchConfig)
     timeouts: TimeoutPolicy = Field(default_factory=TimeoutPolicy)
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
     circuit_breaker: CircuitBreakerPolicy = Field(default_factory=CircuitBreakerPolicy)
@@ -130,6 +145,12 @@ class ModelRuntimeConfig(FrozenModel):
                     f"model_presets.{preset_name}.model references unknown model {preset.model!r}"
                 )
             model = self.models[preset.model]
+            provider = self.providers[model.provider]
+            if preset.native_search.enabled and provider.adapter != "qwen":
+                raise ValueError(
+                    f"preset {preset_name!r} enables native search for unsupported "
+                    f"adapter {provider.adapter!r}"
+                )
             if preset.thinking.enabled and not model.capabilities.thinking:
                 raise ValueError(f"model {preset.model!r} does not support thinking")
             if preset.generation.max_output_tokens > model.max_output_tokens:
