@@ -51,10 +51,6 @@ class ReleaseNoteCrud:
         statement = select(ReleaseNoteModel)
         if statuses:
             statement = statement.where(ReleaseNoteModel.status.in_(statuses))
-        statement = statement.order_by(
-            ReleaseNoteModel.released_at.desc(),
-            ReleaseNoteModel.version.desc(),
-        )
         return list(await self._session.scalars(statement))
 
     async def by_version(self, version: str) -> ReleaseNoteModel | None:

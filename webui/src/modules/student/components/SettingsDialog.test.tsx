@@ -71,6 +71,22 @@ describe("SettingsDialog", () => {
     expect(screen.queryByText("暂无已发布的更新说明。")).not.toBeInTheDocument();
   });
 
+  it("retries loading release notes after the failure recovers", async () => {
+    listPublishedReleaseNotesMock
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce({
+        items: [{ id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["新增发布说明功能"], status: "published" }],
+      });
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+    expect(await screen.findByText("无法读取更新说明，请稍后重试。")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+
+    expect(await screen.findByText("v1.0.0")).toBeVisible();
+    expect(listPublishedReleaseNotesMock).toHaveBeenCalledTimes(2);
+  });
+
   it("persists submitted feedback before reporting success", () => {
     render(<SettingsDialog {...baseProps} />);
     fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));
