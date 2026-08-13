@@ -14,7 +14,7 @@ export function useSessionController({ preferences, persistPreferences, updateSe
   const [workspaceId, setWorkspaceId] = useState("default");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const activeSessionRef = useRef<string | null>(null);
-  const creationRef = useRef<Promise<string> | null>(null);
+  const creationRef = useRef<Promise<string | null> | null>(null);
   const chatEpochRef = useRef(0);
 
   useEffect(() => {
@@ -43,9 +43,9 @@ export function useSessionController({ preferences, persistPreferences, updateSe
       const session = await api.createSession(workspaceId);
       if (epoch !== chatEpochRef.current) {
         // A new chat reset the workspace while this creation was in flight;
-        // drop the empty session so it never hijacks the fresh chat.
+        // drop the empty session and signal the caller to abort its send.
         void api.deleteSession(session.session_id).catch(() => undefined);
-        return session.session_id;
+        return null;
       }
       setSessions((current) => current.some((item) => item.session_id === session.session_id) ? current : [session, ...current]);
       updateSessionMeta(session.session_id, { topic: preferences.context.topic_name, title: "新的学习对话" });

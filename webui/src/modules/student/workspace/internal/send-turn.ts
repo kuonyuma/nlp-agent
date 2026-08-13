@@ -13,7 +13,7 @@ interface TurnSenderOptions {
   preferences: LearningPreferences;
   settings: UserSettings;
   messages: ChatMessage[];
-  createBackendSession: () => Promise<string>;
+  createBackendSession: () => Promise<string | null>;
   updateSessionMeta: (sessionId: string, patch: Partial<SessionLearningMeta>) => void;
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   setRequestError: Dispatch<SetStateAction<string>>;
@@ -39,7 +39,13 @@ export function useTurnSender({
     pendingRequests.current.set(requestId, "");
     let sessionId = activeSessionRef.current;
     if (!sessionId) sessionId = await createBackendSession();
-    if (!pendingRequests.current.has(requestId)) return;
+    if (!sessionId || !pendingRequests.current.has(requestId)) {
+      // The session creation was abandoned by a newer chat (createBackendSession
+      // returned null) or the request was cancelled while awaiting; drop it.
+      pendingRequests.current.delete(requestId);
+      inFlightTurnIds.current.delete(requestId);
+      return;
+    }
     const optimisticId = `${requestId}:user`;
     pendingRequests.current.set(requestId, optimisticId);
     setMessages((current) => [...current, {

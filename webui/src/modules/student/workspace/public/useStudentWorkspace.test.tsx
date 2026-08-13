@@ -11,11 +11,12 @@ const runtime = {
   },
 };
 
-const { ensureAuthMock, getSettingsMock, createSessionMock, deleteSessionMock } = vi.hoisted(() => ({
+const { ensureAuthMock, getSettingsMock, createSessionMock, deleteSessionMock, sendChatMock } = vi.hoisted(() => ({
   ensureAuthMock: vi.fn(),
   getSettingsMock: vi.fn(),
   createSessionMock: vi.fn(),
   deleteSessionMock: vi.fn(async () => undefined),
+  sendChatMock: vi.fn(),
 }));
 
 vi.mock("@/platform/http/api", () => ({
@@ -34,7 +35,7 @@ vi.mock("@/platform/realtime/client", () => ({
     connect() {}
     close() {}
     setSession() {}
-    sendChat() {}
+    sendChat(...args: unknown[]) { sendChatMock(...args); }
   },
 }));
 
@@ -59,6 +60,7 @@ describe("useStudentWorkspace settings", () => {
     vi.mocked(api.listSessions).mockResolvedValue({ items: [] });
     createSessionMock.mockClear();
     deleteSessionMock.mockClear();
+    sendChatMock.mockClear();
   });
 
   it("rolls back optimistic settings and exposes a visible error on network failure", async () => {
@@ -208,11 +210,15 @@ describe("useStudentWorkspace settings", () => {
 
     expect(deleteSessionMock).toHaveBeenCalledWith("session-stale");
     expect(result.current.activeSessionId).toBeNull();
+    expect(result.current.messages).toEqual([]);
+    expect(sendChatMock).not.toHaveBeenCalled();
 
     createSessionMock.mockResolvedValue({ session_id: "session-fresh", user_id: "user", workspace_id: "default", channel: "web" });
     await act(async () => { await result.current.send("第二个问题"); });
 
     expect(createSessionMock).toHaveBeenCalledTimes(2);
     expect(result.current.activeSessionId).toBe("session-fresh");
+    expect(sendChatMock).toHaveBeenCalledTimes(1);
+    expect(sendChatMock.mock.calls[0][0]).toBe("session-fresh");
   });
 });
