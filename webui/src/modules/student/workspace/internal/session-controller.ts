@@ -44,6 +44,8 @@ export function useSessionController({ preferences, persistPreferences, updateSe
       if (epoch !== chatEpochRef.current) {
         // A new chat reset the workspace while this creation was in flight;
         // drop the empty session and signal the caller to abort its send.
+        // Returning null keeps the pending send from publishing an optimistic
+        // turn into a session that no longer belongs to the active chat.
         void api.deleteSession(session.session_id).catch(() => undefined);
         return null;
       }
