@@ -33,7 +33,8 @@ export function useStudentWorkspace() {
     setActiveSessionId,
     activeSessionRef,
     loadSessions,
-    createSession,
+    createBackendSession,
+    startNewChat,
     deleteSession,
   } = useSessionController({ preferences, persistPreferences, updateSessionMeta });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -106,7 +107,10 @@ export function useStudentWorkspace() {
     socketRef.current?.setSession(activeSessionId);
     queueMicrotask(() => {
       if (activeSessionId) void loadTurns(activeSessionId).catch((reason) => setError(String(reason)));
-      else setMessages([]);
+      else {
+        setMessages([]);
+        setLoadingMessages(false);
+      }
     });
   }, [activeSessionId, loadTurns]);
 
@@ -118,7 +122,7 @@ export function useStudentWorkspace() {
     preferences,
     settings,
     messages,
-    createSession,
+    createBackendSession,
     updateSessionMeta,
     setMessages,
     setRequestError,
@@ -160,7 +164,7 @@ export function useStudentWorkspace() {
     socketStatus,
     loadingMessages,
     isRunning,
-    createSession,
+    startNewChat,
     send,
     cancel,
     deleteSession,

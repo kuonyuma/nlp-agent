@@ -14,7 +14,8 @@ export function useSessionController({ preferences, persistPreferences, updateSe
   const [workspaceId, setWorkspaceId] = useState("default");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const activeSessionRef = useRef<string | null>(null);
-  const creationRef = useRef<Promise<string> | null>(null);
+  const creationRef = useRef<Promise<string | null> | null>(null);
+  const chatEpochRef = useRef(0);
 
   useEffect(() => {
     activeSessionRef.current = activeSessionId;
@@ -35,10 +36,19 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     return response.items;
   }, [persistPreferences]);
 
-  const createSession = useCallback(() => {
+  const createBackendSession = useCallback(() => {
     if (creationRef.current) return creationRef.current;
+    const epoch = chatEpochRef.current;
     const creation = (async () => {
       const session = await api.createSession(workspaceId);
+      if (epoch !== chatEpochRef.current) {
+        // A new chat reset the workspace while this creation was in flight;
+        // drop the empty session and signal the caller to abort its send.
+        // Returning null keeps the pending send from publishing an optimistic
+        // turn into a session that no longer belongs to the active chat.
+        void api.deleteSession(session.session_id).catch(() => undefined);
+        return null;
+      }
       setSessions((current) => current.some((item) => item.session_id === session.session_id) ? current : [session, ...current]);
       updateSessionMeta(session.session_id, { topic: preferences.context.topic_name, title: "新的学习对话" });
       setActiveSessionId(session.session_id);
@@ -46,11 +56,17 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     })();
     creationRef.current = creation;
     void creation.then(
-      () => { creationRef.current = null; },
-      () => { creationRef.current = null; },
+      () => { if (creationRef.current === creation) creationRef.current = null; },
+      () => { if (creationRef.current === creation) creationRef.current = null; },
     );
     return creation;
   }, [preferences.context.topic_name, updateSessionMeta, workspaceId]);
+
+  const startNewChat = useCallback(() => {
+    chatEpochRef.current += 1;
+    creationRef.current = null;
+    setActiveSessionId(null);
+  }, []);
 
   const deleteSession = useCallback(async (sessionId: string) => {
     await api.deleteSession(sessionId);
@@ -73,7 +89,8 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     setActiveSessionId,
     activeSessionRef: activeSessionRef as MutableRefObject<string | null>,
     loadSessions,
-    createSession,
+    createBackendSession,
+    startNewChat,
     deleteSession,
   };
 }
