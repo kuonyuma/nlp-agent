@@ -118,6 +118,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Reverse the release-notes table and its developer-scoped manage grant,
+    # matching the order seeded in upgrade().
     manage_permission_id = permission_id(RELEASE_NOTES_PERMISSION)
     developer_role_id = role_id("developer")
     op.execute(
