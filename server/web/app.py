@@ -1059,19 +1059,6 @@ def create_app(
         await teacher_service.delete_blueprint(principal, request.app.state.gateway, workspace_id, blueprint_id, kind=kind)
         return Response(status_code=204)
 
-    @app.get("/api/v1/teacher/questions", tags=["teacher"])
-    async def teacher_questions(
-        request: Request,
-        principal: Principal,
-        workspace_id: str = Query(default="default", min_length=1, max_length=128),
-        days: int = Query(default=30, ge=1, le=365),
-        limit: int = Query(default=500, ge=1, le=2_000),
-    ):
-        result = await teacher_service.analytics(
-            principal, request.app.state.gateway, workspace_id, days, limit
-        )
-        return {"items": result["questions"], "period_days": days}
-
     @app.get("/api/v1/teacher/analytics", tags=["teacher"])
     async def teacher_analytics(
         request: Request,
@@ -1079,11 +1066,9 @@ def create_app(
         workspace_id: str = Query(default="default", min_length=1, max_length=128),
         days: int = Query(default=30, ge=1, le=365),
     ):
-        result = await teacher_service.analytics(
+        return await teacher_service.analytics(
             principal, request.app.state.gateway, workspace_id, days
         )
-        result.pop("questions", None)
-        return result
 
     @app.get("/api/v1/teacher/{resource}", tags=["teacher"])
     async def teacher_placeholder(

@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 
-from core.learning import ExerciseState, LearningContext, LearningProgress
+from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
 from gateway.contracts import GatewayEvent, GatewayEventType, TeachingConfigurationError, TurnRecord, TurnStatus
 
 
@@ -134,6 +134,117 @@ class MySQLGatewayRepository:
         with self._engine.connect() as c:
             rows = c.execute(text("SELECT * FROM nlp_turns WHERE conversation_id=:s ORDER BY created_at DESC LIMIT :limit"), {"s": session_id, "limit": min(max(1, limit), 500)}).mappings().all()
         return [self._record(dict(r)) for r in rows]
+
+    def list_question_turns(self, *, workspace_id: str, since: str) -> list[dict[str, Any]]:
+        """Teacher read model: structured question rows for analytics.
+
+        Deliberately omits ``input_text`` so teacher analytics can only report
+        aggregates, never the raw student question text.  The time window is the
+        only bound: aggregation must reflect every turn, not a sampled prefix.
+        """
+        with self._engine.connect() as c:
+            rows = c.execute(
+                text(
+                    "SELECT conversation_id,user_id,error_kind,created_at,learning_state_json "
+                    "FROM nlp_turns WHERE workspace_id=:w AND created_at>=:since "
+                    "ORDER BY created_at"
+                ),
+                {"w": workspace_id, "since": since},
+            ).mappings().all()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            context = (self._json(row["learning_state_json"] or {}) or {}).get("context") or {}
+            created = row["created_at"]
+            day = created.strftime("%Y-%m-%d") if hasattr(created, "strftime") else str(created)[:10]
+            result.append(
+                {
+                    "session_id": row["conversation_id"],
+                    "user_id": row["user_id"],
+                    "has_error": bool(row["error_kind"]),
+                    "topic_id": context.get("topic_id"),
+                    "level": context.get("level"),
+                    "mode": context.get("mode"),
+                    "day": day,
+                }
+            )
+        return result
+
+    def exercise_evidence_stats(self, *, workspace_id: str, since: str, limit: int = 10_000) -> list[dict[str, Any]]:
+        """Teacher read model: one row per graded exercise item with topic/knowledge-point refs."""
+        with self._engine.connect() as c:
+            rows = c.execute(
+                text(
+                    "SELECT e.normalized_score,e.passed,e.blueprint_snapshot_json,s.topic_id,s.mode "
+                    "FROM nlp_learning_evidence e "
+                    "JOIN nlp_exercise_sessions s ON s.id=e.exercise_session_id "
+                    "WHERE s.workspace_id=:w AND s.completed_at>=:since "
+                    "ORDER BY s.completed_at DESC LIMIT :limit"
+                ),
+                {"w": workspace_id, "since": since, "limit": min(max(1, limit), 10_000)},
+            ).mappings().all()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            blueprint = self._json(row["blueprint_snapshot_json"] or {})
+            result.append(
+                {
+                    "topic_id": row["topic_id"],
+                    "mode": row["mode"],
+                    "knowledge_point_ids": knowledge_point_ids(blueprint),
+                    "score": int(row["normalized_score"]),
+                    "passed": bool(row["passed"]),
+                }
+            )
+        return result
+
+    def exercise_criterion_stats(self, *, workspace_id: str, since: str, limit: int = 20_000) -> list[dict[str, Any]]:
+        """Teacher read model: per-attempt rubric matches for criterion hit-rate aggregation."""
+        with self._engine.connect() as c:
+            rows = c.execute(
+                text(
+                    "SELECT a.rubric_matches_json,s.topic_id,s.blueprint_snapshot_json "
+                    "FROM nlp_exercise_attempts a "
+                    "JOIN nlp_exercise_questions q ON q.id=a.exercise_question_id "
+                    "JOIN nlp_exercise_sessions s ON s.id=q.exercise_session_id "
+                    "WHERE s.workspace_id=:w AND s.completed_at>=:since "
+                    "ORDER BY s.completed_at DESC LIMIT :limit"
+                ),
+                {"w": workspace_id, "since": since, "limit": min(max(1, limit), 50_000)},
+            ).mappings().all()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            blueprint = self._json(row["blueprint_snapshot_json"] or {})
+            matches = self._json(row["rubric_matches_json"] or {})
+            result.append(
+                {
+                    "topic_id": row["topic_id"],
+                    "knowledge_point_ids": knowledge_point_ids(blueprint),
+                    "matches": [m for m in matches if isinstance(m, dict)],
+                }
+            )
+        return result
+
+    def guided_session_stats(self, *, workspace_id: str, since: str, limit: int = 10_000) -> list[dict[str, Any]]:
+        """Teacher read model: misconception counts per guided session (active + recent completed)."""
+        with self._engine.connect() as c:
+            rows = c.execute(
+                text(
+                    "SELECT topic_id,state_json FROM nlp_guided_sessions "
+                    "WHERE workspace_id=:w AND (completed_at>=:since OR completed_at IS NULL) "
+                    "ORDER BY created_at DESC LIMIT :limit"
+                ),
+                {"w": workspace_id, "since": since, "limit": min(max(1, limit), 10_000)},
+            ).mappings().all()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            state = self._json(row["state_json"] or {}) or {}
+            misconceptions = state.get("misconceptions") or []
+            result.append(
+                {
+                    "topic_id": row["topic_id"],
+                    "misconception_count": len(misconceptions) if isinstance(misconceptions, list) else 0,
+                }
+            )
+        return result
 
     def latest_learning_state(self, session_id: str):
         turns = [t for t in self.list_turns(session_id) if not (t.status == TurnStatus.FAILED and t.error_kind == "turn_conflict")]

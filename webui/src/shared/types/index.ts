@@ -56,35 +56,51 @@ export interface ReviewBlueprint { id: string; name: string; topic_id: string; k
 export interface GuidedBlueprint { id: string; name: string; topic_id: string; knowledge_point_id: string; guidance: string; status: BlueprintStatus }
 export interface TeacherCatalog { workspace_id: string; topics: CourseTopic[]; exercise_blueprints: ExerciseBlueprint[]; review_blueprints: ReviewBlueprint[]; guided_blueprints: GuidedBlueprint[] }
 
-export interface ClassifiedQuestion {
-  turn_id: string;
-  session_id: string;
-  user_id: string;
-  workspace_id: string;
-  question: string;
+export interface TeacherDistribution { name: string; count: number; percentage: number }
+
+export interface WeakTopic {
+  topic_id: string;
   topic: string;
-  question_type: string;
-  difficulty: "beginner" | "intermediate" | "advanced";
-  keywords: string[];
-  status: string;
-  created_at: string;
-  has_error: boolean;
+  questions: number;
+  errors: number;
+  exercises: number;
+  average_score: number | null;
+  pass_rate: number | null;
+  misconceptions: number;
+  risk: "low" | "medium" | "high";
 }
 
-export interface TeacherDistribution { name: string; count: number; percentage: number }
+export interface KnowledgePointStat {
+  knowledge_point_id: string;
+  name: string;
+  topic: string;
+  exercises: number;
+  average_score: number | null;
+  pass_rate: number | null;
+  weak_criteria: Array<{ criterion: string; hit_rate: number }>;
+}
+
 export interface TeacherOverview {
   workspace_id: string;
   period_days: number;
   goals: TeachingGoals;
   revision: number;
   updated_at: string | null;
-  summary: { questions: number; sessions: number; students: number; error_questions: number };
-  questions: ClassifiedQuestion[];
-  frequent_questions: Array<{ question: string; count: number; topic: string; question_type: string }>;
-  weak_topics: Array<{ topic: string; score: number; questions: number; repeat_questions: number; errors: number; sessions: number; risk: "low" | "medium" | "high" }>;
+  summary: {
+    questions: number;
+    sessions: number;
+    students: number;
+    error_questions: number;
+    exercises: number;
+    exercise_pass_rate: number;
+    guided_sessions: number;
+  };
   topic_distribution: TeacherDistribution[];
   difficulty_distribution: TeacherDistribution[];
-  type_distribution: TeacherDistribution[];
+  mode_distribution: TeacherDistribution[];
+  daily_questions: Array<{ date: string; count: number }>;
+  weak_topics: WeakTopic[];
+  knowledge_point_stats: KnowledgePointStat[];
 }
 
 export interface SessionSummary {

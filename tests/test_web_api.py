@@ -336,9 +336,9 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
                 break
             asyncio.run(asyncio.sleep(0.001))
         assert turn["final_text"] == "answer:hello"
-        classified = client.get("/api/v1/teacher/questions?workspace_id=default").json()["items"]
-        assert classified[0]["question"] == "hello"
-        assert classified[0]["topic"] == "NLP 综合"
+        stats = client.get("/api/v1/teacher/analytics?workspace_id=default").json()
+        assert stats["summary"]["questions"] >= 1
+        assert stats["period_days"] == 30
         events = client.get(f"/api/v1/chat/turns/{turn_id}/events").json()["items"]
         assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
 
