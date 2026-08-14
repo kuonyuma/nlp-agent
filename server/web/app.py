@@ -53,6 +53,7 @@ from server.web.contracts import (
     McpServerBody,
     SkillBody,
     WorkerProfileBody,
+    ReleaseNoteBody,
 )
 from server.web.protocol import control_event
 from server.web.developer import developer_snapshot
@@ -72,6 +73,11 @@ from server.web.developer_runtime import (
 from server.teacher.models import ExerciseBlueprint, GuidedBlueprint, ReviewBlueprint, UpdateTeacherCatalog, UpdateTeachingGoals
 from server.teacher.service import teacher_service
 from server.rbac.service import rbac_service
+from server.release_notes.service import (
+    ReleaseNoteConflictError,
+    ReleaseNoteNotFoundError,
+    release_note_service,
+)
 from server.web.websocket import WebSocketHub, websocket_endpoint
 
 
@@ -879,6 +885,70 @@ def create_app(
     async def remove_worker_profile(name: str, principal: Principal, _claims: WriteClaims):
         authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
         return await delete_worker_profile(name)
+
+    def _release_note_payload(row) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "version": row.version,
+            "released_at": row.released_at.isoformat() if row.released_at else None,
+            "notes": row.notes_json,
+            "status": row.status,
+        }
+
+    @app.get("/api/v1/developer/release-notes", tags=["developer"])
+    async def list_release_notes(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_RELEASE_NOTES_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            rows = await release_note_service.list(session, include_drafts=True)
+        return {"items": [_release_note_payload(row) for row in rows]}
+
+    @app.post("/api/v1/developer/release-notes", status_code=status.HTTP_201_CREATED, tags=["developer"])
+    async def create_release_note(body: ReleaseNoteBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_RELEASE_NOTES_MANAGE)
+        try:
+            async with authorization_session_factory(request)() as session:
+                async with session.begin():
+                    row = await release_note_service.create(
+                        session, version=body.version, released_at=body.released_at,
+                        notes=body.notes, status=body.status,
+                    )
+        except ReleaseNoteConflictError as error:
+            return _problem(request, status_code=status.HTTP_409_CONFLICT, code="release_note_conflict", title="版本已存在", detail=str(error))
+        return _release_note_payload(row)
+
+    @app.put("/api/v1/developer/release-notes/{note_id}", tags=["developer"])
+    async def update_release_note(note_id: str, body: ReleaseNoteBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_RELEASE_NOTES_MANAGE)
+        try:
+            async with authorization_session_factory(request)() as session:
+                async with session.begin():
+                    row = await release_note_service.update(
+                        session, note_id=note_id, version=body.version,
+                        released_at=body.released_at, notes=body.notes, status=body.status,
+                    )
+        except ReleaseNoteConflictError as error:
+            return _problem(request, status_code=status.HTTP_409_CONFLICT, code="release_note_conflict", title="版本已存在", detail=str(error))
+        except ReleaseNoteNotFoundError as error:
+            return _problem(request, status_code=status.HTTP_404_NOT_FOUND, code="release_note_not_found", title="发布说明不存在", detail=str(error))
+        return _release_note_payload(row)
+
+    @app.delete("/api/v1/developer/release-notes/{note_id}", tags=["developer"])
+    async def delete_release_note(note_id: str, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_RELEASE_NOTES_MANAGE)
+        try:
+            async with authorization_session_factory(request)() as session:
+                async with session.begin():
+                    await release_note_service.delete(session, note_id=note_id)
+        except ReleaseNoteNotFoundError as error:
+            return _problem(request, status_code=status.HTTP_404_NOT_FOUND, code="release_note_not_found", title="发布说明不存在", detail=str(error))
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/api/v1/learning/release-notes", tags=["learning"])
+    async def list_published_release_notes(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.LEARNING_CONTENT_READ_PUBLIC)
+        async with authorization_session_factory(request)() as session:
+            rows = await release_note_service.list(session, include_drafts=False)
+        return {"items": [_release_note_payload(row) for row in rows]}
 
     @app.get("/api/v1/teacher/overview", tags=["teacher"])
     async def teacher_overview(

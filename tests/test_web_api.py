@@ -1,4 +1,6 @@
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import pytest
 from argon2 import PasswordHasher
@@ -186,6 +188,7 @@ def test_guest_session_has_only_guest_capabilities(web_app):
         assert response.status_code == 200
         assert response.json()["roles"] == ["guest"]
         assert client.get("/api/v1/sessions").status_code == 403
+        assert client.get("/api/v1/developer/release-notes").status_code == 403
 
 
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
@@ -195,11 +198,14 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
 
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         developer = client.get("/api/v1/developer/snapshot")
+        release_notes = client.get("/api/v1/developer/release-notes")
 
         assert teacher.status_code == 403
         assert teacher.json()["code"] == "forbidden"
         assert developer.status_code == 403
         assert developer.json()["code"] == "forbidden"
+        assert release_notes.status_code == 403
+        assert release_notes.json()["code"] == "forbidden"
         assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
 
         rejected = client.post(
@@ -214,6 +220,66 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
         logged_out = client.delete("/api/v1/auth/session", headers=write_headers(csrf))
         assert logged_out.status_code == 204
         assert client.get("/api/v1/sessions").status_code == 401
+
+
+def test_learning_release_notes_route_requests_only_published(web_app, monkeypatch):
+    """The public read route must pass include_drafts=False and serialize the payload.
+
+    The published-only filtering itself is exercised by the ReleaseNoteService
+    unit tests (include_drafts=False -> statuses=("published",)); this test pins
+    the route wiring and the LEARNING_CONTENT_READ_PUBLIC grant (held by guest,
+    student, teacher and developer alike) end-to-end without a MySQL DB.
+    """
+    captured: dict[str, bool] = {}
+
+    class FakeRow:
+        def __init__(self, note_id, version, released_at, notes, status):
+            self.id, self.version, self.released_at, self.notes_json, self.status = (
+                note_id, version, released_at, notes, status,
+            )
+
+    class FakeReleaseNoteService:
+        async def list(self, session, *, include_drafts=False):
+            captured["include_drafts"] = include_drafts
+            return [FakeRow(
+                "n1", "1.0.0", datetime(2026, 8, 1, tzinfo=timezone.utc),
+                ["新增发布说明功能"], "published",
+            )]
+
+    class FakeSession:
+        def add(self, obj):
+            return None
+
+        @asynccontextmanager
+        async def begin(self):
+            yield
+
+    @asynccontextmanager
+    async def fake_session_factory():
+        yield FakeSession()
+
+    monkeypatch.setattr("server.web.app.release_note_service", FakeReleaseNoteService())
+    monkeypatch.setattr(
+        BackendGateway,
+        "authorization_session_factory",
+        property(lambda self: fake_session_factory),
+    )
+
+    app, _engine = web_app
+    with TestClient(app) as client:
+        guest = client.post("/api/v1/auth/guest", headers={"Origin": "http://testserver"})
+        assert guest.status_code == 200
+        response = client.get("/api/v1/learning/release-notes")
+
+    assert response.status_code == 200
+    assert captured["include_drafts"] is False
+    assert response.json()["items"] == [{
+        "id": "n1",
+        "version": "1.0.0",
+        "released_at": "2026-08-01T00:00:00+00:00",
+        "notes": ["新增发布说明功能"],
+        "status": "published",
+    }]
 
 
 def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):

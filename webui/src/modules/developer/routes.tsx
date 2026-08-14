@@ -14,6 +14,7 @@ export function DeveloperRoutes() {
       <Route path="models" element={<DeveloperWorkspace page="models" onNavigate={page} />} />
       <Route path="mcp" element={<DeveloperWorkspace page="mcp" onNavigate={page} />} />
       <Route path="skills" element={<DeveloperWorkspace page="skills" onNavigate={page} />} />
+      <Route path="release-notes" element={<DeveloperWorkspace page="release-notes" onNavigate={page} />} />
       <Route path="automations" element={<DeveloperWorkspace page="automations" onNavigate={page} />} />
       <Route path="settings" element={<DeveloperWorkspace page="settings" onNavigate={page} />} />
       <Route path="*" element={<NotFoundPage />} />
