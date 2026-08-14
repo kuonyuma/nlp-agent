@@ -31,6 +31,7 @@ CI 每次在全新 MySQL 上跑 `alembic upgrade head`，所以这类迁移在 C
 - 迁移链：每个迁移的 `down_revision` 指向当前 head；`revision` 使用 `YYYYMMDD_NN` 序号，与文件名一致。
 - 时间戳列统一 `mysql.DATETIME(fsp=6)` + `server_default=sa.text("UTC_TIMESTAMP(6)")`，与 `server/infrastructure/mysql/base.py` 的 `TimestampedModel` 保持一致。
 - `downgrade()` 必须能回滚 `upgrade()` 的全部副作用（含种子数据的删除），顺序与 `upgrade()` 相反。
+- 新增迁移时优先复用既有表的 `sa.table()` 投影（见 `20260813_16`），避免在迁移里重复声明完整列。
 
 ## 相关文档
 
