@@ -1,0 +1,61 @@
+"""Human-readable comments for the MySQL tables managed by the application."""
+
+from __future__ import annotations
+
+
+# Keep these comments short enough for MySQL's table comment limit while making
+# the purpose of every table visible in database administration tools.
+TABLE_COMMENTS: dict[str, str] = {
+    "nlp_users": "用户账户、认证摘要、显示名称与启用状态。",
+    "nlp_roles": "RBAC 角色定义及角色状态。",
+    "nlp_permissions": "RBAC 权限目录，描述可执行的领域、资源与操作。",
+    "nlp_user_roles": "用户与角色的绑定关系及有效期。",
+    "nlp_role_permissions": "角色与权限的授权关系。",
+    "nlp_role_permission_scopes": "角色权限对应的资源作用域类型。",
+    "nlp_workspace_members": "用户与工作区的成员关系及成员状态。",
+    "nlp_authorization_audit_logs": "授权判定与 RBAC 管理操作的追加式审计记录。",
+    "nlp_classrooms": "工作区对应的课堂定义。",
+    "nlp_classroom_members": "课堂与用户的成员关系及课堂内角色。",
+    "nlp_menus": "前端菜单树、路由和可见性配置。",
+    "nlp_role_menus": "角色可见菜单的关联关系。",
+    "nlp_workspaces": "租户或工作区的基本信息及状态。",
+    "nlp_sessions": "登录会话、令牌摘要、CSRF 摘要及过期/撤销状态。",
+    "nlp_teaching_goals": "工作区教学目标及其版本号。",
+    "nlp_course_catalogs": "工作区课程目录的当前版本指针。",
+    "nlp_course_topics": "课程目录中的主题或章节。",
+    "nlp_knowledge_points": "主题下的知识点内容。",
+    "nlp_teaching_blueprints": "教学或练习蓝图及其载荷版本。",
+    "nlp_blueprint_rubrics": "蓝图评分标准、权重与排序。",
+    "nlp_course_catalog_versions": "课程目录发布版本的完整快照。",
+    "nlp_conversations": "工作区内用户对话及其状态。",
+    "nlp_turns": "对话执行轮次的输入输出、状态与处理租约。",
+    "nlp_conversation_messages": "对话消息的有序持久化内容。",
+    "nlp_turn_events": "执行轮次的顺序事件和事件载荷。",
+    "nlp_exercise_sessions": "用户练习会话及蓝图快照。",
+    "nlp_exercise_questions": "练习会话中的题目和评分规则。",
+    "nlp_exercise_attempts": "用户练习作答、评分结果与反馈。",
+    "nlp_learning_evidence": "练习完成后沉淀的学习证据。",
+    "nlp_guided_sessions": "基于知识点的引导式学习会话状态。",
+    "nlp_user_preferences": "用户级前端或学习偏好及版本号。",
+    "nlp_outbox_messages": "待发布的可靠消息及投递重试状态。",
+    "nlp_turn_cancellations": "对执行轮次的取消请求。",
+    "nlp_tool_calls": "工具调用的幂等记录、请求结果与状态。",
+    "nlp_dead_letters": "处理失败后进入死信队列的消息。",
+    "nlp_agent_checkpoints": "Agent 会话检查点及其元数据快照。",
+    "nlp_langgraph_checkpoints": "LangGraph 检查点的序列化主记录。",
+    "nlp_langgraph_checkpoint_blobs": "LangGraph 检查点 channel 值的二进制版本数据。",
+    "nlp_langgraph_checkpoint_writes": "LangGraph 检查点的任务写入记录。",
+    "nlp_conversation_transcripts": "会话历史消息与工具内容的转录存档。",
+    "nlp_memory_documents": "用户工作区的长期记忆文档。",
+    "nlp_release_notes": "面向开发者和学生的版本发布说明。",
+    "nlp_memory_archives": "记忆归档事件及其来源游标。",
+    "nlp_memory_cursors": "记忆消费范围的全局游标。",
+    "nlp_tool_audits": "工具执行审计及请求/结果快照。",
+    "nlp_runtime_config_versions": "按作用域保存的运行时配置版本快照。",
+    "nlp_observability_records": "trace、span 与 telemetry 的统一可观测性记录。",
+}
+
+
+SYSTEM_TABLE_COMMENTS: dict[str, str] = {
+    "alembic_version": "Alembic 数据库迁移版本记录，不承载业务数据。",
+}
