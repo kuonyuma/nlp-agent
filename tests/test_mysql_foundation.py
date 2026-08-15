@@ -12,6 +12,7 @@ from configs.settings import Settings
 from core.session_context import SessionContext
 from server.infrastructure.mysql import DatabaseConfig, UnitOfWorkFactory, create_engine, create_session_factory
 from server.infrastructure.mysql.runtime import MySQLRuntime
+from server.infrastructure.mysql.base import Base
 from server.infrastructure.mysql.models import (
     PermissionModel,
     RoleModel,
@@ -29,6 +30,7 @@ from server.infrastructure.mysql.models import (
     WorkspaceMemberModel,
     WorkspaceModel,
 )
+from server.infrastructure.mysql.table_comments import TABLE_COMMENTS
 
 
 def test_database_config_requires_aiomysql_and_valid_pool_limits() -> None:
@@ -114,6 +116,18 @@ def test_rbac_models_define_normalized_role_permission_relationships() -> None:
     }
 
 
+def test_mysql_table_comments_cover_all_active_models() -> None:
+    retired_tables = {"nlp_gateway_compat"}
+    active_model_tables = set(Base.metadata.tables) - retired_tables
+
+    assert set(TABLE_COMMENTS) == active_model_tables
+    assert all(TABLE_COMMENTS.values())
+    assert {
+        table_name: Base.metadata.tables[table_name].comment
+        for table_name in TABLE_COMMENTS
+    } == TABLE_COMMENTS
+
+
 @pytest.mark.asyncio
 async def test_unit_of_work_rolls_back_uncommitted_transactions() -> None:
     session = MagicMock()
@@ -155,6 +169,26 @@ async def test_alembic_foundation_schema_is_available_in_mysql(mysql_engine) -> 
         )
 
     assert set(rows.scalars()) == {"nlp_users", "nlp_workspaces", "nlp_sessions"}
+
+
+@pytest.mark.asyncio
+async def test_mysql_table_comments_are_applied(mysql_engine) -> None:
+    expected = {
+        **TABLE_COMMENTS,
+        "alembic_version": "Alembic 数据库迁移版本记录，不承载业务数据。",
+    }
+    async with mysql_engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT table_name, table_comment "
+                "FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() "
+                "AND (table_name LIKE 'nlp_%' OR table_name = 'alembic_version')"
+            )
+        )
+
+    actual = {row[0]: row[1] for row in rows}
+    assert {table_name: actual.get(table_name) for table_name in expected} == expected
 
 
 @pytest.mark.asyncio

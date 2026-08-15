@@ -9,6 +9,7 @@ from sqlalchemy.dialects.mysql import BIGINT, DATETIME
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampedModel
+from .table_comments import TABLE_COMMENTS
 
 
 UUID = String(36, collation="ascii_bin")
@@ -645,3 +646,7 @@ class ObservabilityRecordModel(TimestampedModel, Base):
     turn_id: Mapped[str | None] = mapped_column(String(128), index=True)
     status: Mapped[str | None] = mapped_column(String(32), index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+for _table_name, _table_comment in TABLE_COMMENTS.items():
+    Base.metadata.tables[_table_name].comment = _table_comment
