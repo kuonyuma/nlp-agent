@@ -43,6 +43,7 @@ class Permission(StrEnum):
     SYSTEM_RUNTIME_INSPECT = "system:runtime:inspect"
     SYSTEM_USER_MANAGE = "system:user:manage"
     SYSTEM_ROLE_MANAGE = "system:role:manage"
+    SYSTEM_RELEASE_NOTES_MANAGE = "system:release_notes:manage"
     SYSTEM_PERMISSION_READ = "system:permission:read"
     SYSTEM_AUDIT_READ = "system:audit:read"
     SYSTEM_SENSITIVE_DATA_READ = "system:sensitive_data:read"
@@ -119,6 +120,7 @@ _DEVELOPER: Final[frozenset[Permission]] = _TEACHER | {
     Permission.SYSTEM_RUNTIME_INSPECT,
     Permission.SYSTEM_USER_MANAGE,
     Permission.SYSTEM_ROLE_MANAGE,
+    Permission.SYSTEM_RELEASE_NOTES_MANAGE,
     Permission.SYSTEM_PERMISSION_READ,
     Permission.SYSTEM_AUDIT_READ,
 }
