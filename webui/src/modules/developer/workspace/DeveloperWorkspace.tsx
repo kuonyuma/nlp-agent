@@ -111,12 +111,14 @@ function Feedback({ threads, refresh }: { threads: FeedbackThreadSummary[]; refr
   const selected = threads.find((item) => item.thread_id === selectedId) ?? null;
 
   useEffect(() => {
-    if (!selectedId && threads[0]) setSelectedId(threads[0].thread_id);
-    if (selectedId && !threads.some((item) => item.thread_id === selectedId)) setSelectedId(threads[0]?.thread_id ?? null);
+    queueMicrotask(() => {
+      if (!selectedId && threads[0]) setSelectedId(threads[0].thread_id);
+      if (selectedId && !threads.some((item) => item.thread_id === selectedId)) setSelectedId(threads[0]?.thread_id ?? null);
+    });
   }, [selectedId, threads]);
 
   useEffect(() => {
-    if (!selectedId) { setThread(null); return; }
+    if (!selectedId) { queueMicrotask(() => setThread(null)); return; }
     void api.getFeedback(selectedId).then((value) => { setThread(value); return api.markFeedbackRead(selectedId); }).then(() => refresh());
   }, [refresh, selectedId]);
 
