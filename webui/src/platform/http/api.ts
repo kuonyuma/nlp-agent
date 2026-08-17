@@ -1,4 +1,4 @@
-import type { AuthSession, DeveloperSnapshot, FeedbackThread, FeedbackThreadSummary, SettingsRuntime, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings } from "@/shared/types";
+import type { AuthSession, DeveloperSnapshot, FeedbackThread, FeedbackThreadSummary, ReleaseNoteEntry, SettingsRuntime, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
 
@@ -90,6 +90,13 @@ export const api = {
   deleteSkill: (name: string) => request<void>(`/developer/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
   saveWorkerProfile: (name: string, profile: Record<string, unknown>) => request<Record<string, unknown>>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ profile }) }),
   deleteWorkerProfile: (name: string) => request<void>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  listReleaseNotes: () => request<{ items: ReleaseNoteEntry[] }>("/developer/release-notes"),
+  createReleaseNote: (note: Omit<ReleaseNoteEntry, "id">) =>
+    request<ReleaseNoteEntry>("/developer/release-notes", { method: "POST", body: JSON.stringify(note) }),
+  updateReleaseNote: (noteId: string, note: Omit<ReleaseNoteEntry, "id">) =>
+    request<ReleaseNoteEntry>(`/developer/release-notes/${encodeURIComponent(noteId)}`, { method: "PUT", body: JSON.stringify(note) }),
+  deleteReleaseNote: (noteId: string) => request<void>(`/developer/release-notes/${encodeURIComponent(noteId)}`, { method: "DELETE" }),
+  listPublishedReleaseNotes: () => request<{ items: ReleaseNoteEntry[] }>("/learning/release-notes"),
   getTeacherOverview: (workspaceId = "default", days = 30) =>
     request<TeacherOverview>(`/teacher/overview?workspace_id=${encodeURIComponent(workspaceId)}&days=${days}`),
   updateTeachingGoals: (workspaceId: string, goals: Omit<TeachingGoals, "workspace_id">) =>

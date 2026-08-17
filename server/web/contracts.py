@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from core.learning import LearningContext
 from gateway.contracts import EvaluationContext
 
@@ -115,6 +115,15 @@ class SkillBody(StrictModel):
 
 class WorkerProfileBody(StrictModel):
     profile: dict[str, Any]
+
+
+class ReleaseNoteBody(StrictModel):
+    version: str = Field(pattern=r"^\d+\.\d+\.\d+$", max_length=32)
+    released_at: datetime
+    notes: list[Annotated[str, StringConstraints(min_length=1, max_length=2_000)]] = Field(
+        min_length=1, max_length=200
+    )
+    status: Literal["draft", "published"] = "published"
 
 
 class CommandEnvelope(StrictModel):
