@@ -1129,6 +1129,16 @@ def create_app(
             principal_resolver=lambda claims: resolve_principal(websocket, claims),
         )
 
+    # User-management vertical modules (chained fix: backend-user-modules).
+    # Registered before the SPA static mount so /api routes always win.
+    from server.user.controller import router as user_router
+    from server.workspace.controller import router as workspace_router
+    from server.classroom_join import router as classroom_join_router
+
+    app.include_router(user_router)
+    app.include_router(workspace_router)
+    app.include_router(classroom_join_router)
+
     static_dir_value = str(web_config.get("static_dir", "")).strip()
     static_dir = Path(static_dir_value).expanduser() if static_dir_value else None
     if static_dir is not None and not static_dir.is_absolute():

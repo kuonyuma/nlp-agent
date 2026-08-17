@@ -645,3 +645,39 @@ class ObservabilityRecordModel(TimestampedModel, Base):
     turn_id: Mapped[str | None] = mapped_column(String(128), index=True)
     status: Mapped[str | None] = mapped_column(String(32), index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class ClassJoinRequestModel(TimestampedModel, Base):
+    """Class join requests / approval flow (user management).
+
+    Reuses the existing ``nlp_classrooms`` table as the class entity; only the
+    approval request itself is modelled here.
+    """
+
+    __tablename__ = "nlp_class_join_requests"
+    __table_args__ = (
+        Index("ix_nlp_class_join_requests_class_status", "class_id", "status"),
+        # 防重复申请：同一 (班级, 用户, 状态) 只能有一条 pending
+        UniqueConstraint("class_id", "user_id", "status", name="uq_nlp_class_join_requests_cls_usr_sts"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    class_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_classrooms.id", ondelete="CASCADE"), nullable=False, comment="关联 nlp_classrooms.id"
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False, comment="申请人"
+    )
+    student_number: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="学生选填学号")
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="pending", comment="pending / approved / rejected"
+    )
+    requested_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="SET NULL")
+    )
+
+    cls: Mapped["ClassroomModel"] = relationship("ClassroomModel", foreign_keys=[class_id])
+    user_: Mapped["UserModel"] = relationship("UserModel", foreign_keys=[user_id])
+    reviewer: Mapped["UserModel | None"] = relationship("UserModel", foreign_keys=[reviewed_by])
