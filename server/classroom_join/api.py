@@ -79,7 +79,7 @@ async def submit_join_request(
     if existing is not None:
         raise HTTPException(status_code=409, detail="您已提交过该班级的加入申请，请等待审核")
     req = await service.submit_join_request(db, classroom_id, principal.user_id, body.student_number)
-    await db.commit()
+    await db.flush()
     result = await db.execute(
         select(ClassJoinRequestModel)
         .where(ClassJoinRequestModel.id == req.id)
@@ -134,7 +134,7 @@ async def approve_join_request(
         resource_id=classroom_id,
         detail={"request_id": request_id},
     )
-    await db.commit()
+    await db.flush()
     result = await db.execute(
         select(ClassJoinRequestModel)
         .where(ClassJoinRequestModel.id == req.id)
@@ -169,7 +169,7 @@ async def reject_join_request(
         resource_id=classroom_id,
         detail={"request_id": request_id},
     )
-    await db.commit()
+    await db.flush()
     result = await db.execute(
         select(ClassJoinRequestModel)
         .where(ClassJoinRequestModel.id == req.id)

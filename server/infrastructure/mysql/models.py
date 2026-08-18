@@ -4,7 +4,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Computed,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.mysql import BIGINT, DATETIME
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,9 +28,19 @@ SESSION_IDENTIFIER = String(128, collation="ascii_bin")
 
 class UserModel(TimestampedModel, Base):
     __tablename__ = "nlp_users"
+    __table_args__ = (
+        # §4.3 / 阶段4：用户名大小写归一化唯一约束。``username_lower`` 是 STORED
+        # 生成列（见下方定义），保证 "Alice" 与 "alice" 在数据库层视为重复，
+        # 杜绝同户名大小写不同的重复账号。
+        Index("uq_nlp_users_username_lower", "username_lower", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # 大小写归一化的持久化副本，由数据库自动计算（GENERATED ALWAYS AS (LOWER(username)) STORED）
+    username_lower: Mapped[str] = mapped_column(
+        String(64), Computed("LOWER(username)", persisted=True), nullable=False
+    )
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
@@ -159,6 +180,10 @@ class ClassroomModel(TimestampedModel, Base):
 
 class ClassroomMemberModel(TimestampedModel, Base):
     __tablename__ = "nlp_classroom_members"
+    __table_args__ = (
+        # §4.3 / 阶段4：按 (班级, 状态, 角色) 列活跃成员 / 计数
+        Index("ix_nlp_classroom_members_class_status_role", "classroom_id", "status", "member_role"),
+    )
 
     classroom_id: Mapped[str] = mapped_column(
         UUID, ForeignKey("nlp_classrooms.id", ondelete="CASCADE"), primary_key=True
@@ -203,7 +228,11 @@ class WorkspaceModel(TimestampedModel, Base):
 
 class SessionModel(TimestampedModel, Base):
     __tablename__ = "nlp_sessions"
-    __table_args__ = (UniqueConstraint("token_hash", name="uq_nlp_sessions_token_hash"),)
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_nlp_sessions_token_hash"),
+        # §4.3 / 阶段4：撤销 / 清理查询（按用户列出有效 / 已撤销会话、按过期时间清扫）
+        Index("ix_nlp_sessions_user_revoked_expires", "user_id", "revoked_at", "expires_at"),
+    )
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False, index=True)

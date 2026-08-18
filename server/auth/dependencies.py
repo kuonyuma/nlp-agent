@@ -38,12 +38,26 @@ def _claims(request: Request) -> SessionClaims:
 
 
 async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
-    """Yield an async database session from the gateway's session factory."""
+    """Yield an async database session bound to a single request-scoped transaction.
+
+    The session is opened from the gateway's session factory and wrapped in an
+    explicit ``session.begin()`` so that every write performed during the request
+    is committed together on success and rolled back on error — one request, one
+    transaction.
+
+    This fixes review P1-1: previously the factory only flushed (the
+    ``async_sessionmaker`` is created with ``autoflush=False`` and the dependency
+    never committed), so writes in ``server/user`` and ``server/workspace`` —
+    and the audit events added in 阶段3 — never reached the database. Only
+    ``server/classroom_join`` committed inline, producing the "sometimes
+    committed, sometimes not" inconsistency the review flagged.
+    """
     factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
     if factory is None:
         raise RuntimeError("RBAC persistence requires MySQL")
     async with factory() as session:
-        yield session
+        async with session.begin():
+            yield session
 
 
 async def get_current_principal(
