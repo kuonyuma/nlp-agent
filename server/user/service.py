@@ -268,6 +268,39 @@ class UserService:
         await self.session.flush()
         return user
 
+    async def revoke_user_sessions(
+        self,
+        user_id: str,
+        *,
+        actor_user_id: Optional[str] = None,
+    ) -> int:
+        """Admin revoke all active sessions for a single target user (P1-3).
+
+        The revocation is scoped strictly by ``user_id`` — a caller can only
+        ever revoke the explicitly targeted account's sessions and never
+        another user's, which is the precise guard the review's P1-3 fix
+        requires (``WHERE user_id = :target_user_id AND revoked_at IS NULL``).
+
+        Bumps ``authorization_version`` so any cached tokens are invalidated
+        in addition to the row-level ``revoked_at``. Returns the number of
+        sessions revoked.
+        """
+        # Ensures the target exists; raises UserNotFoundError otherwise.
+        user = await self.get_user(user_id)
+        result = await self.session.execute(
+            update(SessionModel)
+            .where(
+                SessionModel.user_id == user_id,
+                SessionModel.revoked_at.is_(None),
+            )
+            .values(revoked_at=datetime.now(timezone.utc).replace(tzinfo=None))
+        )
+        revoked_count = result.rowcount or 0
+        user.authorization_version += 1
+        user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await self.session.flush()
+        return revoked_count
+
     async def update_last_login(self, user_id: str) -> None:
         """Update the last login timestamp.
         

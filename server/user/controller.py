@@ -228,3 +228,37 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="User not found")
     except SelfDeleteForbiddenError:
         raise HTTPException(status_code=403, detail="Cannot delete your own account")
+
+
+@router.post("/{user_id}/sessions/revoke", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_user_sessions(
+    user_id: str,
+    db: DbSession,
+    _write: WriteClaims,
+    principal: Principal,
+):
+    """Revoke all active sessions for a user (admin only, P1-3).
+
+    Admin-only session revocation with a dedicated audit trail. It does NOT
+    reuse the user's own session endpoint, so a caller can only revoke the
+    explicitly targeted account — never another user's sessions via a guessed
+    session id (review P1-3).
+    """
+    authorization_service.require(principal, Permission.SYSTEM_USER_MANAGE)
+
+    service = UserService(db)
+    try:
+        await service.revoke_user_sessions(user_id, actor_user_id=principal.user_id)
+        # 高危账号操作写入审计事件
+        await rbac_service.audit(
+            db,
+            actor_user_id=principal.user_id,
+            target_user_id=user_id,
+            decision="allow",
+            reason_code="user_sessions_revoked",
+            permission_code="system:user:manage",
+            resource_type="user_session",
+            resource_id=user_id,
+        )
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="User not found")
