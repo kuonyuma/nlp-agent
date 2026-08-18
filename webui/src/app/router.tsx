@@ -7,6 +7,7 @@ import { NotFoundPage } from "./NotFoundPage";
 const StudentRoutes = lazy(() => import("@/modules/student").then(({ StudentRoutes: route }) => ({ default: route })));
 const TeacherRoutes = lazy(() => import("@/modules/teacher").then(({ TeacherRoutes: route }) => ({ default: route })));
 const DeveloperRoutes = lazy(() => import("@/modules/developer").then(({ DeveloperRoutes: route }) => ({ default: route })));
+const AdminRoutes = lazy(() => import("@/modules/admin").then(({ AdminRoutes: route }) => ({ default: route })));
 
 export function AppRouter() {
   return (
@@ -16,6 +17,7 @@ export function AppRouter() {
           <Route index element={<StudentRoutes />} />
           <Route path="teacher/*" element={<TeacherRoutes />} />
           <Route path="developer/*" element={<DeveloperRoutes />} />
+          <Route path="admin/*" element={<AdminRoutes />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

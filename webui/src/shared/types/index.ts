@@ -222,3 +222,66 @@ export interface ReleaseNoteEntry {
   notes: string[];
   status: "draft" | "published";
 }
+
+// ---- Admin module (用户 / 工作区 / 班级管理) ----
+// 注意：UserProfile 不暴露任何密码字段（满足 review 7.2）。
+export type UserStatus = "active" | "disabled" | "locked";
+
+export interface UserProfile {
+  id: string;
+  username: string;
+  display_name: string;
+  status: UserStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserListResponse {
+  users: UserProfile[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface Workspace {
+  id: string;
+  slug: string;
+  name: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceMember {
+  workspace_id: string;
+  user_id: string;
+  member_type: string;
+  status: string;
+  created_at: string;
+}
+
+export interface ClassroomSummary {
+  id: string;
+  workspace_id: string;
+  name: string;
+  status: string;
+}
+
+export interface JoinRequest {
+  id: string;
+  class_id: string;
+  class_name: string;
+  user_id: string;
+  user_name: string;
+  display_name: string;
+  student_number: string | null;
+  status: string;
+  requested_at: string;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+}
+
+export interface JoinRequestListResponse {
+  items: JoinRequest[];
+  total: number;
+}

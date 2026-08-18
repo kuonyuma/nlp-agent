@@ -1,4 +1,4 @@
-import type { AuthSession, DeveloperSnapshot, ReleaseNoteEntry, SettingsRuntime, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings } from "@/shared/types";
+import type { AuthSession, DeveloperSnapshot, ReleaseNoteEntry, SettingsRuntime, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
 
@@ -109,4 +109,30 @@ export const api = {
   getLearningCatalog: (workspaceId = "default") => request<{ catalog: TeacherCatalog }>(`/learning/catalog/${encodeURIComponent(workspaceId)}`),
   getTeacherResource: (resource: "courses" | "prompts" | "reports", workspaceId = "default") =>
     request<{ items: unknown[]; status: string }>(`/teacher/${resource}?workspace_id=${encodeURIComponent(workspaceId)}`),
+
+  // ---- Admin module (用户 / 工作区 / 班级加入申请) ----
+  listUsers: (offset = 0, limit = 20, status?: string) =>
+    request<UserListResponse>(
+      `/users?offset=${offset}&limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  disableUser: (userId: string) =>
+    request<void>(`/users/${encodeURIComponent(userId)}/disable`, { method: "POST" }),
+  enableUser: (userId: string) =>
+    request<void>(`/users/${encodeURIComponent(userId)}/enable`, { method: "POST" }),
+  listWorkspaces: () => request<{ workspaces: Workspace[]; total: number }>("/workspaces"),
+  listWorkspaceMembers: (workspaceId: string) =>
+    request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),
+  listClassrooms: () => request<{ items: ClassroomSummary[] }>("/classrooms"),
+  listJoinRequests: (classroomId: string) =>
+    request<JoinRequestListResponse>(`/classrooms/${encodeURIComponent(classroomId)}/join-requests`),
+  approveJoinRequest: (classroomId: string, requestId: string) =>
+    request<JoinRequest>(
+      `/classrooms/${encodeURIComponent(classroomId)}/join-requests/${encodeURIComponent(requestId)}/approve`,
+      { method: "POST", body: "{}" },
+    ),
+  rejectJoinRequest: (classroomId: string, requestId: string) =>
+    request<JoinRequest>(
+      `/classrooms/${encodeURIComponent(classroomId)}/join-requests/${encodeURIComponent(requestId)}/reject`,
+      { method: "POST" },
+    ),
 };
