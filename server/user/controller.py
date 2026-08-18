@@ -21,6 +21,7 @@ from .schemas import (
     PasswordChange,
     PasswordReset,
     UserAdminUpdate,
+    UserCreate,
     UserListResponse,
     UserResponse,
     UserUpdate,
@@ -58,6 +59,41 @@ async def list_users(
         offset=offset,
         limit=limit,
     )
+
+
+@router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    data: UserCreate,
+    db: DbSession,
+    _write: WriteClaims,
+    principal: Principal,
+):
+    """Create a new user account (admin only, review §8.2).
+
+    Creates the user together with a personal workspace and assigns the
+    creator as the workspace owner. The password is hashed server-side and
+    is never returned in the response (review §7.2).
+    """
+    authorization_service.require(principal, Permission.SYSTEM_USER_MANAGE)
+
+    service = UserService(db)
+    try:
+        user = await service.create_user(data, actor_user_id=principal.user_id)
+    except UserAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    # 高危账号操作写入审计事件
+    await rbac_service.audit(
+        db,
+        actor_user_id=principal.user_id,
+        target_user_id=user.id,
+        decision="allow",
+        reason_code="user_account_created",
+        permission_code="system:user:manage",
+        resource_type="user",
+        resource_id=user.id,
+    )
+    return UserResponse.model_validate(user)
 
 
 @router.get("/me", response_model=UserResponse)

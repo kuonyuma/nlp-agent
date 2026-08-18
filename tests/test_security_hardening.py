@@ -34,6 +34,7 @@ from server.infrastructure.mysql.models import (
     UserModel,
     WorkspaceModel,
 )
+from server.user.schemas import UserCreate
 from server.user.service import UserService
 
 
@@ -136,6 +137,14 @@ def test_admin_revoke_session_is_admin_only_capability() -> None:
 def test_user_password_reset_is_admin_only_capability() -> None:
     """§10：重置他人密码必须经 SYSTEM_USER_MANAGE，非 admin（teacher）
     在能力层即被拒——这是「跨用户重置密码」失败路径的关卡。"""
+    teacher = _principal(roles=("teacher",))
+    with pytest.raises(AccessDeniedError):
+        authorization_service.require(teacher, Permission.SYSTEM_USER_MANAGE)
+
+
+def test_create_user_is_admin_only_capability() -> None:
+    """§10 / §8.2：创建用户必须经 SYSTEM_USER_MANAGE，非 admin（teacher）
+    在能力层即被拒——这是「越权创建账号」失败路径的关卡。"""
     teacher = _principal(roles=("teacher",))
     with pytest.raises(AccessDeniedError):
         authorization_service.require(teacher, Permission.SYSTEM_USER_MANAGE)
@@ -261,3 +270,35 @@ async def test_self_password_change_verifies_old_and_invalidates_sessions(mysql_
         assert after.authorization_version == before.authorization_version + 1
         assert await svc.verify_password(after, "NewPassw0rd2") is True
         assert await svc.verify_password(after, "OldPassw0rd1") is False
+
+
+@pytest.mark.asyncio
+async def test_admin_create_user_returns_no_password_and_persists(mysql_session_factory) -> None:
+    """§8.2 + §7.2：管理员创建用户成功，响应不含 password 字段，
+    且用户可经 list_users 查到（落库生效）。"""
+    async with mysql_session_factory() as session:
+        svc = UserService(session)
+        created = await svc.create_user(
+            UserCreate(
+                username=f"newuser-{uuid4().hex[:8]}",
+                display_name="New User",
+                password="InitialPw0rd1",
+            ),
+            actor_user_id="creator-1",
+        )
+        await session.flush()
+
+        # 响应模型（UserResponse）不含 password / password_hash —— §7.2
+        resp = UserResponse.model_validate(created)
+        assert "password" not in resp.model_dump()
+        assert resp.username.startswith("newuser-")
+        assert resp.status == "active"
+
+        # 落库后能被 list_users 查到
+        users, total = await svc.list_users(keyword=resp.username)
+        assert total >= 1
+        assert any(u.id == created.id for u in users)
+
+        # 口令确实已哈希落库，可直接校验
+        stored = await svc.get_user(created.id)
+        assert await svc.verify_password(stored, "InitialPw0rd1") is True
