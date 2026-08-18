@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.identity import AuthenticatedPrincipal
 from core.rbac import Permission, authorization_service
+from server.rbac.service import rbac_service
 
 from server.auth.dependencies import Principal, WriteClaims, get_db_session
 
@@ -147,6 +148,17 @@ async def disable_user(
         await service.update_user_status(
             user_id, "disabled", actor_user_id=principal.user_id
         )
+        # 高危账号操作写入审计事件
+        await rbac_service.audit(
+            db,
+            actor_user_id=principal.user_id,
+            target_user_id=user_id,
+            decision="allow",
+            reason_code="user_account_disabled",
+            permission_code="system:user:manage",
+            resource_type="user",
+            resource_id=user_id,
+        )
     except UserNotFoundError:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -165,6 +177,17 @@ async def enable_user(
     try:
         await service.update_user_status(
             user_id, "active", actor_user_id=principal.user_id
+        )
+        # 高危账号操作写入审计事件
+        await rbac_service.audit(
+            db,
+            actor_user_id=principal.user_id,
+            target_user_id=user_id,
+            decision="allow",
+            reason_code="user_account_enabled",
+            permission_code="system:user:manage",
+            resource_type="user",
+            resource_id=user_id,
         )
     except UserNotFoundError:
         raise HTTPException(status_code=404, detail="User not found")

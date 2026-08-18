@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.identity import AuthenticatedPrincipal
 from core.rbac import Permission, authorization_service
+from server.rbac.service import rbac_service
 
 from server.auth.dependencies import Principal, WriteClaims, get_db_session
 
@@ -136,6 +137,18 @@ async def add_member(
             data.user_id,
             member_type=data.member_type,
         )
+        # P0-4：成员变更写入审计事件（对象级动作可溯源）
+        await rbac_service.audit(
+            db,
+            actor_user_id=principal.user_id,
+            target_user_id=data.user_id,
+            decision="allow",
+            reason_code="workspace_member_added",
+            permission_code="classroom:member:manage",
+            resource_type="workspace",
+            resource_id=workspace_id,
+            detail={"member_type": data.member_type},
+        )
         return WorkspaceMemberResponse.model_validate(member)
     except WorkspaceNotFoundError:
         raise HTTPException(status_code=404, detail="Workspace not found")
@@ -166,3 +179,14 @@ async def remove_member(
     removed = await service.remove_member(workspace_id, user_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Member not found")
+    # P0-4：成员变更写入审计事件（对象级动作可溯源）
+    await rbac_service.audit(
+        db,
+        actor_user_id=principal.user_id,
+        target_user_id=user_id,
+        decision="allow",
+        reason_code="workspace_member_removed",
+        permission_code="classroom:member:manage",
+        resource_type="workspace",
+        resource_id=workspace_id,
+    )

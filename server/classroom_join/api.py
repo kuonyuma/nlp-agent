@@ -122,6 +122,18 @@ async def approve_join_request(
         status="active",
         actor_user_id=principal.user_id,
     )
+    # P0-5：审批动作写入审计事件
+    await rbac_service.audit(
+        db,
+        actor_user_id=principal.user_id,
+        target_user_id=req.user_id,
+        decision="allow",
+        reason_code="classroom_join_approved",
+        permission_code="classroom:member:manage",
+        resource_type="classroom",
+        resource_id=classroom_id,
+        detail={"request_id": request_id},
+    )
     await db.commit()
     result = await db.execute(
         select(ClassJoinRequestModel)
@@ -145,6 +157,18 @@ async def reject_join_request(
     req = await service.reject_join_request(db, request_id, classroom_id, principal.user_id)
     if req is None:
         raise HTTPException(status_code=404, detail="申请不存在或已处理")
+    # P0-5：拒绝动作写入审计事件
+    await rbac_service.audit(
+        db,
+        actor_user_id=principal.user_id,
+        target_user_id=req.user_id,
+        decision="allow",
+        reason_code="classroom_join_rejected",
+        permission_code="classroom:member:manage",
+        resource_type="classroom",
+        resource_id=classroom_id,
+        detail={"request_id": request_id},
+    )
     await db.commit()
     result = await db.execute(
         select(ClassJoinRequestModel)
