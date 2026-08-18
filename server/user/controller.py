@@ -18,6 +18,8 @@ from server.rbac.service import rbac_service
 from server.auth.dependencies import Principal, WriteClaims, get_db_session
 
 from .schemas import (
+    PasswordChange,
+    PasswordReset,
     UserAdminUpdate,
     UserListResponse,
     UserResponse,
@@ -90,6 +92,42 @@ async def update_current_user(
         raise HTTPException(status_code=404, detail="User not found")
     except UserAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/me/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_own_password(
+    data: PasswordChange,
+    db: DbSession,
+    _write: WriteClaims,
+    principal: Principal,
+):
+    """Change the current user's own password (self-service).
+
+    Requires the existing password (review §6.1: old-password verification) and
+    writes an audit event. Changing the password invalidates all existing
+    sessions (review §8.1).
+    """
+    authorization_service.require(principal, Permission.IDENTITY_PROFILE_UPDATE_SELF)
+
+    service = UserService(db)
+    user = await service.get_user(principal.user_id)
+    if not await service.verify_password(user, data.current_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect",
+        )
+    await service.change_password(principal.user_id, data.new_password)
+    # 高危账号操作写入审计事件
+    await rbac_service.audit(
+        db,
+        actor_user_id=principal.user_id,
+        target_user_id=principal.user_id,
+        decision="allow",
+        reason_code="user_password_changed_self",
+        permission_code="identity:profile:update_self",
+        resource_type="user",
+        resource_id=principal.user_id,
+    )
 
 
 @router.get("/{user_id}", response_model=UserResponse)
@@ -258,6 +296,40 @@ async def revoke_user_sessions(
             reason_code="user_sessions_revoked",
             permission_code="system:user:manage",
             resource_type="user_session",
+            resource_id=user_id,
+        )
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="User not found")
+
+
+@router.post("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_user_password(
+    user_id: str,
+    data: PasswordReset,
+    db: DbSession,
+    _write: WriteClaims,
+    principal: Principal,
+):
+    """Reset another user's password (admin only, review §6.1/§8.2).
+
+    Gated by ``SYSTEM_USER_MANAGE`` so a non-admin (e.g. teacher) cannot reset
+    another user's password — this is the §10 cross-user password-reset
+    failure path. Resets invalidate the target's existing sessions (§8.1).
+    """
+    authorization_service.require(principal, Permission.SYSTEM_USER_MANAGE)
+
+    service = UserService(db)
+    try:
+        await service.change_password(user_id, data.new_password)
+        # 高危账号操作写入审计事件
+        await rbac_service.audit(
+            db,
+            actor_user_id=principal.user_id,
+            target_user_id=user_id,
+            decision="allow",
+            reason_code="user_password_reset_admin",
+            permission_code="system:user:manage",
+            resource_type="user",
             resource_id=user_id,
         )
     except UserNotFoundError:

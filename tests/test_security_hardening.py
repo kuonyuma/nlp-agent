@@ -133,6 +133,14 @@ def test_admin_revoke_session_is_admin_only_capability() -> None:
         authorization_service.require(teacher, Permission.SYSTEM_USER_MANAGE)
 
 
+def test_user_password_reset_is_admin_only_capability() -> None:
+    """§10：重置他人密码必须经 SYSTEM_USER_MANAGE，非 admin（teacher）
+    在能力层即被拒——这是「跨用户重置密码」失败路径的关卡。"""
+    teacher = _principal(roles=("teacher",))
+    with pytest.raises(AccessDeniedError):
+        authorization_service.require(teacher, Permission.SYSTEM_USER_MANAGE)
+
+
 @pytest.mark.asyncio
 async def test_admin_revoke_session_revokes_only_target_user(mysql_session_factory) -> None:
     """P1-3 核心 + §10：管理员撤销严格只作用于目标用户的会话，
@@ -213,3 +221,43 @@ async def test_admin_revoke_session_revokes_only_target_user(mysql_session_facto
         # 目标用户的 authorization_version 已递增
         victim = await svc.get_user(victim_id)
         assert victim.authorization_version == 2
+
+
+@pytest.mark.asyncio
+async def test_self_password_change_verifies_old_and_invalidates_sessions(mysql_session_factory) -> None:
+    """§6.1：自改密码必须校验旧密码；§8.1：改密后旧会话失效（authorization_version 递增）。"""
+    async with mysql_session_factory() as session:
+        user_id = str(uuid4())
+        workspace_id = str(uuid4())
+        session.add(
+            WorkspaceModel(id=workspace_id, slug=f"ws-{uuid4().hex[:8]}", name="WS", status="active")
+        )
+        session.add(
+            UserModel(
+                id=user_id,
+                username=f"u-{uuid4().hex[:8]}",
+                password_hash="not-used",
+                display_name="U",
+                authorization_version=1,
+            )
+        )
+        await session.commit()
+
+        svc = UserService(session)
+        # 设置已知口令
+        await svc.change_password(user_id, "OldPassw0rd1")
+        user = await svc.get_user(user_id)
+
+        # 旧密码校验：错误旧密码 → False
+        assert await svc.verify_password(user, "WrongPassw0rd1") is False
+        # 正确旧密码 → True（self 端点前置校验通过后才改密）
+        assert await svc.verify_password(user, "OldPassw0rd1") is True
+
+        # 自改：校验通过后改密（端点核心守卫在此复现）
+        before = await svc.get_user(user_id)
+        await svc.change_password(user_id, "NewPassw0rd2")
+        after = await svc.get_user(user_id)
+        # 改密后 authorization_version 递增 → 旧会话失效
+        assert after.authorization_version == before.authorization_version + 1
+        assert await svc.verify_password(after, "NewPassw0rd2") is True
+        assert await svc.verify_password(after, "OldPassw0rd1") is False
