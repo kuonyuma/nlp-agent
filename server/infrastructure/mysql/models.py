@@ -47,6 +47,10 @@ class UserModel(TimestampedModel, Base):
     authorization_version: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="1"
     )
+    # P1-2 / 阶段5：软删生命周期。标记删除时间而非硬删除，保留学习历史与外键级联。
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True, index=True
+    )
 
     sessions: Mapped[list["SessionModel"]] = relationship(back_populates="user")
 

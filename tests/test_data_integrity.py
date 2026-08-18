@@ -16,6 +16,7 @@ Covers the persistence + uniqueness paths required by review §4.3 / P1:
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -25,8 +26,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from server.auth.dependencies import get_db_session
 from server.infrastructure.mysql import DatabaseConfig, create_engine, create_session_factory
+from server.infrastructure.mysql.models import SessionModel, WorkspaceModel
 from server.user.schemas import UserCreate, UserUpdate
-from server.user.service import UserService
+from server.user.service import SelfDeleteForbiddenError, UserService
 
 
 # --- minimal stand-ins for the FastAPI Request/App carrying the gateway factory ---
@@ -116,4 +118,93 @@ async def test_username_lower_generated_unique(mysql_session_factory) -> None:
         except SQLAlchemyIntegrityError:
             await s.rollback()
             return
-        pytest.fail("username_lower 唯一索引未阻止大小写不同的重复用户名")
+            pytest.fail("username_lower 唯一索引未阻止大小写不同的重复用户名")
+
+
+@pytest.mark.asyncio
+async def test_disable_user_revokes_sessions(mysql_session_factory) -> None:
+    """P1-2 / 阶段5：禁用用户时必须撤销其全部数据库会话。"""
+    factory = mysql_session_factory
+    async with factory() as s:
+        async with s.begin():
+            svc = UserService(s)
+            admin = await svc.create_user(
+                UserCreate(username="admindis", password="password123", display_name="Admin")
+            )
+            target = await svc.create_user(
+                UserCreate(username="targetdis", password="password123", display_name="Target")
+            )
+            ws = WorkspaceModel(
+                id=str(uuid4()), slug="ws-dis", name="WS Dis", status="active"
+            )
+            s.add(ws)
+            sess = SessionModel(
+                id=str(uuid4()),
+                user_id=target.id,
+                workspace_id=ws.id,
+                token_hash="t",
+                csrf_hash="c",
+                expires_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            s.add(sess)
+            await s.flush()
+
+            await svc.update_user_status(
+                target.id, "disabled", actor_user_id=admin.id
+            )
+            await s.refresh(sess)
+            assert sess.revoked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_prevents_self_delete(mysql_session_factory) -> None:
+    """P1-2 / 阶段5：管理员不能删除自己的账号（自删防护使用 user_id 比较）。"""
+    factory = mysql_session_factory
+    async with factory() as s:
+        async with s.begin():
+            svc = UserService(s)
+            admin = await svc.create_user(
+                UserCreate(username="selfdel", password="password123", display_name="Self")
+            )
+            with pytest.raises(SelfDeleteForbiddenError):
+                await svc.soft_delete_user(admin.id, actor_user_id=admin.id)
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_filters_user_and_revokes_sessions(
+    mysql_session_factory,
+) -> None:
+    """P1-2 / 阶段5：软删后用户从列表消失，且其会话被撤销。"""
+    factory = mysql_session_factory
+    async with factory() as s:
+        async with s.begin():
+            svc = UserService(s)
+            admin = await svc.create_user(
+                UserCreate(username="admindel2", password="password123", display_name="Admin")
+            )
+            target = await svc.create_user(
+                UserCreate(username="targetdel2", password="password123", display_name="Target")
+            )
+            ws = WorkspaceModel(
+                id=str(uuid4()), slug="ws-sd", name="WS SD", status="active"
+            )
+            s.add(ws)
+            sess = SessionModel(
+                id=str(uuid4()),
+                user_id=target.id,
+                workspace_id=ws.id,
+                token_hash="t",
+                csrf_hash="c",
+                expires_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            s.add(sess)
+            await s.flush()
+
+            await svc.soft_delete_user(target.id, actor_user_id=admin.id)
+
+            users, total = await svc.list_users()
+            assert target.id not in {u.id for u in users}
+            assert await svc.get_user_by_username("targetdel2") is None
+
+            await s.refresh(sess)
+            assert sess.revoked_at is not None

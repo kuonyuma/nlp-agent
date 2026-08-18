@@ -12,10 +12,10 @@ from typing import Optional
 
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import VerifyMismatchError
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.infrastructure.mysql.models import UserModel, WorkspaceModel, WorkspaceMemberModel
+from server.infrastructure.mysql.models import SessionModel, UserModel, WorkspaceModel, WorkspaceMemberModel
 
 from .schemas import UserCreate, UserUpdate
 
@@ -30,6 +30,10 @@ class UserNotFoundError(UserServiceError):
 
 class UserAlreadyExistsError(UserServiceError):
     """Raised when attempting to create a duplicate user."""
+
+
+class SelfDeleteForbiddenError(UserServiceError):
+    """Raised when an actor attempts to delete their own account."""
 
 
 class PasswordHasherSingleton:
@@ -121,18 +125,24 @@ class UserService:
         return user
 
     async def get_user(self, user_id: str) -> UserModel:
-        """Get user by ID."""
+        """Get active (non-soft-deleted) user by ID."""
         user = await self.session.scalar(
-            select(UserModel).where(UserModel.id == user_id)
+            select(UserModel).where(
+                UserModel.id == user_id,
+                UserModel.deleted_at.is_(None),
+            )
         )
         if user is None:
             raise UserNotFoundError(f"User {user_id} not found")
         return user
 
     async def get_user_by_username(self, username: str) -> Optional[UserModel]:
-        """Get user by username."""
+        """Get active user by username."""
         return await self.session.scalar(
-            select(UserModel).where(UserModel.username == username)
+            select(UserModel).where(
+                UserModel.username == username,
+                UserModel.deleted_at.is_(None),
+            )
         )
 
     async def list_users(
@@ -143,9 +153,9 @@ class UserService:
         status: Optional[str] = None,
         keyword: Optional[str] = None,
     ) -> tuple[list[UserModel], int]:
-        """List users with pagination."""
-        query = select(UserModel)
-        count_query = select(func.count()).select_from(UserModel)
+        """List active (non-soft-deleted) users with pagination."""
+        query = select(UserModel).where(UserModel.deleted_at.is_(None))
+        count_query = select(func.count()).select_from(UserModel).where(UserModel.deleted_at.is_(None))
 
         if status:
             query = query.where(UserModel.status == status)
@@ -179,6 +189,17 @@ class UserService:
         await self.session.flush()
         return user
 
+    async def _revoke_user_sessions(self, user_id: str) -> None:
+        """Revoke all active database sessions for a user."""
+        await self.session.execute(
+            update(SessionModel)
+            .where(
+                SessionModel.user_id == user_id,
+                SessionModel.revoked_at.is_(None),
+            )
+            .values(revoked_at=datetime.now(timezone.utc).replace(tzinfo=None))
+        )
+
     async def update_user_status(
         self,
         user_id: str,
@@ -193,6 +214,10 @@ class UserService:
 
         # Bump authorization version to invalidate sessions
         user.authorization_version += 1
+
+        # P1-2 / 阶段5：禁用或锁定账号时同步撤销其全部会话
+        if status in ("disabled", "locked"):
+            await self._revoke_user_sessions(user_id)
 
         await self.session.flush()
         return user
@@ -214,6 +239,32 @@ class UserService:
         user.password_hash = self.hasher.hash(new_password)
         user.authorization_version += 1  # Invalidate all sessions
         user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await self.session.flush()
+        return user
+
+    async def soft_delete_user(
+        self,
+        user_id: str,
+        *,
+        actor_user_id: str,
+    ) -> UserModel:
+        """Soft-delete a user account (admin operation).
+
+        Preserves learning history and related records while making the account
+        invisible to normal queries. Uses ``user_id`` comparison for the
+        self-delete guard (not username) per review P1-2.
+        """
+        if user_id == actor_user_id:
+            raise SelfDeleteForbiddenError("Admin cannot delete their own account")
+
+        user = await self.get_user(user_id)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        user.status = "disabled"
+        user.deleted_at = now
+        user.updated_at = now
+        user.authorization_version += 1
+
+        await self._revoke_user_sessions(user_id)
         await self.session.flush()
         return user
 

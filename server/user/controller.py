@@ -23,7 +23,12 @@ from .schemas import (
     UserResponse,
     UserUpdate,
 )
-from .service import UserService, UserNotFoundError, UserAlreadyExistsError
+from .service import (
+    SelfDeleteForbiddenError,
+    UserAlreadyExistsError,
+    UserNotFoundError,
+    UserService,
+)
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -191,3 +196,35 @@ async def enable_user(
         )
     except UserNotFoundError:
         raise HTTPException(status_code=404, detail="User not found")
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: str,
+    db: DbSession,
+    _write: WriteClaims,
+    principal: Principal,
+):
+    """Soft-delete a user account (admin only)."""
+    authorization_service.require(principal, Permission.SYSTEM_USER_MANAGE)
+
+    service = UserService(db)
+    try:
+        await service.soft_delete_user(
+            user_id, actor_user_id=principal.user_id
+        )
+        # 高危账号操作写入审计事件
+        await rbac_service.audit(
+            db,
+            actor_user_id=principal.user_id,
+            target_user_id=user_id,
+            decision="allow",
+            reason_code="user_account_soft_deleted",
+            permission_code="system:user:manage",
+            resource_type="user",
+            resource_id=user_id,
+        )
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="User not found")
+    except SelfDeleteForbiddenError:
+        raise HTTPException(status_code=403, detail="Cannot delete your own account")
