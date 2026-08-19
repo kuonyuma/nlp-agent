@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { GuidedBlueprintCatalogEditor } from "./TeacherCatalogManager";
 import { TeacherWorkspace } from "./TeacherWorkspace";
+import { TeacherRoutes } from "../routes";
 
 const { ensureAuthMock, getSettingsMock, getTeacherCatalog, updateTeacherCatalog } = vi.hoisted(() => ({
   ensureAuthMock: vi.fn(),
@@ -168,5 +170,20 @@ describe("TeacherWorkspace catalog CRUD", () => {
     expect(screen.getByText("主题健康度")).toBeVisible();
     expect(screen.getByText("知识点掌握情况")).toBeVisible();
     expect(screen.getByText("注意力")).toBeVisible();
+  });
+
+  it("updates the visible page when a nested teacher route changes without a full reload", async () => {
+    render(
+      <MemoryRouter initialEntries={["/teacher/topics"]}>
+        <Routes>
+          <Route path="/teacher/*" element={<TeacherRoutes />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("button", { name: "主题与知识点" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "学生问题" }));
+
+    expect(await screen.findByText("从提问统计发现教学线索")).toBeVisible();
   });
 });

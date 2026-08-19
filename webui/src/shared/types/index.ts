@@ -8,6 +8,8 @@ export type TurnStatus =
 
 export interface AuthSession {
   user_id: string;
+  username?: string;
+  display_name?: string;
   workspace_ids: string[];
   roles: string[];
   csrf_token: string;

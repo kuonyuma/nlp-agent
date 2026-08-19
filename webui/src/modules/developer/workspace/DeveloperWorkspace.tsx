@@ -172,7 +172,8 @@ export function ReleaseNotes() {
 }
 
 export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: DeveloperPage; onNavigate?: (page: DeveloperPage) => void }) {
-  const [page, setPage] = useState<DeveloperPage>(routedPage ?? currentPage);
+  const [localPage, setPage] = useState<DeveloperPage>(routedPage ?? currentPage);
+  const page = routedPage ?? localPage;
   const [snapshot, setSnapshot] = useState<DeveloperSnapshot | null>(null);
   const [visiblePages, setVisiblePages] = useState<Set<DeveloperPage>>(new Set());
   const [error, setError] = useState("");
