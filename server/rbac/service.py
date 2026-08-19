@@ -124,7 +124,9 @@ class RbacService:
         membership are deliberately reloaded here so a changed assignment takes
         effect on the next HTTP request (and on WebSocket guard ticks).
         """
-        user = await session.scalar(select(UserModel).where(UserModel.username == username))
+        user = await session.scalar(
+            select(UserModel).where(UserModel.username_lower == username.casefold())
+        )
         if user is None:
             raise PermissionError("authenticated user is not active in RBAC")
         return await self.principal_for_user_id(session, user.id)

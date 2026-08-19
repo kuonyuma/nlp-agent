@@ -188,7 +188,7 @@ class UserService:
         """Get active user by username."""
         return await self.session.scalar(
             select(UserModel).where(
-                UserModel.username == username,
+                UserModel.username_lower == username.casefold(),
                 UserModel.deleted_at.is_(None),
             )
         )

@@ -37,12 +37,14 @@ def test_record_parses_json_state_columns_returned_as_text() -> None:
 
 def test_ensure_conversation_creates_and_verifies_the_parent_record() -> None:
     connection = MagicMock()
+    empty = MagicMock()
+    empty.mappings.return_value.first.return_value = None
     lookup = MagicMock()
     lookup.mappings.return_value.one.return_value = {
         "workspace_id": "default",
         "owner_user_id": "user-1",
     }
-    connection.execute.side_effect = [MagicMock(), lookup]
+    connection.execute.side_effect = [empty, MagicMock(), lookup]
 
     MySQLGatewayRepository._ensure_conversation(
         connection,
@@ -52,7 +54,7 @@ def test_ensure_conversation_creates_and_verifies_the_parent_record() -> None:
         title="hello",
     )
 
-    insert_call = connection.execute.call_args_list[0]
+    insert_call = connection.execute.call_args_list[1]
     assert "INSERT INTO nlp_conversations" in str(insert_call.args[0])
     assert insert_call.args[1] == {
         "id": "session_ecd63e64644e4df28801b77a49efe6e8",
@@ -64,12 +66,14 @@ def test_ensure_conversation_creates_and_verifies_the_parent_record() -> None:
 
 def test_ensure_conversation_rejects_an_identity_collision() -> None:
     connection = MagicMock()
+    empty = MagicMock()
+    empty.mappings.return_value.first.return_value = None
     lookup = MagicMock()
     lookup.mappings.return_value.one.return_value = {
         "workspace_id": "other",
         "owner_user_id": "user-2",
     }
-    connection.execute.side_effect = [MagicMock(), lookup]
+    connection.execute.side_effect = [empty, MagicMock(), lookup]
 
     with pytest.raises(PermissionError, match="conversation identity"):
         MySQLGatewayRepository._ensure_conversation(

@@ -123,7 +123,6 @@ _DEVELOPER: Final[frozenset[Permission]] = _TEACHER | {
     Permission.SYSTEM_RELEASE_NOTES_MANAGE,
     Permission.SYSTEM_PERMISSION_READ,
     Permission.SYSTEM_AUDIT_READ,
-    Permission.SYSTEM_SENSITIVE_DATA_READ,
 }
 
 ROLE_PERMISSIONS: Final[dict[str, frozenset[Permission]]] = {

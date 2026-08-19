@@ -10,6 +10,7 @@ from server.infrastructure.mysql import DatabaseConfig, create_engine, create_se
 
 from server.infrastructure.mysql.models import SessionModel, UserModel, WorkspaceMemberModel
 from server.rbac.service import rbac_service
+from core.rbac import Permission
 from server.user.schemas import UserCreate
 from server.user.service import UserService
 from server.web.auth import AuthenticationError, OriginRejectedError
@@ -83,6 +84,54 @@ async def test_new_user_is_persisted_with_guest_role(mysql_session_factory) -> N
 
 
 @pytest.mark.asyncio
+async def test_new_user_can_login_case_insensitively(mysql_session_factory) -> None:
+    auth = DatabaseSessionAuth(allowed_origins=["http://testserver"])
+    async with mysql_session_factory() as session:
+        service = UserService(session)
+        user = await service.create_user(
+            data=UserCreate(
+                username=f"Login{uuid4().hex[:10]}",
+                display_name="Login user",
+                password="InitialPw0rd1",
+            )
+        )
+        await session.commit()
+
+    token, claims = await auth.login(
+        mysql_session_factory,
+        user.username.upper(),
+        "InitialPw0rd1",
+        client_key="test-new-user-login",
+    )
+    assert claims.user_id == user.id
+    authenticated = await auth.authenticate(mysql_session_factory, token)
+    assert authenticated.user_id == user.id
+
+
+@pytest.mark.asyncio
+async def test_database_developer_role_does_not_include_sensitive_data_by_default(
+    mysql_session_factory,
+) -> None:
+    async with mysql_session_factory() as session:
+        user = await UserService(session).create_user(
+            data=UserCreate(
+                username=f"developer{uuid4().hex[:10]}",
+                display_name="Developer user",
+                password="InitialPw0rd1",
+            )
+        )
+        await rbac_service.replace_user_roles(
+            session,
+            user_id=user.id,
+            role_codes={"developer"},
+            assigned_by_user_id=None,
+        )
+        principal = await rbac_service.principal_for_user_id(session, user.id)
+
+    assert Permission.SYSTEM_SENSITIVE_DATA_READ.value not in principal.permissions
+
+
+@pytest.mark.asyncio
 async def test_password_change_revokes_database_sessions(mysql_session_factory) -> None:
     auth = DatabaseSessionAuth(allowed_origins=["http://testserver"])
     async with mysql_session_factory() as session:
@@ -112,6 +161,10 @@ async def test_password_change_revokes_database_sessions(mysql_session_factory) 
         )
         assert (await auth.authenticate(mysql_session_factory, token)).session_id == claims.session_id
         await service.change_password(user.id, "NewPassw0rd2")
+        # UserService participates in the request transaction; the controller
+        # owns the commit boundary. Commit before validating from a separate
+        # authentication session so MySQL does not retain the update lock.
+        await session.commit()
         remaining = await session.scalar(
             select(SessionModel.revoked_at).where(SessionModel.user_id == user.id)
         )

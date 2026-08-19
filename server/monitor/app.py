@@ -124,11 +124,14 @@ def create_monitor_app(
                 identity = await rbac_service.principal_for_user_id(
                     db_session, session.user_id
                 )
-        elif session.roles == frozenset({"guest"}) or not auth_injected:
-            identity = session.principal()
         else:
-            async with rbac_runtime.session_factory() as db_session:
-                identity = await rbac_service.principal_for_username(db_session, session.user_id)
+            # An injected SameOriginSessionAuth is the self-contained adapter
+            # used by local/test monitor deployments.  Its signed claims are
+            # already the authoritative identity for that deployment; trying
+            # to reload a synthetic user such as ``local`` from MySQL makes
+            # the compatibility seam unusable.  Production always arrives as
+            # DatabaseSessionClaims and takes the branch above.
+            identity = session.principal()
         authorization_service.require(identity, Permission.SYSTEM_RUNTIME_MONITOR)
         return identity
 

@@ -3,7 +3,6 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { api } from "@/platform/http/api";
 import { NotFoundPage } from "@/app/NotFoundPage";
-import { AuthProvider } from "@/platform/auth/AuthContext";
 import { AdminLayout } from "./AdminLayout";
 import { WorkspaceListPage } from "./WorkspaceListPage";
 import { ClassroomManagementPage } from "./ClassroomManagementPage";
@@ -59,21 +58,19 @@ function AdminOverview() {
 
 export function AdminRoutes() {
   return (
-    <AuthProvider>
-      <AdminLayout>
-        <Routes>
-          <Route index element={<AdminOverview />} />
-          <Route path="workspaces" element={<WorkspaceListPage />} />
-          <Route path="classrooms" element={<ClassroomManagementPage />} />
-          <Route path="users" element={<Navigate to="/developer/users" replace />} />
-          <Route path="roles" element={<Navigate to="/developer/roles" replace />} />
-          <Route path="menus" element={<Navigate to="/developer/menus" replace />} />
-          <Route path="audit" element={<Navigate to="/developer/audit" replace />} />
-          <Route path="sessions" element={<Navigate to="/developer/sessions" replace />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
-      </AdminLayout>
-    </AuthProvider>
+    <AdminLayout>
+      <Routes>
+        <Route index element={<AdminOverview />} />
+        <Route path="workspaces" element={<WorkspaceListPage />} />
+        <Route path="classrooms" element={<ClassroomManagementPage />} />
+        <Route path="users" element={<Navigate to="/developer/users" replace />} />
+        <Route path="roles" element={<Navigate to="/developer/roles" replace />} />
+        <Route path="menus" element={<Navigate to="/developer/menus" replace />} />
+        <Route path="audit" element={<Navigate to="/developer/audit" replace />} />
+        <Route path="sessions" element={<Navigate to="/developer/sessions" replace />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
+    </AdminLayout>
   );
 }
 
