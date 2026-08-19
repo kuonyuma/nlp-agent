@@ -29,10 +29,63 @@ depends_on = None
 SENSITIVE_DATA_PERMISSION = Permission.SYSTEM_SENSITIVE_DATA_READ
 
 
+def _column_names(table_name: str) -> set[str]:
+    if context.is_offline_mode():
+        return set()
+    return {column["name"] for column in sa.inspect(op.get_bind()).get_columns(table_name)}
+
+
+def _add_column_if_missing(table_name: str, column: sa.Column) -> None:
+    if context.is_offline_mode() or column.name not in _column_names(table_name):
+        op.add_column(table_name, column)
+
+
+def _index_names(table_name: str) -> set[str]:
+    if context.is_offline_mode():
+        return set()
+    return {index["name"] for index in sa.inspect(op.get_bind()).get_indexes(table_name)}
+
+
+def _create_index_if_missing(index_name: str, table_name: str, columns: list[str]) -> None:
+    if context.is_offline_mode() or index_name not in _index_names(table_name):
+        op.create_index(index_name, table_name, columns)
+
+
+def _foreign_key_exists(table_name: str, columns: list[str], referred_table: str) -> bool:
+    if context.is_offline_mode():
+        return False
+    return any(
+        tuple(foreign_key["constrained_columns"]) == tuple(columns)
+        and foreign_key["referred_table"] == referred_table
+        for foreign_key in sa.inspect(op.get_bind()).get_foreign_keys(table_name)
+    )
+
+
+def _create_foreign_key_if_missing(
+    constraint_name: str,
+    table_name: str,
+    referred_table: str,
+    columns: list[str],
+    referred_columns: list[str],
+) -> None:
+    if context.is_offline_mode() or not _foreign_key_exists(table_name, columns, referred_table):
+        op.create_foreign_key(
+            constraint_name,
+            table_name,
+            referred_table,
+            columns,
+            referred_columns,
+            ondelete="RESTRICT",
+        )
+
+
 def upgrade() -> None:
-    op.add_column("nlp_users", sa.Column("last_login_at", mysql.DATETIME(fsp=6), nullable=True))
-    op.create_index("ix_nlp_users_last_login_at", "nlp_users", ["last_login_at"])
-    op.add_column(
+    _add_column_if_missing(
+        "nlp_users",
+        sa.Column("last_login_at", mysql.DATETIME(fsp=6), nullable=True),
+    )
+    _create_index_if_missing("ix_nlp_users_last_login_at", "nlp_users", ["last_login_at"])
+    _add_column_if_missing(
         "nlp_sessions",
         sa.Column(
             "issued_at",
@@ -41,8 +94,11 @@ def upgrade() -> None:
             server_default=sa.text("UTC_TIMESTAMP(6)"),
         ),
     )
-    op.add_column("nlp_sessions", sa.Column("last_seen_at", mysql.DATETIME(fsp=6), nullable=True))
-    op.add_column(
+    _add_column_if_missing(
+        "nlp_sessions",
+        sa.Column("last_seen_at", mysql.DATETIME(fsp=6), nullable=True),
+    )
+    _add_column_if_missing(
         "nlp_sessions",
         sa.Column("authorization_version", sa.Integer(), nullable=False, server_default="1"),
     )
@@ -69,7 +125,10 @@ def upgrade() -> None:
     op.create_index("ix_nlp_ws_tickets_user_id", "nlp_ws_tickets", ["user_id"])
     op.create_index("ix_nlp_ws_tickets_expires_at", "nlp_ws_tickets", ["expires_at"])
 
-    op.add_column(
+    # ConversationModel is imported by the early master-data migration.  On a
+    # clean database that means ``channel`` already exists before this
+    # lifecycle migration runs; on older databases it still needs to be added.
+    _add_column_if_missing(
         "nlp_conversations",
         sa.Column("channel", sa.String(32), nullable=False, server_default="web"),
     )
@@ -180,25 +239,29 @@ def upgrade() -> None:
         "nlp_langgraph_checkpoint_blobs",
         "nlp_langgraph_checkpoint_writes",
     ):
-        op.add_column(table, sa.Column("workspace_id", sa.String(36, collation="ascii_bin"), nullable=True))
-        op.add_column(table, sa.Column("owner_user_id", sa.String(36, collation="ascii_bin"), nullable=True))
-        op.create_index(f"ix_{table}_workspace_id", table, ["workspace_id"])
-        op.create_index(f"ix_{table}_owner_user_id", table, ["owner_user_id"])
-        op.create_foreign_key(
+        _add_column_if_missing(
+            table,
+            sa.Column("workspace_id", sa.String(36, collation="ascii_bin"), nullable=True),
+        )
+        _add_column_if_missing(
+            table,
+            sa.Column("owner_user_id", sa.String(36, collation="ascii_bin"), nullable=True),
+        )
+        _create_index_if_missing(f"ix_{table}_workspace_id", table, ["workspace_id"])
+        _create_index_if_missing(f"ix_{table}_owner_user_id", table, ["owner_user_id"])
+        _create_foreign_key_if_missing(
             f"fk_{table}_workspace_id",
             table,
             "nlp_workspaces",
             ["workspace_id"],
             ["id"],
-            ondelete="RESTRICT",
         )
-        op.create_foreign_key(
+        _create_foreign_key_if_missing(
             f"fk_{table}_owner_user_id",
             table,
             "nlp_users",
             ["owner_user_id"],
             ["id"],
-            ondelete="RESTRICT",
         )
 
 
@@ -208,7 +271,9 @@ def downgrade() -> None:
     op.execute(sa.text("DELETE FROM nlp_role_permission_scopes WHERE role_id = :role_id AND permission_id = :permission_id").bindparams(role_id=developer, permission_id=permission))
     op.execute(sa.text("DELETE FROM nlp_role_permissions WHERE role_id = :role_id AND permission_id = :permission_id").bindparams(role_id=developer, permission_id=permission))
     op.execute(sa.text("DELETE FROM nlp_permissions WHERE id = :permission_id").bindparams(permission_id=permission))
-    op.drop_column("nlp_conversations", "channel")
+    # ``channel`` may have been created by the earlier dynamic master-data
+    # migration on a clean database, so preserve it during downgrade rather
+    # than risking removal of a pre-existing column.
     for table in (
         "nlp_langgraph_checkpoint_writes",
         "nlp_langgraph_checkpoint_blobs",
