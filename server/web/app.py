@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyCookie
+from sqlalchemy import select
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from configs.settings import settings
@@ -75,6 +76,7 @@ from server.web.developer_runtime import (
 from server.teacher.models import ExerciseBlueprint, GuidedBlueprint, ReviewBlueprint, UpdateTeacherCatalog, UpdateTeachingGoals
 from server.teacher.service import teacher_service
 from server.rbac.service import rbac_service
+from server.infrastructure.mysql.models import UserModel
 from server.release_notes.service import (
     ReleaseNoteConflictError,
     ReleaseNoteNotFoundError,
@@ -313,6 +315,31 @@ def create_app(
     ) -> AuthenticatedPrincipal:
         return await resolve_principal(request, claims)
 
+    async def account_identity(
+        request: Request,
+        claims: SessionClaims | DatabaseSessionClaims,
+        principal: AuthenticatedPrincipal,
+    ) -> tuple[str, str]:
+        """Return stable human-readable account fields for the browser session."""
+        if not isinstance(claims, DatabaseSessionClaims):
+            # Injected/local authentication has no separate user-profile table.
+            return principal.user_id, principal.user_id
+        factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if factory is None:
+            raise AuthenticationError("database authentication is unavailable")
+        async with factory() as session:
+            row = (
+                await session.execute(
+                    select(UserModel.username, UserModel.display_name).where(
+                        UserModel.id == principal.user_id,
+                        UserModel.deleted_at.is_(None),
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            raise AuthenticationError("authenticated user profile is unavailable")
+        return row.username, row.display_name
+
     async def write_access(
         request: Request,
         claims: Annotated[SessionClaims | DatabaseSessionClaims, Depends(current_claims)],
@@ -475,8 +502,19 @@ def create_app(
             path="/",
         )
         resolved_principal = await resolve_principal(request, claims) if isinstance(claims, DatabaseSessionClaims) else None
+        identity_principal = resolved_principal
+        if identity_principal is None:
+            assert isinstance(claims, SessionClaims)
+            identity_principal = claims.principal()
+        username, display_name = await account_identity(
+            request,
+            claims,
+            identity_principal,
+        )
         return {
             "user_id": claims.user_id,
+            "username": username,
+            "display_name": display_name,
             "workspace_ids": sorted(resolved_principal.workspace_ids) if resolved_principal is not None else sorted(claims.workspace_ids),
             "roles": sorted(resolved_principal.roles) if resolved_principal is not None else sorted(claims.roles),
             "permissions": sorted(resolved_principal.permissions) if resolved_principal is not None else [],
@@ -496,8 +534,11 @@ def create_app(
             csrf_token = await database_auth.rotate_csrf(factory, claims)
             claims = DatabaseSessionClaims(**{**claims.__dict__, "csrf_token": csrf_token})
         principal = await resolve_principal(request, claims)
+        username, display_name = await account_identity(request, claims, principal)
         return {
             "user_id": principal.user_id,
+            "username": username,
+            "display_name": display_name,
             "workspace_ids": sorted(principal.workspace_ids),
             "roles": sorted(principal.roles),
             "permissions": sorted(principal.permissions),
