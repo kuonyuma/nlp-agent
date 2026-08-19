@@ -169,7 +169,7 @@ class MySQLGatewayRepository:
     def events_after(self, turn_id: str, *, after_sequence: int = 0, limit: int = 500) -> list[GatewayEvent]:
         with self._engine.connect() as c:
             rows = c.execute(text("SELECT e.*, t.conversation_id FROM nlp_turn_events e JOIN nlp_turns t ON t.id=e.turn_id WHERE e.turn_id=:id AND e.sequence>:after ORDER BY e.sequence LIMIT :limit"), {"id": turn_id, "after": max(0, after_sequence), "limit": min(max(1, limit), 2000)}).mappings().all()
-        return [GatewayEvent(event_id=r["id"], turn_id=turn_id, session_id=r["conversation_id"], sequence=r["sequence"], type=GatewayEventType(r["event_type"]), created_at=r["created_at"], payload=r["payload_json"] or {}) for r in rows]
+        return [GatewayEvent(event_id=r["id"], turn_id=turn_id, session_id=r["conversation_id"], sequence=r["sequence"], type=GatewayEventType(r["event_type"]), created_at=r["created_at"], payload=self._json(r["payload_json"])) for r in rows]
 
     def ensure_event(self, *, turn_id: str, session_id: str, event_type: GatewayEventType, payload=None) -> GatewayEvent:
         existing = next((e for e in self.events_after(turn_id, limit=2000) if e.type == event_type), None)
@@ -518,7 +518,11 @@ class MySQLGatewayRepository:
             topics = [
                 {
                     "id": row["id"], "name": row["name"], "description": row["description"],
-                    "status": row["status"], "sort_order": row["sort_order"],
+                    # ``sort_order`` is persisted for deterministic storage
+                    # ordering, but it is not part of the public CourseTopic
+                    # contract.  Keep the transport shape aligned with the
+                    # SQLite repository and the strict teacher schemas.
+                    "status": row["status"],
                     "knowledge_points": points_by_topic.get(str(row["id"]), []),
                 }
                 for row in topic_rows
@@ -530,7 +534,11 @@ class MySQLGatewayRepository:
         blueprints = {"exercise": [], "review": [], "guided": []}
         for row in blueprint_rows:
             blueprint = self._json(row["payload_json"])
-            blueprint.setdefault("kind", row["kind"])
+            # ``kind`` is the normalized table discriminator, not a public
+            # blueprint field.  Older payloads may not contain it, while newer
+            # writes store it for persistence queries; strip both forms at the
+            # repository boundary before Pydantic validation.
+            blueprint.pop("kind", None)
             blueprints.get(str(row["kind"]), []).append(blueprint)
         value = {
             "workspace_id": workspace_id,

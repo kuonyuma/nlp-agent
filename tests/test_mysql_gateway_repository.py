@@ -35,6 +35,69 @@ def test_record_parses_json_state_columns_returned_as_text() -> None:
     assert record.exercise_state is None
 
 
+def test_public_catalog_does_not_expose_mysql_storage_discriminators() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    connection = MagicMock()
+
+    catalog = MagicMock()
+    catalog.mappings.return_value.first.return_value = {
+        "revision": 1,
+        "updated_at": None,
+    }
+    topics = MagicMock()
+    topics.mappings.return_value.all.return_value = [
+        {
+            "id": "topic-1",
+            "name": "Transformer",
+            "description": "",
+            "status": "enabled",
+            "sort_order": 0,
+        }
+    ]
+    points = MagicMock()
+    points.mappings.return_value.all.return_value = []
+    blueprints = MagicMock()
+    blueprints.mappings.return_value.all.return_value = [
+        {
+            "kind": "exercise",
+            "payload_json": '{"id":"exercise-1","name":"QKV","kind":"exercise"}',
+        }
+    ]
+    connection.execute.side_effect = [catalog, topics, points, blueprints]
+    repository._engine = MagicMock()
+    repository._engine.connect.return_value.__enter__.return_value = connection
+
+    result = repository.get_teaching_catalog("workspace-1")
+
+    assert "sort_order" not in result["catalog"]["topics"][0]
+    assert result["catalog"]["exercise_blueprints"] == [
+        {"id": "exercise-1", "name": "QKV"}
+    ]
+
+
+def test_events_after_decodes_mysql_json_payloads() -> None:
+    repository = object.__new__(MySQLGatewayRepository)
+    connection = MagicMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        {
+            "id": "event-1",
+            "conversation_id": "session-1",
+            "sequence": 1,
+            "event_type": "message.delta",
+            "created_at": "2026-08-01T00:00:00Z",
+            "payload_json": '{"delta":"hello"}',
+        }
+    ]
+    connection.execute.return_value = rows
+    repository._engine = MagicMock()
+    repository._engine.connect.return_value.__enter__.return_value = connection
+
+    events = repository.events_after("turn-1")
+
+    assert events[0].payload == {"delta": "hello"}
+
+
 def test_ensure_conversation_creates_and_verifies_the_parent_record() -> None:
     connection = MagicMock()
     empty = MagicMock()
