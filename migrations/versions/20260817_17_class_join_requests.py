@@ -45,6 +45,16 @@ def upgrade() -> None:
         sa.UniqueConstraint("class_id", "user_id", "status", name="uq_nlp_class_join_requests_cls_usr_sts"),
         *_timestamps(),
     )
+    # Apply the human-readable table comment immediately so the table matches
+    # ``TABLE_COMMENTS["nlp_class_join_requests"]`` on a fresh database. The
+    # earlier ``20260815_17_table_comments`` bulk-ALTER intentionally skips
+    # tables that do not yet exist at its chain position, so each newly added
+    # table is responsible for setting its own comment here or via a
+    # dedicated ``*_table_comments`` follow-up (see 20260817_18).
+    op.execute(
+        "ALTER TABLE `nlp_class_join_requests` "
+        "COMMENT = '课堂加入申请与审批流转（用户管理）。'"
+    )
 
 
 def downgrade() -> None:
