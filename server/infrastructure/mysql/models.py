@@ -20,6 +20,7 @@ from sqlalchemy.dialects.mysql import BIGINT, DATETIME
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampedModel
+from .table_comments import TABLE_COMMENTS
 
 
 UUID = String(36, collation="ascii_bin")
@@ -714,3 +715,7 @@ class ClassJoinRequestModel(TimestampedModel, Base):
     cls: Mapped["ClassroomModel"] = relationship("ClassroomModel", foreign_keys=[class_id])
     user_: Mapped["UserModel"] = relationship("UserModel", foreign_keys=[user_id])
     reviewer: Mapped["UserModel | None"] = relationship("UserModel", foreign_keys=[reviewed_by])
+
+
+for _table_name, _table_comment in TABLE_COMMENTS.items():
+    Base.metadata.tables[_table_name].comment = _table_comment
