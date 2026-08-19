@@ -28,12 +28,19 @@ from server.web.auth import (
     SameOriginSessionAuth,
     SessionClaims,
 )
+from server.web.database_auth import DatabaseSessionClaims
 
 
-def _claims(request: Request) -> SessionClaims:
+async def _claims(request: Request) -> SessionClaims | DatabaseSessionClaims:
     """Authenticate the session cookie; raises AuthenticationError on failure."""
     auth: SameOriginSessionAuth = request.app.state.auth
     token = request.cookies.get(auth.cookie_name)
+    if not getattr(request.app.state, "auth_injected", False):
+        factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if factory is None:
+            raise AuthenticationError("database authentication is unavailable")
+        database_auth = request.app.state.database_auth
+        return await database_auth.authenticate(factory, token)
     return auth.authenticate(token)
 
 
@@ -62,7 +69,7 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 async def get_current_principal(
     request: Request,
-    claims: Annotated[SessionClaims, Depends(_claims)],
+    claims: Annotated[SessionClaims | DatabaseSessionClaims, Depends(_claims)],
 ) -> AuthenticatedPrincipal:
     """Resolve roles/workspace/ classroom membership from MySQL.
 
@@ -70,6 +77,12 @@ async def get_current_principal(
     lightweight principal, everyone else is reloaded from ``nlp_users`` by
     username (the signed session carries the username as ``user_id``).
     """
+    if isinstance(claims, DatabaseSessionClaims):
+        factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if factory is None:
+            raise AuthenticationError("database authentication is unavailable")
+        async with factory() as session:
+            return await rbac_service.principal_for_user_id(session, claims.user_id)
     if claims.roles == frozenset({"guest"}):
         return claims.principal()
     factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
@@ -81,15 +94,20 @@ async def get_current_principal(
 
 async def get_write_access(
     request: Request,
-    claims: Annotated[SessionClaims, Depends(_claims)],
+    claims: Annotated[SessionClaims | DatabaseSessionClaims, Depends(_claims)],
     csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
 ) -> SessionClaims:
     """Validate CSRF token and same-origin for state-changing requests."""
-    auth: SameOriginSessionAuth = request.app.state.auth
-    auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
-    auth.require_csrf(claims, csrf_token)
+    if isinstance(claims, DatabaseSessionClaims):
+        database_auth = request.app.state.database_auth
+        database_auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
+        database_auth.require_csrf(claims, csrf_token)
+    else:
+        auth: SameOriginSessionAuth = request.app.state.auth
+        auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
+        auth.require_csrf(claims, csrf_token)
     return claims
 
 
 Principal = Annotated[AuthenticatedPrincipal, Depends(get_current_principal)]
-WriteClaims = Annotated[SessionClaims, Depends(get_write_access)]
+WriteClaims = Annotated[SessionClaims | DatabaseSessionClaims, Depends(get_write_access)]

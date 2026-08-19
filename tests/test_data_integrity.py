@@ -68,12 +68,13 @@ async def mysql_session_factory():
 async def test_request_transaction_commits_user_write(mysql_session_factory) -> None:
     """P1-1: 请求内的写（更新用户）必须在请求结束时提交，否则不会落库。"""
     factory = mysql_session_factory
+    username = f"diuser{uuid4().hex[:10]}"
 
     # 先建一个用户（显式事务提交，与依赖无关）
     async with factory() as s:
         async with s.begin():
             user = await UserService(s).create_user(
-                UserCreate(username="diuser1", password="password123", display_name="DI User 1")
+                UserCreate(username=username, password="password123", display_name="DI User 1")
             )
     uid = user.id
 
@@ -94,6 +95,7 @@ async def test_request_transaction_commits_user_write(mysql_session_factory) -> 
 async def test_username_lower_generated_unique(mysql_session_factory) -> None:
     """§4.3 / 阶段4: 两条仅大小写不同的用户名应被 username_lower 唯一索引拒绝。"""
     factory = mysql_session_factory
+    username = f"bobdi{uuid4().hex[:10]}"
     async with factory() as s:
         # 绕过 Pydantic 校验，直接插入两条仅大小写不同的用户名，隔离验证生成列
         await s.execute(
@@ -102,7 +104,7 @@ async def test_username_lower_generated_unique(mysql_session_factory) -> None:
                 "(id, username, password_hash, display_name, status, authorization_version, created_at, updated_at) "
                 "VALUES (:id, :username, 'x', 'B', 'active', 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))"
             ),
-            {"id": str(uuid4()), "username": "BobDI"},
+            {"id": str(uuid4()), "username": username.upper()},
         )
         await s.flush()
         try:
@@ -112,30 +114,31 @@ async def test_username_lower_generated_unique(mysql_session_factory) -> None:
                     "(id, username, password_hash, display_name, status, authorization_version, created_at, updated_at) "
                     "VALUES (:id, :username, 'x', 'B2', 'active', 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))"
                 ),
-                {"id": str(uuid4()), "username": "bobdi"},
+                {"id": str(uuid4()), "username": username.lower()},
             )
             await s.commit()
         except SQLAlchemyIntegrityError:
             await s.rollback()
             return
-            pytest.fail("username_lower 唯一索引未阻止大小写不同的重复用户名")
+        pytest.fail("username_lower 唯一索引未阻止大小写不同的重复用户名")
 
 
 @pytest.mark.asyncio
 async def test_disable_user_revokes_sessions(mysql_session_factory) -> None:
     """P1-2 / 阶段5：禁用用户时必须撤销其全部数据库会话。"""
     factory = mysql_session_factory
+    suffix = uuid4().hex[:10]
     async with factory() as s:
         async with s.begin():
             svc = UserService(s)
             admin = await svc.create_user(
-                UserCreate(username="admindis", password="password123", display_name="Admin")
+                UserCreate(username=f"admindis{suffix}", password="password123", display_name="Admin")
             )
             target = await svc.create_user(
-                UserCreate(username="targetdis", password="password123", display_name="Target")
+                UserCreate(username=f"targetdis{suffix}", password="password123", display_name="Target")
             )
             ws = WorkspaceModel(
-                id=str(uuid4()), slug="ws-dis", name="WS Dis", status="active"
+                id=str(uuid4()), slug=f"ws-dis-{suffix}", name="WS Dis", status="active"
             )
             s.add(ws)
             # Flush the workspace first so the SessionModel FK parent row
@@ -168,7 +171,7 @@ async def test_soft_delete_prevents_self_delete(mysql_session_factory) -> None:
         async with s.begin():
             svc = UserService(s)
             admin = await svc.create_user(
-                UserCreate(username="selfdel", password="password123", display_name="Self")
+                UserCreate(username=f"selfdel{uuid4().hex[:10]}", password="password123", display_name="Self")
             )
             with pytest.raises(SelfDeleteForbiddenError):
                 await svc.soft_delete_user(admin.id, actor_user_id=admin.id)
@@ -180,17 +183,19 @@ async def test_soft_delete_filters_user_and_revokes_sessions(
 ) -> None:
     """P1-2 / 阶段5：软删后用户从列表消失，且其会话被撤销。"""
     factory = mysql_session_factory
+    suffix = uuid4().hex[:10]
+    target_username = f"targetdel2{suffix}"
     async with factory() as s:
         async with s.begin():
             svc = UserService(s)
             admin = await svc.create_user(
-                UserCreate(username="admindel2", password="password123", display_name="Admin")
+                UserCreate(username=f"admindel2{suffix}", password="password123", display_name="Admin")
             )
             target = await svc.create_user(
-                UserCreate(username="targetdel2", password="password123", display_name="Target")
+                UserCreate(username=target_username, password="password123", display_name="Target")
             )
             ws = WorkspaceModel(
-                id=str(uuid4()), slug="ws-sd", name="WS SD", status="active"
+                id=str(uuid4()), slug=f"ws-sd-{suffix}", name="WS SD", status="active"
             )
             s.add(ws)
             # Flush the workspace first so the SessionModel FK parent row
@@ -212,7 +217,7 @@ async def test_soft_delete_filters_user_and_revokes_sessions(
 
             users, total = await svc.list_users()
             assert target.id not in {u.id for u in users}
-            assert await svc.get_user_by_username("targetdel2") is None
+            assert await svc.get_user_by_username(target_username) is None
 
             await s.refresh(sess)
             assert sess.revoked_at is not None

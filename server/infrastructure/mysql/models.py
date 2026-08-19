@@ -52,6 +52,9 @@ class UserModel(TimestampedModel, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         DATETIME(fsp=6), nullable=True, index=True
     )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True, index=True
+    )
 
     sessions: Mapped[list["SessionModel"]] = relationship(back_populates="user")
 
@@ -244,10 +247,40 @@ class SessionModel(TimestampedModel, Base):
     workspace_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     csrf_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    authorization_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
     expires_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
 
     user: Mapped[UserModel] = relationship(back_populates="sessions")
+
+
+class WsTicketModel(Base):
+    __tablename__ = "nlp_ws_tickets"
+    __table_args__ = (
+        UniqueConstraint("ticket_hash", name="uq_nlp_ws_tickets_ticket_hash"),
+        Index("ix_nlp_ws_tickets_session_expires", "auth_session_id", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    auth_session_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False
+    )
+    ticket_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    origin: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
 
 
 class TeachingGoalModel(TimestampedModel, Base):
@@ -334,6 +367,7 @@ class ConversationModel(TimestampedModel, Base):
     workspace_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
+    channel: Mapped[str] = mapped_column(String(32), nullable=False, server_default="web")
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
     last_message_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
 
@@ -533,6 +567,12 @@ class AgentCheckpointModel(TimestampedModel, Base):
     __tablename__ = "nlp_agent_checkpoints"
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    workspace_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    owner_user_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False)
     checkpoint_id: Mapped[str] = mapped_column(String(128), nullable=False)
     checkpoint_json: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -546,6 +586,12 @@ class LangGraphCheckpointModel(Base):
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    workspace_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    owner_user_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
     checkpoint_id: Mapped[str] = mapped_column(String(128), nullable=False)
     parent_checkpoint_id: Mapped[str | None] = mapped_column(String(128))
@@ -562,6 +608,12 @@ class LangGraphCheckpointBlobModel(Base):
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    owner_user_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
     channel: Mapped[str] = mapped_column(String(128), nullable=False)
     version: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -575,6 +627,8 @@ class LangGraphCheckpointWriteModel(Base):
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(UUID, nullable=True, index=True)
+    owner_user_id: Mapped[str | None] = mapped_column(UUID, nullable=True, index=True)
     checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False, server_default="")
     checkpoint_id: Mapped[str] = mapped_column(String(128), nullable=False)
     task_id: Mapped[str] = mapped_column(String(128), nullable=False)

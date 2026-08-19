@@ -86,6 +86,7 @@ async def approve_join_request(
             ClassJoinRequestModel.class_id == class_id,
             ClassJoinRequestModel.status == "pending",
         )
+        .with_for_update()
         .options(
             selectinload(ClassJoinRequestModel.user_),
             selectinload(ClassJoinRequestModel.cls),
@@ -115,7 +116,7 @@ async def reject_join_request(
             ClassJoinRequestModel.id == request_id,
             ClassJoinRequestModel.class_id == class_id,
             ClassJoinRequestModel.status == "pending",
-        )
+        ).with_for_update()
     )
     req = result.scalar_one_or_none()
     if req is None:

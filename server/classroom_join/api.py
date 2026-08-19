@@ -75,6 +75,8 @@ async def submit_join_request(
     _write: WriteClaims,
 ):
     """学生提交加入班级申请（pending）。"""
+    authorization_service.require(principal, Permission.LEARNING_PROGRESS_READ_SELF)
+    await rbac_service.classroom(db, classroom_id)
     existing = await service.get_user_pending_request(db, classroom_id, principal.user_id)
     if existing is not None:
         raise HTTPException(status_code=409, detail="您已提交过该班级的加入申请，请等待审核")

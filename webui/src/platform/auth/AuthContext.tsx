@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { api, ensureAuth } from "@/platform/http/api";
 import type { AuthSession } from "@/shared/types";
@@ -6,8 +6,10 @@ import type { AuthSession } from "@/shared/types";
 interface AuthContextValue {
   user: AuthSession | null;
   roles: string[];
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  login: (username: string, password: string) => Promise<AuthSession>;
   logout: () => Promise<void>;
-  loading: boolean;
   error: string;
 }
 
@@ -20,36 +22,68 @@ const AuthContext = createContext<AuthContextValue | null>(null);
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthSession | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
     ensureAuth()
       .then((session) => {
-        if (active) setUser(session);
+        if (!active) return;
+        setUser(session);
+        setError("");
       })
       .catch((e: unknown) => {
-        if (active) setError(e instanceof Error ? e.message : "认证失败");
+        if (!active) return;
+        const status = typeof e === "object" && e !== null && "status" in e ? e.status : undefined;
+        if (status !== 401) setError(e instanceof Error ? e.message : "认证失败");
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) setIsLoading(false);
       });
     return () => {
       active = false;
     };
   }, []);
 
-  const logout = async () => {
-    await api.logout();
-    setUser(null);
-  };
+  const login = useCallback(async (username: string, password: string) => {
+    setIsLoading(true);
+    setError("");
+    try {
+      const session = await api.login(username, password);
+      setUser(session);
+      return session;
+    } catch (reason) {
+      setUser(null);
+      setError(reason instanceof Error ? reason.message : "登录失败");
+      throw reason;
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
-  return (
-    <AuthContext.Provider value={{ user, roles: user?.roles ?? [], logout, loading, error }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  const logout = useCallback(async () => {
+    try {
+      await api.logout();
+    } finally {
+      // A locally expired/revoked cookie must not leave the React tree looking
+      // authenticated after the server has rejected logout.
+      setUser(null);
+      setError("");
+    }
+  }, []);
+
+  const value = useMemo<AuthContextValue>(() => ({
+    user,
+    roles: user?.roles ?? [],
+    isAuthenticated: user !== null,
+    isLoading,
+    login,
+    logout,
+    error,
+  }), [error, isLoading, login, logout, user]);
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth(): AuthContextValue {
@@ -58,4 +92,8 @@ export function useAuth(): AuthContextValue {
     throw new Error("useAuth 必须在 <AuthProvider> 内部使用");
   }
   return ctx;
+}
+
+export function useOptionalAuth(): AuthContextValue | null {
+  return useContext(AuthContext);
 }

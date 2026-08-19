@@ -6,10 +6,9 @@ Teacher mode shares the primary FastAPI/WebUI origin with student mode:
 - teacher: `/teacher/*`
 - developer: `/developer/*`
 
-The current local deployment issues an administrator session, so it can enter
-teacher mode. The authorization boundary already accepts either `admin` or
-`teacher`; a future identity provider only needs to issue the role and allowed
-workspace IDs.
+Teacher mode is entered by a database session carrying `teacher` or
+`developer` and an allowed workspace ID. The authorization boundary reloads
+the role and workspace membership from MySQL on every request.
 
 ## Routes
 
@@ -34,7 +33,7 @@ workspace IDs.
 | `GET /api/v1/teacher/reports` | Reserved durable-report repository boundary |
 
 All query APIs accept `workspace_id`; analytics endpoints also accept `days`.
-The service validates teacher/admin role and workspace access before querying.
+The service validates teacher/developer role and workspace access before querying.
 
 ## Evidence-based analysis
 

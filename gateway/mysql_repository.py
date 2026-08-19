@@ -46,6 +46,18 @@ class MySQLGatewayRepository:
         user_id: str,
         title: str,
     ) -> None:
+        existing = connection.execute(
+            text(
+                "SELECT workspace_id,owner_user_id FROM nlp_conversations "
+                "WHERE id=:id FOR UPDATE"
+            ),
+            {"id": session_id},
+        ).mappings().first()
+        if existing is not None and (
+            existing["workspace_id"] != workspace_id
+            or existing["owner_user_id"] != user_id
+        ):
+            raise PermissionError("conversation belongs to another principal")
         connection.execute(
             text(
                 "INSERT INTO nlp_conversations(id,workspace_id,owner_user_id,title,status) "
@@ -103,6 +115,39 @@ class MySQLGatewayRepository:
         row = self._row(turn_id)
         return self._record(row) if row else None
 
+    def request_turn_cancellation(
+        self, *, turn_id: str, requested_by: str, reason: str = "user_requested"
+    ) -> TurnRecord | None:
+        """Record cancellation in MySQL before any transport-level signal."""
+        with self._engine.begin() as c:
+            row = c.execute(
+                text("SELECT status FROM nlp_turns WHERE id=:id FOR UPDATE"),
+                {"id": turn_id},
+            ).mappings().first()
+            if row is None:
+                return None
+            c.execute(
+                text(
+                    "INSERT INTO nlp_turn_cancellations(turn_id,requested_by,reason) "
+                    "VALUES(:turn_id,:requested_by,:reason) "
+                    "ON DUPLICATE KEY UPDATE turn_id=VALUES(turn_id)"
+                ),
+                {
+                    "turn_id": turn_id,
+                    "requested_by": requested_by,
+                    "reason": reason[:500],
+                },
+            )
+            if row["status"] in {"accepted", "running"}:
+                c.execute(
+                    text(
+                        "UPDATE nlp_turns SET status='cancelled', "
+                        "completed_at=UTC_TIMESTAMP(6) WHERE id=:id"
+                    ),
+                    {"id": turn_id},
+                )
+        return self.get_turn(turn_id)
+
     def active_turn_for_session(self, session_id: str, *, exclude_turn_id: str | None = None) -> TurnRecord | None:
         with self._engine.connect() as c:
             row = c.execute(text("SELECT * FROM nlp_turns WHERE conversation_id=:s AND status IN ('accepted','running') AND (:exclude IS NULL OR id<>:exclude) ORDER BY created_at DESC LIMIT 1"), {"s": session_id, "exclude": exclude_turn_id}).mappings().first()
@@ -124,7 +169,7 @@ class MySQLGatewayRepository:
     def events_after(self, turn_id: str, *, after_sequence: int = 0, limit: int = 500) -> list[GatewayEvent]:
         with self._engine.connect() as c:
             rows = c.execute(text("SELECT e.*, t.conversation_id FROM nlp_turn_events e JOIN nlp_turns t ON t.id=e.turn_id WHERE e.turn_id=:id AND e.sequence>:after ORDER BY e.sequence LIMIT :limit"), {"id": turn_id, "after": max(0, after_sequence), "limit": min(max(1, limit), 2000)}).mappings().all()
-        return [GatewayEvent(event_id=r["id"], turn_id=turn_id, session_id=r["conversation_id"], sequence=r["sequence"], type=GatewayEventType(r["event_type"]), created_at=r["created_at"], payload=r["payload_json"] or {}) for r in rows]
+        return [GatewayEvent(event_id=r["id"], turn_id=turn_id, session_id=r["conversation_id"], sequence=r["sequence"], type=GatewayEventType(r["event_type"]), created_at=r["created_at"], payload=self._json(r["payload_json"])) for r in rows]
 
     def ensure_event(self, *, turn_id: str, session_id: str, event_type: GatewayEventType, payload=None) -> GatewayEvent:
         existing = next((e for e in self.events_after(turn_id, limit=2000) if e.type == event_type), None)
@@ -473,7 +518,11 @@ class MySQLGatewayRepository:
             topics = [
                 {
                     "id": row["id"], "name": row["name"], "description": row["description"],
-                    "status": row["status"], "sort_order": row["sort_order"],
+                    # ``sort_order`` is persisted for deterministic storage
+                    # ordering, but it is not part of the public CourseTopic
+                    # contract.  Keep the transport shape aligned with the
+                    # SQLite repository and the strict teacher schemas.
+                    "status": row["status"],
                     "knowledge_points": points_by_topic.get(str(row["id"]), []),
                 }
                 for row in topic_rows
@@ -485,7 +534,11 @@ class MySQLGatewayRepository:
         blueprints = {"exercise": [], "review": [], "guided": []}
         for row in blueprint_rows:
             blueprint = self._json(row["payload_json"])
-            blueprint.setdefault("kind", row["kind"])
+            # ``kind`` is the normalized table discriminator, not a public
+            # blueprint field.  Older payloads may not contain it, while newer
+            # writes store it for persistence queries; strip both forms at the
+            # repository boundary before Pydantic validation.
+            blueprint.pop("kind", None)
             blueprints.get(str(row["kind"]), []).append(blueprint)
         value = {
             "workspace_id": workspace_id,

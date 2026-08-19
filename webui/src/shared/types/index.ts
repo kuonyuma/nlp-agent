@@ -12,6 +12,7 @@ export interface AuthSession {
   roles: string[];
   csrf_token: string;
   expires_at: number;
+  permissions?: string[];
 }
 
 export interface DeveloperSnapshot {
@@ -234,7 +235,14 @@ export interface UserProfile {
   status: UserStatus;
   created_at: string;
   updated_at: string;
+  deleted_at?: string | null;
+  last_login_at?: string | null;
 }
+
+export interface RbacRole { code: string; name: string; description: string; status: string; is_builtin: boolean }
+export interface RbacPermission { code: string; name: string; description: string; status: string }
+export interface SystemMenu { id: string; parent_id: string | null; type: string; name: string; route_path: string | null; component_key: string | null; permission_id: string | null; client_scope: string | null; sort_order: number; visible: boolean; status: string }
+export interface AuthorizationAuditRecord { id: string; actor_user_id: string | null; target_user_id: string | null; decision: string; reason_code: string; permission_code: string | null; resource_type: string | null; resource_id: string | null; detail: Record<string, unknown>; created_at: string }
 
 export interface UserListResponse {
   users: UserProfile[];
