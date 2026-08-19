@@ -81,30 +81,39 @@ async def mysql_session_factory():
 
 @pytest.mark.asyncio
 async def test_classroom_approve_rejects_cross_class_request_id(mysql_session_factory) -> None:
-    """P0-5 核心：approve 时 request_id 必须与 class_id 绑定，跨班提交返回 None（→ 404）。"""
+    """P0-5 核心：approve 时 request_id 必须与 class_id 绑定，跨班提交返回 None（→ 404）。
+
+    Note: ``nlp_classrooms.workspace_id`` 带有 ``UNIQUE`` 约束（迁移
+    ``20260804_14`` 显式声明），所以每个 workspace 只能有一个 classroom。
+    因此跨班 IDOR 必须用两个 workspace + 两个 classroom 来构造：一个
+    classroom 持有 pending 请求，另一个用来误提交审批——服务层应按
+    ``(request_id, class_id, status='pending')`` 三重绑定命中不到。
+    """
     async with mysql_session_factory() as session:
-        workspace_id = str(uuid4())
+        workspace_a_id = str(uuid4())
+        workspace_b_id = str(uuid4())
         class_a = str(uuid4())
         class_b = str(uuid4())
         user_id = str(uuid4())
         req_id = str(uuid4())
 
-        session.add(
-            WorkspaceModel(id=workspace_id, slug=f"ws-{uuid4().hex[:8]}", name="WS", status="active")
-        )
-        # Flush the workspace so the classroom FK parent row exists before the
-        # child rows are inserted (async driver does not always topo-order these).
+        for ws_id in (workspace_a_id, workspace_b_id):
+            session.add(
+                WorkspaceModel(
+                    id=ws_id, slug=f"ws-{uuid4().hex[:8]}", name="WS", status="active"
+                )
+            )
         await session.flush()
         session.add(
-            ClassroomModel(id=class_a, workspace_id=workspace_id, name="Class A", status="active")
+            ClassroomModel(id=class_a, workspace_id=workspace_a_id, name="Class A", status="active")
         )
         session.add(
-            ClassroomModel(id=class_b, workspace_id=workspace_id, name="Class B", status="active")
+            ClassroomModel(id=class_b, workspace_id=workspace_b_id, name="Class B", status="active")
         )
         session.add(
             UserModel(
                 id=user_id,
-                username=f"joiner-{uuid4().hex[:8]}",
+                username=f"joiner{uuid4().hex[:8]}",
                 password_hash="not-used",
                 display_name="Joiner",
             )
@@ -191,28 +200,36 @@ async def test_admin_revoke_session_revokes_only_target_user(mysql_session_facto
         other_session = str(uuid4())
         expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1)
 
+        sessions_by_id: dict[str, SessionModel] = {}
         for sid, owner in (
             (victim_active_1, victim_id),
             (victim_active_2, victim_id),
             (victim_already_revoked, victim_id),
             (other_session, other_id),
         ):
-            session.add(
-                SessionModel(
-                    id=sid,
-                    user_id=owner,
-                    workspace_id=workspace_id,
-                    token_hash=f"tok-{sid}",
-                    csrf_hash=f"csrf-{sid}",
-                    expires_at=expires_at,
-                )
+            sess = SessionModel(
+                id=sid,
+                user_id=owner,
+                workspace_id=workspace_id,
+                token_hash=f"tok-{sid}",
+                csrf_hash=f"csrf-{sid}",
+                expires_at=expires_at,
             )
-        # 预先撤销 victim 的一个会话，验证只统计「有效」会话
-        await session.execute(
-            update(SessionModel)
-            .where(SessionModel.id == victim_already_revoked)
-            .values(revoked_at=datetime.now(timezone.utc).replace(tzinfo=None))
+            sessions_by_id[sid] = sess
+            session.add(sess)
+        # Persist the four sessions first, then pre-revoke ONE victim session.
+        # We must set ``revoked_at`` via the ORM on the tracked instance so
+        # the identity map stays consistent with the DB (and so later
+        # ``session.get(...)`` calls below see the revoked state). A bulk
+        # ``UPDATE`` issued before flush would match zero rows (the row does
+        # not exist in MySQL yet) and then commit would insert the session
+        # with ``revoked_at IS NULL``, making the revoke-count assertion
+        # count it as still-active.
+        await session.flush()
+        sessions_by_id[victim_already_revoked].revoked_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
         )
+        await session.flush()
         await session.commit()
 
         svc = UserService(session)

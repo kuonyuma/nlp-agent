@@ -138,6 +138,10 @@ async def test_disable_user_revokes_sessions(mysql_session_factory) -> None:
                 id=str(uuid4()), slug="ws-dis", name="WS Dis", status="active"
             )
             s.add(ws)
+            # Flush the workspace first so the SessionModel FK parent row
+            # exists before its INSERT under the async driver (aiomysql does
+            # not always topologically order these without an explicit flush).
+            await s.flush()
             sess = SessionModel(
                 id=str(uuid4()),
                 user_id=target.id,
@@ -189,6 +193,10 @@ async def test_soft_delete_filters_user_and_revokes_sessions(
                 id=str(uuid4()), slug="ws-sd", name="WS SD", status="active"
             )
             s.add(ws)
+            # Flush the workspace first so the SessionModel FK parent row
+            # exists before its INSERT under the async driver (aiomysql does
+            # not always topologically order these without an explicit flush).
+            await s.flush()
             sess = SessionModel(
                 id=str(uuid4()),
                 user_id=target.id,

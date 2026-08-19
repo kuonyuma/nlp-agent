@@ -127,6 +127,13 @@ class UserService:
         self.session.add(member)
 
         await self.session.flush()
+        # MySQL lacks RETURNING support, so SQLAlchemy cannot populate the
+        # STORED ``Computed`` column ``username_lower`` (and the
+        # ``server_default`` ``created_at``/``updated_at``) via the INSERT.
+        # Refresh forces a SELECT so the returned instance is fully populated
+        # and downstream Pydantic ``model_validate`` calls do not trigger an
+        # async lazy-load that would raise ``MissingGreenlet``.
+        await self.session.refresh(user)
         return user
 
     async def get_user(self, user_id: str) -> UserModel:
