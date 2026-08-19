@@ -92,6 +92,9 @@ async def test_classroom_approve_rejects_cross_class_request_id(mysql_session_fa
         session.add(
             WorkspaceModel(id=workspace_id, slug=f"ws-{uuid4().hex[:8]}", name="WS", status="active")
         )
+        # Flush the workspace so the classroom FK parent row exists before the
+        # child rows are inserted (async driver does not always topo-order these).
+        await session.flush()
         session.add(
             ClassroomModel(id=class_a, workspace_id=workspace_id, name="Class A", status="active")
         )
@@ -263,11 +266,13 @@ async def test_self_password_change_verifies_old_and_invalidates_sessions(mysql_
         assert await svc.verify_password(user, "OldPassw0rd1") is True
 
         # 自改：校验通过后改密（端点核心守卫在此复现）
-        before = await svc.get_user(user_id)
+        # 捕获标量旧的版本号，避免 SQLAlchemy identity-map 让 before/after
+        # 指向同一实例而被 +=1 污染（否则 before 也会变成新值）。
+        before_version = (await svc.get_user(user_id)).authorization_version
         await svc.change_password(user_id, "NewPassw0rd2")
         after = await svc.get_user(user_id)
         # 改密后 authorization_version 递增 → 旧会话失效
-        assert after.authorization_version == before.authorization_version + 1
+        assert after.authorization_version == before_version + 1
         assert await svc.verify_password(after, "NewPassw0rd2") is True
         assert await svc.verify_password(after, "OldPassw0rd1") is False
 
@@ -280,7 +285,7 @@ async def test_admin_create_user_returns_no_password_and_persists(mysql_session_
         svc = UserService(session)
         created = await svc.create_user(
             UserCreate(
-                username=f"newuser-{uuid4().hex[:8]}",
+                username=f"newuser{uuid4().hex[:8]}",
                 display_name="New User",
                 password="InitialPw0rd1",
             ),
@@ -291,7 +296,7 @@ async def test_admin_create_user_returns_no_password_and_persists(mysql_session_
         # 响应模型（UserResponse）不含 password / password_hash —— §7.2
         resp = UserResponse.model_validate(created)
         assert "password" not in resp.model_dump()
-        assert resp.username.startswith("newuser-")
+        assert resp.username.startswith("newuser")
         assert resp.status == "active"
 
         # 落库后能被 list_users 查到

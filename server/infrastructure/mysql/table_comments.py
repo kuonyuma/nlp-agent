@@ -16,6 +16,7 @@ TABLE_COMMENTS: dict[str, str] = {
     "nlp_authorization_audit_logs": "授权判定与 RBAC 管理操作的追加式审计记录。",
     "nlp_classrooms": "工作区对应的课堂定义。",
     "nlp_classroom_members": "课堂与用户的成员关系及课堂内角色。",
+    "nlp_class_join_requests": "课堂加入申请与审批流转（用户管理）。",
     "nlp_menus": "前端菜单树、路由和可见性配置。",
     "nlp_role_menus": "角色可见菜单的关联关系。",
     "nlp_workspaces": "租户或工作区的基本信息及状态。",

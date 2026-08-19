@@ -111,6 +111,11 @@ class UserService:
             status="active",
         )
         self.session.add(workspace)
+        # Flush user + workspace first so the owner-membership FK has its parent
+        # rows present before the child row is inserted. SQLAlchemy does not
+        # always topologically order these without a relationship under the
+        # async driver (aiomysql), so we force the order explicitly.
+        await self.session.flush([user, workspace])
 
         # Add user as workspace owner
         member = WorkspaceMemberModel(
@@ -287,7 +292,20 @@ class UserService:
         """
         # Ensures the target exists; raises UserNotFoundError otherwise.
         user = await self.get_user(user_id)
-        result = await self.session.execute(
+        # Count active (non-revoked) sessions BEFORE revoking, then revoke.
+        # aiomysql's ``result.rowcount`` for UPDATE is unreliable, so we derive
+        # the revoked count from an explicit SELECT COUNT(*) instead.
+        active_count = (
+            await self.session.scalar(
+                select(func.count())
+                .select_from(SessionModel)
+                .where(
+                    SessionModel.user_id == user_id,
+                    SessionModel.revoked_at.is_(None),
+                )
+            )
+        ) or 0
+        await self.session.execute(
             update(SessionModel)
             .where(
                 SessionModel.user_id == user_id,
@@ -295,11 +313,10 @@ class UserService:
             )
             .values(revoked_at=datetime.now(timezone.utc).replace(tzinfo=None))
         )
-        revoked_count = result.rowcount or 0
         user.authorization_version += 1
         user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await self.session.flush()
-        return revoked_count
+        return active_count
 
     async def update_last_login(self, user_id: str) -> None:
         """Update the last login timestamp.
