@@ -146,7 +146,7 @@ async def test_disable_user_revokes_sessions(mysql_session_factory) -> None:
                 id=str(uuid4()),
                 user_id=target.id,
                 workspace_id=ws.id,
-                token_hash="t",
+                token_hash=str(uuid4()),
                 csrf_hash="c",
                 expires_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )
@@ -201,7 +201,7 @@ async def test_soft_delete_filters_user_and_revokes_sessions(
                 id=str(uuid4()),
                 user_id=target.id,
                 workspace_id=ws.id,
-                token_hash="t",
+                token_hash=str(uuid4()),
                 csrf_hash="c",
                 expires_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )

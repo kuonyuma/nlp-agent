@@ -20,7 +20,6 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
@@ -95,6 +94,7 @@ async def test_classroom_approve_rejects_cross_class_request_id(mysql_session_fa
         class_a = str(uuid4())
         class_b = str(uuid4())
         user_id = str(uuid4())
+        reviewer_id = str(uuid4())
         req_id = str(uuid4())
 
         for ws_id in (workspace_a_id, workspace_b_id):
@@ -118,6 +118,16 @@ async def test_classroom_approve_rejects_cross_class_request_id(mysql_session_fa
                 display_name="Joiner",
             )
         )
+        # ``reviewed_by`` 是 ``nlp_class_join_requests.reviewed_by`` 的外键，
+        # 必须指向真实存在的 ``nlp_users.id``（否则审批 flush 时触发 FK 1452）。
+        session.add(
+            UserModel(
+                id=reviewer_id,
+                username=f"reviewer{uuid4().hex[:8]}",
+                password_hash="not-used",
+                display_name="Reviewer",
+            )
+        )
         session.add(
             ClassJoinRequestModel(id=req_id, class_id=class_a, user_id=user_id, status="pending")
         )
@@ -125,13 +135,13 @@ async def test_classroom_approve_rejects_cross_class_request_id(mysql_session_fa
 
         # 用 class_b 去审批属于 class_a 的请求 → 必须命中不到（IDOR 防护）
         cross = await classroom_join_service.approve_join_request(
-            session, req_id, class_b, reviewed_by="reviewer"
+            session, req_id, class_b, reviewed_by=reviewer_id
         )
         assert cross is None
 
         # 用正确的 class_a 去审批 → 命中
         ok = await classroom_join_service.approve_join_request(
-            session, req_id, class_a, reviewed_by="reviewer"
+            session, req_id, class_a, reviewed_by=reviewer_id
         )
         assert ok is not None
         assert ok.id == req_id

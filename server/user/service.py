@@ -299,31 +299,26 @@ class UserService:
         """
         # Ensures the target exists; raises UserNotFoundError otherwise.
         user = await self.get_user(user_id)
-        # Count active (non-revoked) sessions BEFORE revoking, then revoke.
-        # aiomysql's ``result.rowcount`` for UPDATE is unreliable, so we derive
-        # the revoked count from an explicit SELECT COUNT(*) instead.
-        active_count = (
-            await self.session.scalar(
-                select(func.count())
-                .select_from(SessionModel)
-                .where(
+        # Load the active sessions as ORM objects and revoke them in-place.
+        # This keeps the identity map consistent (so any caller that later
+        # re-reads a session via ``session.get`` sees ``revoked_at``) AND
+        # gives an exact count, avoiding both aiomysql's unreliable UPDATE
+        # rowcount and the stale-object problem of a bulk UPDATE.
+        active_sessions = (
+            await self.session.scalars(
+                select(SessionModel).where(
                     SessionModel.user_id == user_id,
                     SessionModel.revoked_at.is_(None),
                 )
             )
-        ) or 0
-        await self.session.execute(
-            update(SessionModel)
-            .where(
-                SessionModel.user_id == user_id,
-                SessionModel.revoked_at.is_(None),
-            )
-            .values(revoked_at=datetime.now(timezone.utc).replace(tzinfo=None))
-        )
+        ).all()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for sess in active_sessions:
+            sess.revoked_at = now
         user.authorization_version += 1
-        user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        user.updated_at = now
         await self.session.flush()
-        return active_count
+        return len(active_sessions)
 
     async def update_last_login(self, user_id: str) -> None:
         """Update the last login timestamp.
