@@ -128,16 +128,18 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
     const auth = await api.login(integrationUsername, integrationPassword);
     expect(auth.roles).toContain("developer");
     expect((await ensureAuth()).user_id).toBeTruthy();
+    const workspaceId = auth.workspace_ids[0];
+    if (!workspaceId) throw new Error("integration user has no authorized workspace");
 
-    const session = await api.createSession("default");
-    expect(session.workspace_id).toBe("default");
+    const session = await api.createSession(workspaceId);
+    expect(session.workspace_id).toBe(workspaceId);
     expect((await api.listSessions()).items).toContainEqual(expect.objectContaining({ session_id: session.session_id }));
 
     expect((await api.updateSettings({ theme: "dark" })).settings.theme).toBe("dark");
     expect((await api.getSettings()).preferences.settings?.theme).toBe("dark");
-    expect((await api.getTeacherCatalog("default")).catalog.workspace_id).toBe("default");
+    expect((await api.getTeacherCatalog(workspaceId)).catalog.workspace_id).toBe(workspaceId);
 
-    const goals = await api.updateTeachingGoals("default", {
+    const goals = await api.updateTeachingGoals(workspaceId, {
       course_title: "Transformer 专题",
       description: "真实 API 集成测试",
       objectives: ["解释注意力"],
@@ -145,11 +147,14 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
       target_level: "intermediate",
     });
     expect(goals.goals.course_title).toBe("Transformer 专题");
-    expect((await api.getTeacherResource("reports", "default")).status).toBe("interface_reserved");
+    expect((await api.getTeacherResource("reports", workspaceId)).status).toBe("interface_reserved");
   });
 
   it("recovers exactly one turn when the socket drops after send and before ack", async () => {
-    const session = await api.createSession("default");
+    const auth = await ensureAuth();
+    const workspaceId = auth.workspace_ids[0];
+    if (!workspaceId) throw new Error("integration user has no authorized workspace");
+    const session = await api.createSession(workspaceId);
     let dropFirstChat = true;
     let connectionCount = 0;
     let firstConnectionObservedAck = false;
