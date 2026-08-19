@@ -46,12 +46,19 @@ async def list_users(
     limit: int = Query(100, ge=1, le=500),
     status: Optional[str] = Query(None),
     keyword: Optional[str] = Query(None),
+    include_deleted: bool = Query(False),
 ):
     """List all users (admin only)."""
     authorization_service.require(principal, Permission.SYSTEM_USER_MANAGE)
 
     service = UserService(db)
-    users, total = await service.list_users(offset=offset, limit=limit, status=status, keyword=keyword)
+    users, total = await service.list_users(
+        offset=offset,
+        limit=limit,
+        status=status,
+        keyword=keyword,
+        include_deleted=include_deleted or status == "deleted",
+    )
 
     return UserListResponse(
         users=[UserResponse.model_validate(u) for u in users],
@@ -302,6 +309,33 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="User not found")
     except SelfDeleteForbiddenError:
         raise HTTPException(status_code=403, detail="Cannot delete your own account")
+
+
+@router.post("/{user_id}/restore", response_model=UserResponse)
+async def restore_user(
+    user_id: str,
+    db: DbSession,
+    _write: WriteClaims,
+    principal: Principal,
+):
+    """Restore a soft-deleted account; old credentials remain unusable."""
+    authorization_service.require(principal, Permission.SYSTEM_USER_MANAGE)
+    service = UserService(db)
+    try:
+        user = await service.restore_user(user_id, actor_user_id=principal.user_id)
+        await rbac_service.audit(
+            db,
+            actor_user_id=principal.user_id,
+            target_user_id=user_id,
+            decision="allow",
+            reason_code="user_account_restored",
+            permission_code="system:user:manage",
+            resource_type="user",
+            resource_id=user_id,
+        )
+        return UserResponse.model_validate(user)
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="Deleted user not found")
 
 
 @router.post("/{user_id}/sessions/revoke", status_code=status.HTTP_204_NO_CONTENT)

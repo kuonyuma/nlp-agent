@@ -52,6 +52,8 @@ class UserResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    deleted_at: datetime | None = None
+    last_login_at: datetime | None = None
 
 
 class UserListResponse(BaseModel):

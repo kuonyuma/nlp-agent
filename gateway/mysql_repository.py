@@ -46,6 +46,18 @@ class MySQLGatewayRepository:
         user_id: str,
         title: str,
     ) -> None:
+        existing = connection.execute(
+            text(
+                "SELECT workspace_id,owner_user_id FROM nlp_conversations "
+                "WHERE id=:id FOR UPDATE"
+            ),
+            {"id": session_id},
+        ).mappings().first()
+        if existing is not None and (
+            existing["workspace_id"] != workspace_id
+            or existing["owner_user_id"] != user_id
+        ):
+            raise PermissionError("conversation belongs to another principal")
         connection.execute(
             text(
                 "INSERT INTO nlp_conversations(id,workspace_id,owner_user_id,title,status) "
@@ -102,6 +114,39 @@ class MySQLGatewayRepository:
     def get_turn(self, turn_id: str) -> TurnRecord | None:
         row = self._row(turn_id)
         return self._record(row) if row else None
+
+    def request_turn_cancellation(
+        self, *, turn_id: str, requested_by: str, reason: str = "user_requested"
+    ) -> TurnRecord | None:
+        """Record cancellation in MySQL before any transport-level signal."""
+        with self._engine.begin() as c:
+            row = c.execute(
+                text("SELECT status FROM nlp_turns WHERE id=:id FOR UPDATE"),
+                {"id": turn_id},
+            ).mappings().first()
+            if row is None:
+                return None
+            c.execute(
+                text(
+                    "INSERT INTO nlp_turn_cancellations(turn_id,requested_by,reason) "
+                    "VALUES(:turn_id,:requested_by,:reason) "
+                    "ON DUPLICATE KEY UPDATE turn_id=VALUES(turn_id)"
+                ),
+                {
+                    "turn_id": turn_id,
+                    "requested_by": requested_by,
+                    "reason": reason[:500],
+                },
+            )
+            if row["status"] in {"accepted", "running"}:
+                c.execute(
+                    text(
+                        "UPDATE nlp_turns SET status='cancelled', "
+                        "completed_at=UTC_TIMESTAMP(6) WHERE id=:id"
+                    ),
+                    {"id": turn_id},
+                )
+        return self.get_turn(turn_id)
 
     def active_turn_for_session(self, session_id: str, *, exclude_turn_id: str | None = None) -> TurnRecord | None:
         with self._engine.connect() as c:

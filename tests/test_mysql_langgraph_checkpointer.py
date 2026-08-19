@@ -1,4 +1,5 @@
 import os
+import os
 import uuid
 
 import pytest
@@ -17,7 +18,7 @@ async def test_mysql_checkpoint_round_trip_and_idempotent_writes():
     engine = create_engine(DatabaseConfig(url=url))
     saver = MySQLCheckpointSaver(engine)
     thread_id = f"test-{uuid.uuid4()}"
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "workspace_id": "workspace-test", "user_id": "user-test"}}
     checkpoint = {
         "v": 1, "id": "00000000-0000-0000-0000-000000000001", "ts": "2026-08-01T00:00:00Z",
         "channel_values": {"messages": ["hello"]}, "channel_versions": {"messages": "1"},

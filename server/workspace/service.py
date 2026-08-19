@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.infrastructure.mysql.models import (
+    OutboxMessageModel,
     WorkspaceModel,
     WorkspaceMemberModel,
     UserModel,
@@ -71,6 +72,7 @@ class WorkspaceService:
             status="active",
         )
         self.session.add(workspace)
+        await self.session.flush()
 
         # Add creator as owner
         member = WorkspaceMemberModel(
@@ -149,10 +151,26 @@ class WorkspaceService:
         user_id: str,
         *,
         member_type: str = "member",
+        actor_user_id: str | None = None,
     ) -> WorkspaceMemberModel:
         """Add a member to a workspace."""
-        # Verify workspace exists
-        await self.get_workspace(workspace_id)
+        workspace = await self.session.scalar(
+            select(WorkspaceModel).where(
+                WorkspaceModel.id == workspace_id,
+                WorkspaceModel.status == "active",
+            ).with_for_update()
+        )
+        if workspace is None:
+            raise WorkspaceNotFoundError(f"Workspace {workspace_id} not found")
+        user = await self.session.scalar(
+            select(UserModel).where(
+                UserModel.id == user_id,
+                UserModel.status == "active",
+                UserModel.deleted_at.is_(None),
+            ).with_for_update()
+        )
+        if user is None:
+            raise WorkspaceServiceError("User is not active")
 
         # Check if already a member
         existing = await self.session.scalar(
@@ -167,6 +185,8 @@ class WorkspaceService:
             # Reactivate membership
             existing.status = "active"
             existing.member_type = member_type
+            user.authorization_version += 1
+            self.session.add(OutboxMessageModel(id=str(uuid.uuid4()), topic="authorization.changed", payload_json={"user_id": user_id, "reason": "workspace_membership_changed"}))
             await self.session.flush()
             return existing
 
@@ -178,6 +198,8 @@ class WorkspaceService:
             status="active",
         )
         self.session.add(member)
+        user.authorization_version += 1
+        self.session.add(OutboxMessageModel(id=str(uuid.uuid4()), topic="authorization.changed", payload_json={"user_id": user_id, "reason": "workspace_membership_changed"}))
         await self.session.flush()
         return member
 
@@ -185,18 +207,34 @@ class WorkspaceService:
         self,
         workspace_id: str,
         user_id: str,
+        *,
+        actor_user_id: str | None = None,
     ) -> bool:
         """Remove a member from a workspace."""
         member = await self.session.scalar(
             select(WorkspaceMemberModel).where(
                 WorkspaceMemberModel.workspace_id == workspace_id,
                 WorkspaceMemberModel.user_id == user_id,
-            )
+            ).with_for_update()
         )
         if member is None:
             return False
 
+        if member.member_type == "owner":
+            owner_count = await self.session.scalar(
+                select(func.count()).select_from(WorkspaceMemberModel).where(
+                    WorkspaceMemberModel.workspace_id == workspace_id,
+                    WorkspaceMemberModel.member_type == "owner",
+                    WorkspaceMemberModel.status == "active",
+                )
+            )
+            if int(owner_count or 0) <= 1:
+                raise WorkspaceServiceError("cannot remove the last workspace owner")
         member.status = "removed"
+        user = await self.session.scalar(select(UserModel).where(UserModel.id == user_id).with_for_update())
+        if user is not None:
+            user.authorization_version += 1
+            self.session.add(OutboxMessageModel(id=str(uuid.uuid4()), topic="authorization.changed", payload_json={"user_id": user_id, "reason": "workspace_membership_changed"}))
         await self.session.flush()
         return True
 

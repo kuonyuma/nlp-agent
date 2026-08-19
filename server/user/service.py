@@ -11,11 +11,19 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from argon2 import PasswordHasher, Type
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import VerificationError, VerifyMismatchError
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.infrastructure.mysql.models import SessionModel, UserModel, WorkspaceModel, WorkspaceMemberModel
+from server.infrastructure.mysql.models import (
+    RoleModel,
+    SessionModel,
+    UserModel,
+    UserRoleModel,
+    WorkspaceModel,
+    WorkspaceMemberModel,
+    OutboxMessageModel,
+)
 
 from .schemas import UserCreate, UserUpdate
 
@@ -34,6 +42,9 @@ class UserAlreadyExistsError(UserServiceError):
 
 class SelfDeleteForbiddenError(UserServiceError):
     """Raised when an actor attempts to delete their own account."""
+
+
+DEFAULT_USER_ROLE = "guest"
 
 
 class PasswordHasherSingleton:
@@ -81,7 +92,7 @@ class UserService:
         # Check for existing user
         existing = await self.session.scalar(
             select(UserModel.id).where(
-                UserModel.username == data.username
+                UserModel.username_lower == data.username.casefold()
             )
         )
         if existing:
@@ -126,6 +137,31 @@ class UserService:
         )
         self.session.add(member)
 
+        # Every account has an explicit least-privilege RBAC identity from its
+        # first transaction.  The role catalog is seeded by the RBAC migration;
+        # failing closed here prevents an account that can authenticate but has
+        # no authorization semantics.
+        guest_role = await self.session.scalar(
+            select(RoleModel).where(
+                RoleModel.code == DEFAULT_USER_ROLE,
+                RoleModel.status == "active",
+            )
+        )
+        if guest_role is None:
+            raise UserServiceError("default guest role is not available")
+        assigned_by = None
+        if actor_user_id is not None:
+            assigned_by = await self.session.scalar(
+                select(UserModel.id).where(UserModel.id == actor_user_id)
+            )
+        self.session.add(
+            UserRoleModel(
+                user_id=user.id,
+                role_id=guest_role.id,
+                assigned_by_user_id=assigned_by,
+            )
+        )
+
         await self.session.flush()
         # MySQL lacks RETURNING support, so SQLAlchemy cannot populate the
         # STORED ``Computed`` column ``username_lower`` (and the
@@ -164,18 +200,35 @@ class UserService:
         limit: int = 100,
         status: Optional[str] = None,
         keyword: Optional[str] = None,
+        include_deleted: bool = False,
     ) -> tuple[list[UserModel], int]:
-        """List active (non-soft-deleted) users with pagination."""
-        query = select(UserModel).where(UserModel.deleted_at.is_(None))
-        count_query = select(func.count()).select_from(UserModel).where(UserModel.deleted_at.is_(None))
+        """List users with an explicit soft-delete filter for administrators."""
+        query = select(UserModel)
+        count_query = select(func.count()).select_from(UserModel)
+
+        if not include_deleted:
+            query = query.where(UserModel.deleted_at.is_(None))
+            count_query = count_query.where(UserModel.deleted_at.is_(None))
+        elif status == "deleted":
+            query = query.where(UserModel.deleted_at.is_not(None))
+            count_query = count_query.where(UserModel.deleted_at.is_not(None))
+            status = None
 
         if status:
             query = query.where(UserModel.status == status)
             count_query = count_query.where(UserModel.status == status)
 
         if keyword:
-            pattern = f"%{keyword}%"
-            like_filter = or_(UserModel.username.ilike(pattern), UserModel.display_name.ilike(pattern))
+            escaped = (
+                keyword.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            pattern = f"%{escaped}%"
+            like_filter = or_(
+                UserModel.username.ilike(pattern, escape="\\"),
+                UserModel.display_name.ilike(pattern, escape="\\"),
+            )
             query = query.where(like_filter)
             count_query = count_query.where(like_filter)
 
@@ -212,6 +265,16 @@ class UserService:
             .values(revoked_at=datetime.now(timezone.utc).replace(tzinfo=None))
         )
 
+    def _mark_authorization_changed(self, user_id: str, reason: str) -> None:
+        """Persist cross-process invalidation in the same transaction."""
+        self.session.add(
+            OutboxMessageModel(
+                id=str(uuid.uuid4()),
+                topic="authorization.changed",
+                payload_json={"user_id": user_id, "reason": reason},
+            )
+        )
+
     async def update_user_status(
         self,
         user_id: str,
@@ -231,6 +294,7 @@ class UserService:
         if status in ("disabled", "locked"):
             await self._revoke_user_sessions(user_id)
 
+        self._mark_authorization_changed(user_id, "user_status_changed")
         await self.session.flush()
         return user
 
@@ -238,7 +302,7 @@ class UserService:
         """Verify a password against the stored hash."""
         try:
             return self.hasher.verify(user.password_hash, password)
-        except VerifyMismatchError:
+        except (VerifyMismatchError, VerificationError, ValueError, TypeError):
             return False
 
     async def change_password(
@@ -251,6 +315,25 @@ class UserService:
         user.password_hash = self.hasher.hash(new_password)
         user.authorization_version += 1  # Invalidate all sessions
         user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await self._revoke_user_sessions(user_id)
+        self._mark_authorization_changed(user_id, "password_changed")
+        await self.session.flush()
+        return user
+
+    async def restore_user(self, user_id: str, *, actor_user_id: str) -> UserModel:
+        """Restore a soft-deleted account without reviving old sessions."""
+        user = await self.session.scalar(
+            select(UserModel).where(UserModel.id == user_id).with_for_update()
+        )
+        if user is None or user.deleted_at is None:
+            raise UserNotFoundError(f"Deleted user {user_id} not found")
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        user.deleted_at = None
+        user.status = "active"
+        user.authorization_version += 1
+        user.updated_at = now
+        await self._revoke_user_sessions(user_id)
+        self._mark_authorization_changed(user_id, "user_restored")
         await self.session.flush()
         return user
 
@@ -277,6 +360,7 @@ class UserService:
         user.authorization_version += 1
 
         await self._revoke_user_sessions(user_id)
+        self._mark_authorization_changed(user_id, "user_soft_deleted")
         await self.session.flush()
         return user
 
@@ -317,14 +401,15 @@ class UserService:
             sess.revoked_at = now
         user.authorization_version += 1
         user.updated_at = now
+        self._mark_authorization_changed(user_id, "user_sessions_revoked")
         await self.session.flush()
         return len(active_sessions)
 
     async def update_last_login(self, user_id: str) -> None:
         """Update the last login timestamp.
-        
-        Note: This requires a migration to add last_login_at to nlp_users.
-        For now, this is a no-op placeholder.
         """
-        # TODO: Add last_login_at column via migration
-        pass
+        await self.session.execute(
+            update(UserModel)
+            .where(UserModel.id == user_id, UserModel.deleted_at.is_(None))
+            .values(last_login_at=datetime.now(timezone.utc).replace(tzinfo=None))
+        )

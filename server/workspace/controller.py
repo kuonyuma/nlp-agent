@@ -136,6 +136,7 @@ async def add_member(
             workspace_id,
             data.user_id,
             member_type=data.member_type,
+            actor_user_id=principal.user_id,
         )
         # P0-4：成员变更写入审计事件（对象级动作可溯源）
         await rbac_service.audit(
@@ -176,7 +177,12 @@ async def remove_member(
     )
 
     service = WorkspaceService(db)
-    removed = await service.remove_member(workspace_id, user_id)
+    try:
+        removed = await service.remove_member(
+            workspace_id, user_id, actor_user_id=principal.user_id
+        )
+    except WorkspaceServiceError as error:
+        raise HTTPException(status_code=409, detail=str(error))
     if not removed:
         raise HTTPException(status_code=404, detail="Member not found")
     # P0-4：成员变更写入审计事件（对象级动作可溯源）

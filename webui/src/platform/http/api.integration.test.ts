@@ -76,6 +76,8 @@ function waitUntil<T>(subscribe: (resolve: (value: T) => void) => void, timeoutM
 }
 
 describe.sequential("real frontend API client to FastAPI integration", () => {
+  const integrationUsername = process.env.PRO_NLP_INTEGRATION_USERNAME ?? "integration";
+  const integrationPassword = process.env.PRO_NLP_INTEGRATION_PASSWORD ?? "integration-password";
   let serverProcess: ChildProcess;
   let origin = "";
   let cookie = "";
@@ -123,9 +125,9 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
   });
 
   it("executes the real HTTP client against real authenticated FastAPI routes", async () => {
-    const auth = await api.login("nova", "test-password");
-    expect(auth.roles).toContain("admin");
-    expect((await ensureAuth()).user_id).toBe("nova");
+    const auth = await api.login(integrationUsername, integrationPassword);
+    expect(auth.roles).toContain("developer");
+    expect((await ensureAuth()).user_id).toBeTruthy();
 
     const session = await api.createSession("default");
     expect(session.workspace_id).toBe("default");
