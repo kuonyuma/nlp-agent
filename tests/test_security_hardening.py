@@ -34,7 +34,7 @@ from server.infrastructure.mysql.models import (
     UserModel,
     WorkspaceModel,
 )
-from server.user.schemas import UserCreate
+from server.user.schemas import UserCreate, UserResponse
 from server.user.service import UserService
 
 
