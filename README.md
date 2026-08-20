@@ -136,6 +136,9 @@ docker compose --profile monitor up -d
 主服务访问地址为 `http://服务器IP:8765`，监控地址为
 `http://服务器IP:8766`。数据会保存在 Docker 卷 `nova-data` 中，更新镜像不会丢失会话数据。
 
+图片理解工具的能力范围、安全目录与 VLM 配置见
+[`docs/image-understanding.md`](docs/image-understanding.md)。
+
 查看运行状态和日志：
 
 ```powershell

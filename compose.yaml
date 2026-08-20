@@ -67,6 +67,8 @@ services:
       NLP_AGENT_WEB_PORT: 8765
       NLP_AGENT_GATEWAY_TRANSPORT: redis
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - nova-data:/app/.data
     restart: unless-stopped
     depends_on:
       nova-migrate:
@@ -89,6 +91,8 @@ services:
     environment:
       NLP_AGENT_GATEWAY_TRANSPORT: redis
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - nova-data:/app/.data
     restart: unless-stopped
     depends_on:
       nova-migrate:
@@ -114,3 +118,4 @@ services:
 volumes:
   mysql-data:
   redis-data:
+  nova-data:
