@@ -90,10 +90,29 @@ describe("student stream rendering", () => {
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: "显示工具列表" }));
-    fireEvent.click(screen.getByRole("button", { name: "打开学习记录工具" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "打开学习记录工具" }));
 
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "学习记录" })).toBeVisible();
+  });
+
+  it("opens a floating tool picker from plus and exposes a draggable dock separator", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开文件工具" }));
+    fireEvent.click(screen.getByRole("button", { name: "显示工具列表" }));
+
+    expect(screen.getByRole("menu", { name: "工具列表" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "打开浏览器工具" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
+
+    const separator = screen.getByRole("separator", { name: "调整工具侧栏宽度" });
+    expect(separator).toHaveAttribute("aria-valuenow", "420");
+    fireEvent.pointerDown(separator, { clientX: 480 });
+    fireEvent.pointerMove(window, { clientX: 360 });
+    fireEvent.pointerUp(window);
+    expect(Number(separator.getAttribute("aria-valuenow"))).toBeGreaterThan(420);
   });
 
   it("shows a teaching configuration error returned by the Gateway", async () => {
