@@ -1,4 +1,4 @@
-import { BookOpenCheck, Moon, Sun, Wifi, WifiOff, X } from "lucide-react";
+import { Moon, PanelRightClose, PanelRightOpen, Sun, Wifi, WifiOff, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/platform/http/api";
 
@@ -12,6 +12,7 @@ import { MessageList } from "@/modules/student/components/MessageList";
 import { SettingsDialog } from "@/modules/student/components/SettingsDialog";
 import { SchoolLogo } from "@/shared/ui/SchoolLogo";
 import { Sidebar, SidebarToggle } from "@/modules/student/components/Sidebar";
+import { ToolDock, type ToolDockTool } from "@/modules/student/components/ToolDock";
 import { useStudentWorkspace } from "@/modules/student/workspace/public";
 import { useSessionScrollRestoration } from "@/modules/student/workspace/hooks/useSessionScrollRestoration";
 import type { CourseTopic, TeacherCatalog } from "@/shared/types";
@@ -23,7 +24,9 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Student mode starts focused on the learning canvas after every page load.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
-  const [learningOpen, setLearningOpen] = useState(false);
+  const [toolDockOpen, setToolDockOpen] = useState(false);
+  const [openTools, setOpenTools] = useState<ToolDockTool[]>([]);
+  const [activeTool, setActiveTool] = useState<ToolDockTool | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
@@ -61,6 +64,15 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
   const archived = useMemo(() => workspace.sessions.filter((session) => workspace.preferences.sessions[session.session_id]?.archived), [workspace.preferences.sessions, workspace.sessions]);
   const { scrollRef, onScroll } = useSessionScrollRestoration(workspace.activeSessionId, workspace.messages, workspace.loadingMessages);
   const setCollapsed = (collapsed: boolean) => { setSidebarCollapsed(collapsed); };
+  const openTool = (tool: ToolDockTool) => {
+    setOpenTools((current) => current.includes(tool) ? current : [...current, tool]);
+    setActiveTool(tool);
+  };
+  const closeTool = (tool: ToolDockTool) => {
+    const next = openTools.filter((item) => item !== tool);
+    setOpenTools(next);
+    if (activeTool === tool) setActiveTool(next[next.length - 1] ?? null);
+  };
 
   if (workspace.bootStatus === "loading") return <div className="boot-screen"><span className="boot-orbit" /><strong>正在进入 NLP 学习空间</strong><p>连接教学 Agent 与学习记录……</p></div>;
   if (workspace.bootStatus === "error") return <div className="boot-screen error"><WifiOff size={28} /><strong>暂时无法连接后端</strong><p>{workspace.error}</p><button type="button" onClick={() => location.reload()}>重新连接</button></div>;
@@ -70,7 +82,7 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
       <header className="thread-header">
         <SidebarToggle onClick={() => setCollapsed(false)} />
         <div className="thread-title" />
-        <div className="thread-header-actions"><SchoolLogo /></div>
+        <div className="thread-header-actions" />
       </header>
       <section className="empty-thread-home">
         <div>
@@ -108,16 +120,24 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
       <header className="thread-header">
         <SidebarToggle onClick={() => { setCollapsed(false); setSidebarOpen(true); }} />
         {hasMessages ? <div className="thread-title"><strong>{activeTitle}</strong><span className={statusOnline ? "online" : ""}>{statusOnline ? <Wifi size={12} /> : <WifiOff size={12} />}{statusText}</span></div> : <div className="thread-title" />}
-        <div className="thread-header-actions"><SchoolLogo /></div>
+        <div className="thread-header-actions">
+          <button className="icon-button thread-tool-toggle" type="button" aria-label={toolDockOpen ? "关闭工具侧栏" : "打开工具侧栏"} aria-pressed={toolDockOpen} onClick={() => setToolDockOpen((value) => !value)}>{toolDockOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
+          <button className="icon-button theme-toggle" type="button" aria-label="切换主题" onClick={() => void workspace.patchSettings({ theme: workspace.settings.theme === "dark" ? "light" : "dark" })}>{workspace.settings.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}</button>
+        </div>
       </header>
       {hasMessages ? <><div className="thread-scroll" ref={scrollRef} onScroll={onScroll}><MessageList messages={workspace.messages} loading={workspace.loadingMessages} showReasoning={workspace.settings.show_reasoning} onFollowUp={(text) => void workspace.send(text)} /></div>{composer()}</> : <div className="empty-thread-home"><div><h1>《自然语言处理》智能体 欢迎您！</h1><p>从一个 NLP 概念、模型原理或练习问题开始。</p>{composer(true)}</div></div>}
     </main>
-    <div className={`learning-hover-zone ${learningOpen ? "open" : ""}`} onMouseEnter={() => setLearningOpen(true)} onMouseLeave={() => setLearningOpen(false)} onFocus={() => setLearningOpen(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setLearningOpen(false); }}>
-      <button className="learning-rail-button" type="button" aria-label="学习记录" onClick={() => setLearningOpen((value) => !value)}><BookOpenCheck size={17} /><span>学习记录</span></button>
-      <LearningPanel open={learningOpen} onClose={() => setLearningOpen(false)} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setLearningOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />
-    </div>
-    <div className="student-theme-control"><button className="icon-button theme-toggle" type="button" aria-label="切换主题" onClick={() => void workspace.patchSettings({ theme: workspace.settings.theme === "dark" ? "light" : "dark" })}>{workspace.settings.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}</button></div>
-    {learningOpen && <button className="learning-backdrop" type="button" aria-label="关闭学习记录" onClick={() => setLearningOpen(false)} />}
+    <ToolDock
+      open={toolDockOpen}
+      openTools={openTools}
+      activeTool={activeTool}
+      onOpenChange={setToolDockOpen}
+      onOpenTool={openTool}
+      onCloseTool={closeTool}
+      onActiveToolChange={setActiveTool}
+      learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
+    />
+    <div className="student-school-logo"><SchoolLogo /></div>
     <SettingsDialog open={settingsOpen} settings={workspace.settings} learningContext={workspace.preferences.context} roles={workspace.authSession?.roles} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} onLearningContextChange={workspace.setLearningContext} onOpenDeveloper={() => { if (onNavigateTo) onNavigateTo("/developer"); else location.href = "/developer"; }} onOpenTeacher={() => { if (onNavigateTo) onNavigateTo("/teacher"); else location.href = "/teacher"; }} />
     <AccountDialog open={accountOpen} session={workspace.authSession} onClose={() => setAccountOpen(false)} onLogout={async () => { await workspace.logout(); setAccountOpen(false); }} />
     <ConfirmDialog open={!!deleteTarget} title={deleteTarget?.kind === "session" ? `删除“${deleteTarget.label}”对话？` : `删除“${deleteTarget?.label ?? ""}”分类？`} description={deleteTarget?.kind === "session" ? "删除后将同时清除后端对话记录，此操作无法撤销。" : "分类中的对话会保留，并移回“未分类”。"} onClose={() => setDeleteTarget(null)} onConfirm={() => { if (!deleteTarget) return; if (deleteTarget.kind === "session") void workspace.deleteSession(deleteTarget.id); else workspace.deleteCategory(deleteTarget.id); setDeleteTarget(null); }} />
