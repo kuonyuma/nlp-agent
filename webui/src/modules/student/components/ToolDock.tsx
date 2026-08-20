@@ -1,5 +1,6 @@
 import { BookOpenCheck, FileText, Globe2, Plus, Terminal, X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 
 export type ToolDockTool = "files" | "learning" | "browser" | "terminal";
 
@@ -27,6 +28,23 @@ function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning"> }) {
   </section>;
 }
 
+const DEFAULT_DOCK_WIDTH = 420;
+const MIN_DOCK_WIDTH = 320;
+const MAX_DOCK_WIDTH = 760;
+
+function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }) {
+  return <nav className="tool-dock-picker" role="menu" aria-label="工具列表">
+    {tools.map((item) => {
+      const Icon = item.icon;
+      return <button key={item.id} type="button" role="menuitem" aria-label={item.buttonLabel} onClick={() => onOpenTool(item.id)}>
+        <span><Icon size={17} /></span>
+        <strong>{item.label}</strong>
+        <kbd>{item.shortcut}</kbd>
+      </button>;
+    })}
+  </nav>;
+}
+
 export function ToolDock({ open, openTools, activeTool, onOpenChange, onOpenTool, onCloseTool, onActiveToolChange, learningPanel }: {
   open: boolean;
   openTools: ToolDockTool[];
@@ -37,8 +55,52 @@ export function ToolDock({ open, openTools, activeTool, onOpenChange, onOpenTool
   onActiveToolChange: (tool: ToolDockTool | null) => void;
   learningPanel: ReactNode;
 }) {
-  return <aside className={["tool-dock", open && "open"].filter(Boolean).join(" ")} aria-label="工具侧栏">
+  const [width, setWidth] = useState(DEFAULT_DOCK_WIDTH);
+  const [resizing, setResizing] = useState(false);
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
+  const resizeStart = useRef<{ pointerX: number; width: number } | null>(null);
+
+  useEffect(() => {
+    if (!resizing) return undefined;
+    const handlePointerMove = (event: globalThis.PointerEvent) => {
+      const start = resizeStart.current;
+      if (!start) return;
+      const nextWidth = Math.min(MAX_DOCK_WIDTH, Math.max(MIN_DOCK_WIDTH, start.width - (event.clientX - start.pointerX)));
+      setWidth(nextWidth);
+    };
+    const stopResizing = () => {
+      resizeStart.current = null;
+      setResizing(false);
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResizing, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResizing);
+    };
+  }, [resizing]);
+
+  const openTool = (tool: ToolDockTool) => {
+    setToolMenuOpen(false);
+    onOpenTool(tool);
+  };
+  const beginResize = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    resizeStart.current = { pointerX: event.clientX, width };
+    setResizing(true);
+  };
+  const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const delta = event.key === "ArrowLeft" ? 24 : -24;
+    setWidth((current) => Math.min(MAX_DOCK_WIDTH, Math.max(MIN_DOCK_WIDTH, current + delta)));
+  };
+  const dockStyle = { "--tool-dock-width": `${width}px` } as CSSProperties;
+  const showHome = openTools.length === 0 && activeTool === null;
+
+  return <aside className={["tool-dock", open && "open", resizing && "resizing"].filter(Boolean).join(" ")} aria-label="工具侧栏" style={dockStyle}>
     {open && <div className="tool-dock-surface">
+      <div className="tool-dock-resize-handle" role="separator" aria-label="调整工具侧栏宽度" aria-orientation="vertical" aria-valuemin={MIN_DOCK_WIDTH} aria-valuemax={MAX_DOCK_WIDTH} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={beginResize} onKeyDown={resizeWithKeyboard} />
       <header className="tool-dock-tabs" role="tablist" aria-label="已打开的工具">
         {openTools.length ? openTools.map((tool) => {
           const item = tools.find((candidate) => candidate.id === tool)!;
@@ -49,19 +111,20 @@ export function ToolDock({ open, openTools, activeTool, onOpenChange, onOpenTool
             <button type="button" aria-label={"关闭" + item.label} onClick={() => onCloseTool(tool)}><X size={14} /></button>
           </div>;
         }) : <span className="tool-dock-tab-placeholder">工具</span>}
-        <button className="tool-dock-add-tab" type="button" aria-label="显示工具列表" onClick={() => onActiveToolChange(null)}><Plus size={16} /></button>
+        <button className="tool-dock-add-tab" type="button" aria-label="显示工具列表" aria-expanded={toolMenuOpen} aria-haspopup="menu" onClick={() => setToolMenuOpen((value) => !value)}><Plus size={16} /></button>
         <button className="tool-dock-close" type="button" aria-label="关闭工具侧栏" onClick={() => onOpenChange(false)}><X size={17} /></button>
       </header>
-      {activeTool === "learning" ? learningPanel : activeTool ? <EmptyToolPanel tool={activeTool} /> : <nav className="tool-dock-home" aria-label="工具列表">
+      {toolMenuOpen && <ToolPicker onOpenTool={openTool} />}
+      {showHome ? <nav className="tool-dock-home" aria-label="工具列表">
         {tools.map((item) => {
           const Icon = item.icon;
-          return <button key={item.id} type="button" aria-label={item.buttonLabel} onClick={() => onOpenTool(item.id)}>
+          return <button key={item.id} type="button" aria-label={item.buttonLabel} onClick={() => openTool(item.id)}>
             <span><Icon size={18} /></span>
             <strong>{item.label}</strong>
             <kbd>{item.shortcut}</kbd>
           </button>;
         })}
-      </nav>}
+      </nav> : activeTool === "learning" ? learningPanel : activeTool ? <EmptyToolPanel tool={activeTool} /> : null}
     </div>}
   </aside>;
 }
