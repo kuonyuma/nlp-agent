@@ -44,6 +44,17 @@ describe("Sidebar delete requests", () => {
     expect(onExpand).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the new-chat action usable while the sidebar rail is collapsed", () => {
+    const onCreate = vi.fn();
+    const onExpand = vi.fn();
+    render(<Sidebar {...props} open={false} collapsed onCreate={onCreate} onExpand={onExpand} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "newChat" }));
+
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onExpand).not.toHaveBeenCalled();
+  });
+
   it("creates a category through the custom dialog without using a native prompt", () => {
     const onAddCategory = vi.fn(() => "category_3");
     render(<Sidebar {...props} onAddCategory={onAddCategory} />);

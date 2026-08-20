@@ -54,7 +54,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
 
   const createCategory = () => setCategoryDialogOpen(true);
   const expandFromCollapsedRail = (event: MouseEvent<HTMLElement>) => {
-    if (!collapsed) return;
+    if (!collapsed || event.target !== event.currentTarget) return;
     event.preventDefault();
     event.stopPropagation();
     onExpand();
