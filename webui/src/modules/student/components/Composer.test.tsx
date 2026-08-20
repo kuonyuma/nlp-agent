@@ -83,4 +83,16 @@ describe("Composer", () => {
     rerender(<Composer {...props} modelProfile="qwen" running />);
     expect(screen.getByRole("combobox", { name: "选择模型" })).toBeDisabled();
   });
+
+  it("renders attachment upload button when sessionId is provided and disables when absent", () => {
+    const { rerender } = render(
+      <Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId={null} />
+    );
+    expect(screen.getByRole("button", { name: "上传附件" })).toBeDisabled();
+
+    rerender(
+      <Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId="sess-1" />
+    );
+    expect(screen.getByRole("button", { name: "上传附件" })).toBeEnabled();
+  });
 });

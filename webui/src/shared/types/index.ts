@@ -141,6 +141,17 @@ export interface ActivityItem {
   completedAt?: string;
 }
 
+export interface ChatAttachment {
+  fileName: string;
+  url: string;
+  mediaType: string;
+  width: number;
+  height: number;
+  status: 'uploading' | 'ready' | 'error';
+  progress?: number;
+  errorMessage?: string;
+}
+
 export interface ChatMessage {
   id: string;
   turnId: string;
@@ -149,6 +160,7 @@ export interface ChatMessage {
   reasoning?: string;
   status?: TurnStatus;
   activities?: ActivityItem[];
+  attachments?: ChatAttachment[];
   createdAt: string;
   startedAt?: string;
   completedAt?: string;

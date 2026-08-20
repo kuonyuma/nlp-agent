@@ -113,4 +113,27 @@ describe("StudentSocket", () => {
     expect(resent).not.toContainEqual(expect.objectContaining({ type: "chat.send", request_id: "request_1" }));
     client.close();
   });
+
+  it("includes attachments in chat.send payload when provided", () => {
+    const instances: FakeWebSocket[] = [];
+    vi.stubGlobal("WebSocket", class extends FakeWebSocket {
+      constructor(url: string) { super(url); instances.push(this); }
+    });
+    const client = new StudentSocket(vi.fn(), vi.fn());
+    client.setSession("session_att");
+    instances[0].open();
+    instances[0].onmessage?.({ data: JSON.stringify({ v: "1", type: "connection.ready", timestamp: new Date().toISOString(), payload: {} }) });
+    client.sendChat("session_att", "check picture", "req_att", undefined, undefined, [{ file_name: "test.png" }]);
+
+    const frames = instances[0].sent.map((value) => JSON.parse(value) as { type: string; payload: Record<string, unknown> });
+    expect(frames[1]).toMatchObject({
+      type: "chat.send",
+      payload: {
+        session_id: "session_att",
+        content: "check picture",
+        attachments: [{ file_name: "test.png" }],
+      },
+    });
+    client.close();
+  });
 });

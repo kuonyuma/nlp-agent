@@ -32,7 +32,7 @@ export function useTurnSender({
   setMessages,
   setRequestError,
 }: TurnSenderOptions) {
-  const send = useCallback(async (content: string) => {
+  const send = useCallback(async (content: string, attachments?: Array<{ file_name: string }>) => {
     setRequestError("");
     const requestId = createUuid();
     inFlightTurnIds.current.add(requestId);
@@ -53,6 +53,7 @@ export function useTurnSender({
       turnId: requestId,
       role: "user",
       content: content.trim(),
+      ...(attachments?.length ? { attachments: attachments.map(a => ({ fileName: a.file_name, url: "", mediaType: "", width: 0, height: 0, status: "ready" as const })) } : {}),
       createdAt: new Date().toISOString(),
     }]);
     const currentMeta = preferences.sessions[sessionId];
@@ -60,7 +61,7 @@ export function useTurnSender({
       updateSessionMeta(sessionId, { title: deriveTitle(content), topic: preferences.context.topic_name });
     }
     socketRef.current?.setSession(sessionId);
-    socketRef.current?.sendChat(sessionId, content.trim(), requestId, preferences.context, settings.model_profile);
+    socketRef.current?.sendChat(sessionId, content.trim(), requestId, preferences.context, settings.model_profile, attachments);
   }, [activeSessionRef, createBackendSession, inFlightTurnIds, pendingRequests, preferences.context, preferences.sessions, setMessages, setRequestError, settings.model_profile, socketRef, updateSessionMeta]);
 
   const cancel = useCallback(() => {

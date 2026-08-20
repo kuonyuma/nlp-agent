@@ -92,6 +92,7 @@ describe("student stream rendering", () => {
 
   it("keeps the chat page mounted through real tool, worker and text stream events", async () => {
     render(<App />);
+    expect(await screen.findByRole("combobox", { name: "选择模型" })).toBeVisible();
     const input = await screen.findByRole("textbox", { name: "学习问题" });
     fireEvent.change(input, { target: { value: "解释 Attention" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
