@@ -65,6 +65,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   const [resizing, setResizing] = useState(false);
   const [maxWidth, setMaxWidth] = useState(getMaxDockWidth);
   const resizeStart = useRef<{ pointerX: number; width: number } | null>(null);
+  const tabStripRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const updateMaxWidth = () => {
@@ -96,6 +97,12 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     };
   }, [maxWidth, resizing]);
 
+  useEffect(() => {
+    if (!activeTool) return;
+    const activeTab = tabStripRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.parentElement;
+    activeTab?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeTool, openTools]);
+
   const openTool = (tool: ToolDockTool) => {
     onToolMenuOpenChange(false);
     onOpenTool(tool);
@@ -118,7 +125,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     {open && <div className="tool-dock-surface">
       {!expanded && <div className="tool-dock-resize-handle" role="separator" aria-label="调整工具侧栏宽度" aria-orientation="vertical" aria-valuemin={MIN_DOCK_WIDTH} aria-valuemax={maxWidth} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={beginResize} onKeyDown={resizeWithKeyboard} />}
       {openTools.length > 0 && <header className="tool-dock-tabs" role="tablist" aria-label="已打开的工具">
-        <div className="tool-dock-tab-strip">
+        <div ref={tabStripRef} className="tool-dock-tab-strip">
           {openTools.map((tool) => {
             const item = tools.find((candidate) => candidate.id === tool)!;
             const Icon = item.icon;
