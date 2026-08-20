@@ -162,11 +162,12 @@ export interface ActivityItem {
 
 export interface ChatAttachment {
   fileName: string;
+  displayName?: string;
   url: string;
   mediaType: string;
   width: number;
   height: number;
-  status: 'uploading' | 'ready' | 'error';
+  status: "uploading" | "ready" | "error";
   progress?: number;
   errorMessage?: string;
 }

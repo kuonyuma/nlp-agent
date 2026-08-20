@@ -1,8 +1,23 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { uploadAttachment } from "@/platform/http/api";
 import { Composer } from "./Composer";
 
+vi.mock("@/platform/http/api", () => ({ uploadAttachment: vi.fn() }));
+
 describe("Composer", () => {
+  beforeEach(() => {
+    vi.mocked(uploadAttachment).mockReset();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:attachment-preview"),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn(),
+    });
+  });
+
   it("submits on Enter and keeps Shift+Enter for multiline questions", () => {
     const onSend = vi.fn();
     render(<Composer disabled={false} running={false} onSend={onSend} onCancel={vi.fn()} />);
@@ -94,5 +109,66 @@ describe("Composer", () => {
       <Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId="sess-1" />
     );
     expect(screen.getByRole("button", { name: "上传附件" })).toBeEnabled();
+  });
+
+  it("keeps the uploaded safe filename and sends a ready image without text", async () => {
+    const onSend = vi.fn();
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      file_name: "safe-image.png",
+      url: "/api/v1/uploads/sess-1/safe-image.png",
+      media_type: "image/png",
+      size_bytes: 100,
+      width: 120,
+      height: 80,
+      sha256: "a".repeat(64),
+    });
+    const { container } = render(
+      <Composer disabled={false} running={false} onSend={onSend} onCancel={vi.fn()} sessionId="sess-1" />
+    );
+    const file = new File(["image"], "original.png", { type: "image/png" });
+
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByLabelText("发送")).toBeEnabled());
+    fireEvent.click(screen.getByLabelText("发送"));
+
+    expect(onSend).toHaveBeenCalledWith("", [expect.objectContaining({
+      fileName: "safe-image.png",
+      displayName: "original.png",
+      url: "/api/v1/uploads/sess-1/safe-image.png",
+      status: "ready",
+    })]);
+  });
+
+  it("blocks sending during upload and lets a failed attachment retry or be removed", async () => {
+    let rejectUpload: ((reason?: unknown) => void) | undefined;
+    vi.mocked(uploadAttachment).mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectUpload = reject;
+    }));
+    const { container } = render(
+      <Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId="sess-1" />
+    );
+    const file = new File(["image"], "failed.png", { type: "image/png" });
+
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    expect(screen.getByLabelText("发送")).toBeDisabled();
+    rejectUpload?.(new Error("network"));
+    const retry = await screen.findByRole("button", { name: "重试附件 failed.png" });
+    expect(screen.getByRole("button", { name: "移除附件 failed.png" })).toBeEnabled();
+
+    vi.mocked(uploadAttachment).mockResolvedValueOnce({
+      file_name: "retried.png",
+      url: "/api/v1/uploads/sess-1/retried.png",
+      media_type: "image/png",
+      size_bytes: 100,
+      width: 100,
+      height: 100,
+      sha256: "b".repeat(64),
+    });
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getByLabelText("发送")).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "移除附件 failed.png" }));
+
+    expect(screen.queryByRole("img", { name: "failed.png" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("发送")).toBeDisabled();
   });
 });

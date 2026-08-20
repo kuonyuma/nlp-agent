@@ -77,19 +77,34 @@ def get_write_access(
         ) from exc
 
 
+async def _resolve_session_context(
+    request: Request,
+    principal: AuthenticatedPrincipal,
+    session_id: str,
+) -> SessionContext:
+    gateway = getattr(request.app.state, "gateway", None)
+    sessions = getattr(gateway, "sessions", None)
+    if sessions is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="session service is unavailable",
+        )
+    try:
+        return await sessions.resolve(principal, session_id)
+    except (FileNotFoundError, PermissionError, ValueError) as exc:
+        # Do not reveal whether a session exists outside this principal's scope.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
+
+
 @router.post("", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_image(
+    request: Request,
     session_id: str = Form(..., min_length=1, max_length=128),
     file: UploadFile = File(...),
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     _write: None = Depends(get_write_access),
 ) -> UploadResponse:
-    workspace_id = next(iter(principal.workspace_ids), "default") if principal.workspace_ids else "default"
-    context = SessionContext(
-        session_id=session_id,
-        user_id=principal.user_id,
-        workspace_id=workspace_id,
-    )
+    context = await _resolve_session_context(request, principal, session_id)
     data = await file.read(_LIMITS.max_file_bytes + 1)
     if len(data) > _LIMITS.max_file_bytes:
         raise HTTPException(
@@ -135,18 +150,14 @@ async def upload_image(
 
 @router.get("/{session_id}/{file_name}")
 async def get_upload(
+    request: Request,
     session_id: str,
     file_name: str,
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
 ) -> FileResponse:
     if "/" in file_name or "\\" in file_name or ".." in file_name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    workspace_id = next(iter(principal.workspace_ids), "default") if principal.workspace_ids else "default"
-    context = SessionContext(
-        session_id=session_id,
-        user_id=principal.user_id,
-        workspace_id=workspace_id,
-    )
+    context = await _resolve_session_context(request, principal, session_id)
     uploads_dir = session_uploads_root(context)
     file_path = uploads_dir / file_name
     if not file_path.is_file():

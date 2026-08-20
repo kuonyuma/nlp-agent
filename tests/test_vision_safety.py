@@ -14,6 +14,7 @@ from server.tools.vision.input_resolver import (
     session_uploads_root,
 )
 from core.session_context import SessionContext
+from server.tools.vision.imaging import decode_bgr
 from server.tools.vision.safety import ImageSafetyLimits
 
 
@@ -84,6 +85,35 @@ def test_resolver_accepts_project_relative_upload_path(tmp_path: Path) -> None:
     asset = resolver.resolve(".data/uploads/relative.png")
 
     assert asset.reference.file_name == "relative.png"
+
+
+def test_resolver_accepts_bare_filename_inside_session_upload_root(
+    tmp_path: Path,
+) -> None:
+    resolver, uploads = _resolver(tmp_path)
+    _write_image(uploads / "session-image.png")
+
+    asset = resolver.resolve("session-image.png")
+
+    assert asset.reference.file_name == "session-image.png"
+
+
+def test_exif_rotation_uses_same_dimensions_as_decoded_coordinate_space(
+    tmp_path: Path,
+) -> None:
+    resolver, uploads = _resolver(tmp_path)
+    path = uploads / "rotated.jpg"
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (80, 120), color=(10, 20, 30)).save(
+        path, format="JPEG", exif=exif
+    )
+
+    asset = resolver.resolve("rotated.jpg")
+    decoded = decode_bgr(asset.data, auto_rotate=True)
+
+    assert (asset.reference.width, asset.reference.height) == (120, 80)
+    assert (decoded.shape[1], decoded.shape[0]) == (120, 80)
 
 
 @pytest.mark.parametrize(

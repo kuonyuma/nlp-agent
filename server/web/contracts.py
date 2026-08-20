@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from core.learning import LearningContext
 from gateway.contracts import EvaluationContext
 
@@ -67,7 +67,7 @@ class ChatAttachment(StrictModel):
 
 class SubmitChatBody(StrictModel):
     session_id: str
-    content: str = Field(min_length=1, max_length=200_000)
+    content: str = Field(default="", max_length=200_000)
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
@@ -75,6 +75,12 @@ class SubmitChatBody(StrictModel):
     model_profile: str | None = Field(
         default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
     )
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "SubmitChatBody":
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content 或 attachments 至少提供一项")
+        return self
 
 
 class InjectChatBody(StrictModel):
@@ -138,13 +144,19 @@ class CommandEnvelope(StrictModel):
 
 class ChatSendPayload(StrictModel):
     session_id: str
-    content: str = Field(min_length=1, max_length=200_000)
+    content: str = Field(default="", max_length=200_000)
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
     model_profile: str | None = Field(
         default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$"
     )
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "ChatSendPayload":
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content 或 attachments 至少提供一项")
+        return self
 
 
 class ChatInjectPayload(StrictModel):

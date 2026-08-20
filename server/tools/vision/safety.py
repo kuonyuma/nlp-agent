@@ -26,6 +26,8 @@ SUPPORTED_FORMATS: dict[str, str] = {
     "WEBP": "image/webp",
 }
 SUPPORTED_MEDIA_TYPES = frozenset(SUPPORTED_FORMATS.values())
+_EXIF_ORIENTATION_TAG = 274
+_EXIF_DIMENSION_SWAPS = frozenset({5, 6, 7, 8})
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +213,10 @@ def _inspect_image(data: bytes, limits: ImageSafetyLimits) -> tuple[str, int, in
 
             with Image.open(BytesIO(data)) as decoded:
                 decoded.seek(0)
+                orientation = int(decoded.getexif().get(_EXIF_ORIENTATION_TAG, 1))
                 decoded.load()
+                if orientation in _EXIF_DIMENSION_SWAPS:
+                    width, height = height, width
     except VisionError:
         raise
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:

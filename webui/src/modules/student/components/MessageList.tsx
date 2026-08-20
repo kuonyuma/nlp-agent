@@ -77,7 +77,7 @@ function UserMessage({ message }: { message: ChatMessage }) {
         <div className="message-attachments" style={{ display: "flex", gap: "8px", marginBottom: content ? "8px" : 0 }}>
           {attachments.map((att, i) => (
             <a key={i} href={att.url || "#"} target="_blank" rel="noopener noreferrer" style={{ display: "inline-block" }}>
-              {att.url ? <img src={att.url} alt={att.fileName} style={{ width: 60, height: 60, objectFit: "cover", borderRadius: "4px" }} /> : <span>{att.fileName}</span>}
+              {att.url ? <img src={att.url} alt={att.displayName ?? att.fileName} style={{ width: 60, height: 60, objectFit: "cover", borderRadius: "4px" }} /> : <span>{att.displayName ?? att.fileName}</span>}
             </a>
           ))}
         </div>

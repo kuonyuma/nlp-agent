@@ -120,6 +120,45 @@ async def test_blank_photo_defaults_to_describe(provider, router):
 
 
 @pytest.mark.asyncio
+async def test_sparse_fraction_layout_routes_to_formula(provider, router):
+    img = np.ones((400, 600, 3), dtype=np.uint8) * 255
+    cv2.putText(
+        img, "a + b", (190, 155), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2
+    )
+    cv2.line(img, (175, 200), (390, 200), (0, 0, 0), 2)
+    cv2.putText(
+        img, "c - d", (190, 260), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2
+    )
+    is_success, buffer = cv2.imencode(".png", img)
+    assert is_success
+    asset = _create_asset(buffer.tobytes(), 600, 400)
+
+    signals = await provider.detect(asset)
+    decision = router.route("auto", signals)
+
+    assert signals.image_category == "formula"
+    assert decision.task_executed == "formula"
+    assert decision.route == "fusion"
+
+
+@pytest.mark.asyncio
+async def test_sparse_plain_text_does_not_route_to_formula(provider, router):
+    img = np.ones((400, 600, 3), dtype=np.uint8) * 255
+    cv2.putText(
+        img, "plain text", (160, 210), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2
+    )
+    is_success, buffer = cv2.imencode(".png", img)
+    assert is_success
+    asset = _create_asset(buffer.tobytes(), 600, 400)
+
+    signals = await provider.detect(asset)
+    decision = router.route("auto", signals)
+
+    assert signals.image_category != "formula"
+    assert decision.task_executed != "formula"
+
+
+@pytest.mark.asyncio
 async def test_quality_score_is_between_0_and_1(provider):
     img = np.ones((100, 100, 3), dtype=np.uint8) * 255
     is_success, buffer = cv2.imencode(".png", img)

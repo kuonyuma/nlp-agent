@@ -16,8 +16,9 @@ models — so every routing decision can be explained by the emitted
   at least two separated column clusters (borderless tables, column layouts);
   ordinary paragraphs form a single cluster and score zero.
 - ``has_data_labels``: many small text components inside the axes region.
-- ``has_legend`` / formula detection are intentionally not inferred from CV;
-  they stay ``False``/``unknown`` rather than guessing.
+- ``image_category=formula``: sparse text with a short internal fraction bar,
+  excluding grids and axes.  This is intentionally conservative.
+- ``has_legend`` is not inferred from CV and stays ``False``.
 """
 
 from __future__ import annotations
@@ -218,6 +219,12 @@ class OpenCVSignalProvider:
             v_mask, horizontal=False,
             min_span=min_span_v, max_thickness=max_thickness,
         )
+        formula_horizontals = _long_lines(
+            h_mask,
+            horizontal=True,
+            min_span=max(8, int(width * 0.08)),
+            max_thickness=max_thickness,
+        )
 
         has_grid = (
             len(horizontals) >= self.min_grid_lines
@@ -251,6 +258,20 @@ class OpenCVSignalProvider:
 
         lines = _line_boxes(components, width, height)
         aligned_ratio = _aligned_text_ratio(lines, width)
+        formula_bars = [
+            line
+            for line in formula_horizontals
+            if width * 0.08 <= line.w <= width * 0.65
+            and height * 0.1 <= line.center_y <= height * 0.9
+        ]
+        formula_like = (
+            not has_grid
+            and not has_axes
+            and 0 < coverage < 0.15
+            and len(components) >= 3
+            and len(lines) <= 4
+            and bool(formula_bars)
+        )
 
         data_labels = 0
         if has_axes:
@@ -273,6 +294,8 @@ class OpenCVSignalProvider:
 
         if has_axes:
             category = "chart"
+        elif formula_like:
+            category = "formula"
         elif coverage >= 0.15:
             category = "document"
         elif coverage <= 0.02:

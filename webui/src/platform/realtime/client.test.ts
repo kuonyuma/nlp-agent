@@ -82,7 +82,14 @@ describe("StudentSocket", () => {
     await Promise.resolve();
     instances[0].open();
     instances[0].onmessage?.({ data: JSON.stringify({ v: "1", type: "connection.ready", timestamp: new Date().toISOString(), payload: {} }) });
-    client.sendChat("session_1", "hello", "request_1");
+    client.sendChat(
+      "session_1",
+      "hello",
+      "request_1",
+      undefined,
+      undefined,
+      [{ file_name: "safe-image.png" }],
+    );
 
     instances[0].disconnect();
     vi.advanceTimersByTime(500);
@@ -90,8 +97,12 @@ describe("StudentSocket", () => {
     instances[1].open();
     instances[1].onmessage?.({ data: JSON.stringify({ v: "1", type: "connection.ready", timestamp: new Date().toISOString(), payload: {} }) });
 
-    const resent = instances[1].sent.map((value) => JSON.parse(value) as { type: string; request_id: string });
-    expect(resent).toContainEqual(expect.objectContaining({ type: "chat.send", request_id: "request_1" }));
+    const resent = instances[1].sent.map((value) => JSON.parse(value) as { type: string; request_id: string; payload: Record<string, unknown> });
+    expect(resent).toContainEqual(expect.objectContaining({
+      type: "chat.send",
+      request_id: "request_1",
+      payload: expect.objectContaining({ attachments: [{ file_name: "safe-image.png" }] }),
+    }));
     client.close();
   });
 
