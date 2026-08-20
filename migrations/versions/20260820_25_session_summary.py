@@ -22,10 +22,11 @@ def _has_column(table: str, column: str) -> bool:
 
 
 def upgrade() -> None:
-    # ``title`` already exists and holds the raw first-message text until the
-    # LLM summarizer overwrites it.  ``title_updated_at`` records the *basis*
-    # of the last summary (the newest completed turn's ``completed_at``), so a
-    # conditional UPDATE can reject out-of-order writes without a second column.
+    # ``title`` already exists (``server_default=""``); it stays empty until the
+    # LLM summarizer writes the generated topic.  ``title_updated_at`` records
+    # the *basis* of the last summary (the newest completed turn's
+    # ``completed_at``), so a conditional UPDATE can reject out-of-order writes
+    # without a second column.
     #
     # The add is guarded because a concurrent migration may already have
     # introduced this column; re-adding it fails CI with ``1060 Duplicate

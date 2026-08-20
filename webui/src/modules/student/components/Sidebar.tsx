@@ -102,7 +102,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
             return <div className={`session-item ${activeId === session.session_id ? "active" : ""}`} key={session.session_id}>
               <button className="session-main" type="button" onClick={() => { onSelect(session.session_id); onClose(); }}><span>{title}</span></button>
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
-                <button type="button" onClick={() => { const title = prompt("重命名学习对话", meta.title ?? ""); if (title?.trim()) onMeta(session.session_id, { title: title.trim() }); }}><Pencil size={14} />重命名</button>
+                <button type="button" onClick={() => { const name = prompt("重命名学习对话", title); if (name?.trim()) onMeta(session.session_id, { title: name.trim() }); }}><Pencil size={14} />重命名</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { archived: !meta.archived })}><Archive size={14} />{meta.archived ? "移出归档" : "归档"}</button>
                 <div className="session-category-actions"><span>移动到分类</span><button type="button" onClick={() => onMeta(session.session_id, { categoryId: undefined })}>未分类</button>{preferences.categories.map((category) => <button key={category.id} type="button" onClick={() => onMeta(session.session_id, { categoryId: category.id })}>{category.name}</button>)}</div>

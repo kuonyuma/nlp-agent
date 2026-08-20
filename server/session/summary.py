@@ -187,11 +187,18 @@ async def generate_and_store_summary(
         return False
 
 
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
 def schedule_summary(
     session_factory: async_sessionmaker[AsyncSession], session_id: str
 ) -> None:
     """Fire-and-forget summary scheduling; safe to call from any async context."""
-    asyncio.create_task(
+    task = asyncio.create_task(
         generate_and_store_summary(session_id, session_factory),
         name=f"session-summary:{session_id}",
     )
+    # Hold a strong reference so the task is not garbage-collected while
+    # suspended on the LLM await; discard it once it finishes.
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
