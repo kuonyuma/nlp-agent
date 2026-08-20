@@ -587,6 +587,7 @@ button { color: inherit; }
 .thread-tool-toggle[aria-pressed="true"],.tool-dock-expand-toggle[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 .student-school-logo { position: fixed; z-index: 41; top: 0; left: 0; pointer-events: none; line-height: 0; }
 .student-school-logo .school-logo { width: clamp(136px, 14vw, 192px); height: 48px; overflow: visible; border: 0; border-radius: 0; box-shadow: none; }
+.student-app-shell > .sidebar { box-sizing: border-box; padding-top: 48px; }
 .tool-dock { position: relative; z-index: 34; width: 0; flex: 0 0 0; overflow: hidden; border-left: 0 solid var(--border); background: var(--bg); transition: width .26s cubic-bezier(.2,.8,.2,1), flex-basis .26s cubic-bezier(.2,.8,.2,1), border-color .2s ease; }
 .tool-dock.open { width: min(var(--tool-dock-width), 88vw); flex-basis: min(var(--tool-dock-width), 88vw); border-left-width: 1px; }
 .tool-dock.open.expanded { width: auto; min-width: 0; flex: 1 1 0; }
