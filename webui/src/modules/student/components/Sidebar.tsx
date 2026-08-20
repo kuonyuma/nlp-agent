@@ -4,8 +4,15 @@ import { useTranslation } from "react-i18next";
 import novaMarkUrl from "../../../../logo/nova-remove.png";
 
 import { CategoryDialog } from "@/modules/student/components/CategoryDialog";
-import { deriveTitle } from "@/platform/storage/learning-preferences";
 import type { LearningPreferences, SessionLearningMeta, SessionSummary } from "@/shared/types";
+
+const DEFAULT_SESSION_TITLE = "新的学习对话";
+
+function displayTitle(meta: SessionLearningMeta | undefined, session: SessionSummary): string {
+  // A manual rename always wins; otherwise fall back to the backend LLM title.
+  if (meta?.title && meta.title !== DEFAULT_SESSION_TITLE) return meta.title;
+  return session.title || DEFAULT_SESSION_TITLE;
+}
 
 export function Sidebar({ sessions, preferences, activeId, open, collapsed, connected, onClose, onCollapse, onExpand, onSelect, onCreate, onMeta, onAddCategory, onRenameCategory, onDeleteCategory, onDelete, onAccount, onSettings }: {
   sessions: SessionSummary[];
@@ -35,7 +42,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   const visible = useMemo(() => sessions.filter((session) => {
     const meta = preferences.sessions[session.session_id];
     if (!!meta?.archived !== showArchived) return false;
-    const title = meta?.title ?? deriveTitle(session.session_id);
+    const title = displayTitle(meta, session);
     return title.toLowerCase().includes(query.toLowerCase());
   }), [preferences.sessions, query, sessions, showArchived]);
   const grouped = useMemo(() => {
@@ -91,14 +98,15 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
           </h3>
           {group.items.map((session) => {
             const meta = preferences.sessions[session.session_id] ?? {};
+            const title = displayTitle(meta, session);
             return <div className={`session-item ${activeId === session.session_id ? "active" : ""}`} key={session.session_id}>
-              <button className="session-main" type="button" onClick={() => { onSelect(session.session_id); onClose(); }}><span>{meta.title ?? "新的学习对话"}</span></button>
+              <button className="session-main" type="button" onClick={() => { onSelect(session.session_id); onClose(); }}><span>{title}</span></button>
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
                 <button type="button" onClick={() => { const title = prompt("重命名学习对话", meta.title ?? ""); if (title?.trim()) onMeta(session.session_id, { title: title.trim() }); }}><Pencil size={14} />重命名</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { archived: !meta.archived })}><Archive size={14} />{meta.archived ? "移出归档" : "归档"}</button>
                 <div className="session-category-actions"><span>移动到分类</span><button type="button" onClick={() => onMeta(session.session_id, { categoryId: undefined })}>未分类</button>{preferences.categories.map((category) => <button key={category.id} type="button" onClick={() => onMeta(session.session_id, { categoryId: category.id })}>{category.name}</button>)}</div>
-                <button className="danger" type="button" onClick={() => onDelete(session.session_id, meta.title ?? "新的学习对话")}><Trash2 size={14} />删除</button>
+                <button className="danger" type="button" onClick={() => onDelete(session.session_id, title)}><Trash2 size={14} />删除</button>
               </div></details>
               {meta.favorite && <Heart className="favorite-mark" size={11} fill="currentColor" />}
             </div>;

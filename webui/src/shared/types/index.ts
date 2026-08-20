@@ -113,6 +113,7 @@ export interface SessionSummary {
   channel: string;
   created_at?: number;
   last_active?: number;
+  title?: string;
 }
 
 export interface TurnRecord {

@@ -69,4 +69,19 @@ describe("Sidebar delete requests", () => {
     expect(screen.queryByRole("dialog", { name: "新建分类" })).not.toBeInTheDocument();
     expect(onAddCategory).not.toHaveBeenCalled();
   });
+
+  it("renders the backend title when the session has no manual rename", () => {
+    const sessions = [{ session_id: "session_2", user_id: "student", workspace_id: "default", channel: "web", title: "Transformer 模型讲解" }];
+    render(<Sidebar {...props} sessions={sessions} preferences={{ ...props.preferences, sessions: {} }} />);
+
+    expect(screen.getByText("Transformer 模型讲解")).toBeInTheDocument();
+  });
+
+  it("prefers a manual rename over the backend title", () => {
+    const sessions = [{ session_id: "session_3", user_id: "student", workspace_id: "default", channel: "web", title: "后端摘要" }];
+    render(<Sidebar {...props} sessions={sessions} preferences={{ ...props.preferences, sessions: { session_3: { title: "我的重命名" } } }} />);
+
+    expect(screen.getByText("我的重命名")).toBeInTheDocument();
+    expect(screen.queryByText("后端摘要")).not.toBeInTheDocument();
+  });
 });

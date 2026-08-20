@@ -2,7 +2,6 @@ import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction 
 
 import { api } from "@/platform/http/api";
 import {
-  deriveTitle,
   extractConcepts,
   stripLearningContext,
 } from "@/platform/storage/learning-preferences";
@@ -73,7 +72,6 @@ export function useTurnHistory({
       if (first) {
         const stored = preferencesRef.current.sessions[sessionId];
         updateSessionMeta(sessionId, {
-          title: stored?.title ?? deriveTitle(first.input_text),
           summary: lastAnswer?.replace(/[#*_`]/g, "").slice(0, 180),
           concepts: lastAnswer ? extractConcepts(lastAnswer) : stored?.concepts,
         });

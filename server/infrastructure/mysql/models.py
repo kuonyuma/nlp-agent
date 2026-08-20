@@ -370,6 +370,10 @@ class ConversationModel(TimestampedModel, Base):
     channel: Mapped[str] = mapped_column(String(32), nullable=False, server_default="web")
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
     last_message_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+    # Basis of the last LLM-generated title: the newest completed turn's
+    # ``completed_at``.  NULL until the first summary is written.  Used by the
+    # conditional UPDATE to reject out-of-order overwrites.
+    title_updated_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
 
 
 class TurnModel(TimestampedModel, Base):

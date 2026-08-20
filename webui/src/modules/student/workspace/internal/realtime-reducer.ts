@@ -113,6 +113,9 @@ export function createRealtimeEventHandler({
         summary: event.payload.content.replace(/[#*_`]/g, "").slice(0, 180),
         concepts: extractConcepts(event.payload.content),
       });
+      // Refresh the sidebar so the backend-generated title is picked up once
+      // the background summary write lands.
+      void loadSessions();
     }
     setMessages((current) => {
       const next = [...current];

@@ -116,6 +116,7 @@ class DatabaseSessionService:
                 "user_id": row.owner_user_id,
                 "workspace_id": row.workspace_id,
                 "channel": row.channel,
+                "title": row.title,
             }
             for row in rows
         ]
