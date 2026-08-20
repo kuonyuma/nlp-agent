@@ -130,8 +130,10 @@ class BackendGateway:
                 self.engine,
                 self.repository,
                 self._emit_from_engine,
-                on_turn_completed=partial(
-                    schedule_summary, self._database_runtime.session_factory
+                on_turn_completed=(
+                    partial(schedule_summary, self._database_runtime.session_factory)
+                    if self._database_runtime is not None
+                    else None
                 ),
             )
             self.dispatcher = dispatcher or InProcessTurnDispatcher(executor.run)
