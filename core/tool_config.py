@@ -161,7 +161,7 @@ class VisionPreprocessingConfig(StrictConfigModel):
 
 
 class VisionOCRConfig(StrictConfigModel):
-    provider: str = "paddleocr"
+    provider: str = "rapidocr"
     language_default: Literal["auto", "zh", "en"] = "auto"
     confidence_threshold: float = Field(default=0.75, ge=0, le=1)
 
@@ -169,8 +169,10 @@ class VisionOCRConfig(StrictConfigModel):
     @classmethod
     def validate_provider(cls, value: str) -> str:
         provider = value.strip()
-        if not provider:
-            raise ValueError("vision OCR provider cannot be blank")
+        if provider not in {"rapidocr", "none"}:
+            raise ValueError(
+                "vision OCR provider must be 'rapidocr' or 'none'"
+            )
         return provider
 
 

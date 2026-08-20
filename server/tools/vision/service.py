@@ -228,6 +228,8 @@ class ImageAnalyzeService:
 
 def build_image_analyze_service(*, context: SessionContext) -> ImageAnalyzeService:
     from server.tools.vision.config import get_vision_config
+    from server.tools.vision.ocr import RapidOCRProvider
+    from server.tools.vision.signals import OpenCVSignalProvider
     from server.tools.vision.vlm import ModelRuntimeVLMProvider
 
     config = get_vision_config()
@@ -238,13 +240,23 @@ def build_image_analyze_service(*, context: SessionContext) -> ImageAnalyzeServi
         max_pixels=config.max_pixels,
         allowed_media_types=frozenset(config.allowed_media_types),
     )
+    ocr_provider: OCRProvider | None = None
+    if config.ocr.provider == "rapidocr":
+        ocr_provider = RapidOCRProvider(
+            confidence_threshold=config.ocr.confidence_threshold,
+            auto_rotate=config.preprocessing.auto_rotate,
+            max_dimension=config.preprocessing.max_dimension,
+            retry_low_confidence_once=config.preprocessing.retry_low_confidence_once,
+        )
     uploads_root = session_uploads_root(context)
     return ImageAnalyzeService(
         resolver=ImageInputResolver(uploads_root=uploads_root, limits=limits),
+        ocr_provider=ocr_provider,
         vlm_provider=ModelRuntimeVLMProvider(
             model_route=config.vlm.model_route,
             max_image_bytes=config.vlm.max_image_bytes,
             send_ocr_context=config.vlm.send_ocr_context,
         ),
+        signal_provider=OpenCVSignalProvider(),
         result_max_chars=config.result.max_chars,
     )

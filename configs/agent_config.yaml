@@ -349,7 +349,7 @@ tools:
       max_dimension: 4096
       retry_low_confidence_once: true
     ocr:
-      provider: paddleocr
+      provider: rapidocr
       language_default: auto
       confidence_threshold: 0.75
     vlm:
