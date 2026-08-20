@@ -62,6 +62,7 @@ class SubmitTurnRequest(BaseModel):
 
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)
+    attachments: list[dict[str, str]] = Field(default_factory=list)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
     evaluation: EvaluationContext | None = None

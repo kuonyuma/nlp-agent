@@ -59,9 +59,15 @@ class ReplaceClassroomMemberBody(StrictModel):
     status: Literal["active", "disabled"] = "active"
 
 
+
+class ChatAttachment(StrictModel):
+    file_name: str = Field(min_length=1, max_length=256)
+
+
 class SubmitChatBody(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
     evaluation: EvaluationContext | None = None
@@ -132,6 +138,7 @@ class CommandEnvelope(StrictModel):
 class ChatSendPayload(StrictModel):
     session_id: str
     content: str = Field(min_length=1, max_length=200_000)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     idempotency_key: str | None = Field(default=None, max_length=128)
     learning_context: LearningContext | None = None
     model_profile: str | None = Field(

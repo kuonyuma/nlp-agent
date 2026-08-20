@@ -109,7 +109,11 @@ def resolve_controlled_path(
             "图片路径不在允许的 .data/uploads 目录中",
         )
 
-    candidate = supplied if supplied.is_absolute() else project_root / supplied
+    # Bare filename (no directory separator) resolves inside uploads_root.
+    if "/" not in reference and "\\" not in reference:
+        candidate = uploads_root / reference
+    else:
+        candidate = supplied if supplied.is_absolute() else project_root / supplied
     lexical_root = Path(os.path.abspath(uploads_root))
     lexical_candidate = Path(os.path.abspath(candidate))
     if not _is_within(lexical_candidate, lexical_root):

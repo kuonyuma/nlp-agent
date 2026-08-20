@@ -47,6 +47,15 @@ from server.agent.session_service import LocalSessionService, local_session_serv
 from server.application.turn_reliability import TurnReliabilityService
 from server.infrastructure.mysql import MySQLRuntime
 
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_UPLOADS_ROOT = _PROJECT_ROOT / ".data" / "uploads"
+
+
+def _session_uploads_root(context: SessionContext) -> Path:
+    """Return the upload namespace for a session (mirrors input_resolver logic)."""
+    return _DEFAULT_UPLOADS_ROOT / context.workspace_id / context.user_id / context.session_id
 
 _EXPLICIT_EXERCISE_START_RE = re.compile(
     r"(?:开始|继续|新(?:的)?|再来|下一).{0,8}(?:练习|复习|题)|(?:练习|复习).{0,8}(?:开始|继续|下一题)",
@@ -391,11 +400,34 @@ class BackendGateway:
             guided_session=guided_session,
             guided_blueprint=guided_session.get("guided_blueprint", {}),
         )
+        # --- Attachment injection (after idempotency check) ---
+        enriched_content = request.content
+        if request.attachments:
+            attachment_lines = []
+            uploads_root = _session_uploads_root(context)
+            for attachment in request.attachments:
+                file_name = attachment.get("file_name", "")
+                if not file_name or "/" in file_name or "\\" in file_name or ".." in file_name:
+                    continue
+                file_path = uploads_root / file_name
+                if not file_path.is_file():
+                    continue
+                attachment_lines.append(
+                    f"[图片] {file_name}\n"
+                    f"路径: {file_path.relative_to(file_path.parents[4])}"
+                )
+            if attachment_lines:
+                block = "\n".join(attachment_lines)
+                enriched_content = (
+                    f"{request.content}\n\n"
+                    f"---附件---\n{block}\n---附件结束---"
+                )
+
         turn_id = str(uuid.uuid4())
         task = TurnTask(
             context=context,
             turn_id=turn_id,
-            content=request.content,
+            content=enriched_content,
             learning_context=learning_context,
             learning_progress=progress,
             exercise_state=exercise,
@@ -415,7 +447,7 @@ class BackendGateway:
             session_id=context.session_id,
             workspace_id=context.workspace_id,
             user_id=context.user_id,
-            input_text=request.content,
+            input_text=enriched_content,
             idempotency_key=request.idempotency_key,
             learning_context=learning_context,
             learning_progress=progress,

@@ -1,82 +1,106 @@
-# 图片理解工具
+# 图片理解（Image Understanding）
 
-Nova 通过统一工具运行时暴露 `image_analyze`。工具只授权给
-`visual_researcher` Worker，并继续使用现有的工具预算、并发、超时、审计和
-权限检查。
+Nova 支持端到端的图片理解流程：用户上传图片 → 提问 → Coordinator 派发
+`visual_researcher` Worker → `image_analyze` 工具真实完成
+OCR/表格/图表/描述/问答 → 结果带置信度和引用返回前端。
 
-## 当前交付范围
+## 架构概览
 
-本实现覆盖设计方案的阶段 1、阶段 3，以及阶段 5 的后端权限/提示词/测试部分：
-
-- 统一的 Pydantic 输入、输出、引用、置信度和稳定错误码；
-- JPEG、PNG、WebP 的真实解码、字节、尺寸、像素、帧数和损坏检查；
-- 会话隔离的本地图片目录、路径穿越和符号链接/重解析点防护；
-- `ocr`、`describe`、`question`、`table`、`chart`、`formula` 与可解释的
-  `auto` 路由；
-- 可注入的 OCR、VLM 和路由信号 Provider；
-- 通过 Model Runtime route 调用具备 `vision` 与 `structured_output` 能力的
-  VLM；
-- 不可信图像边界、独立 OCR/VLM 置信度和安全引用；
-- Web 与 Worker 在单机 Compose 中共享 `nova-data`，避免两个容器看到不同的
-  `.data`；
-- 视觉结果只在当前 Worker 推理内存中使用，不把原始 OCR/视觉 artifact 写入
-  sidechain transcript。
-
-阶段 1 不包含真实 OCR adapter。`tools.vision.ocr.provider=paddleocr` 是后续
-adapter 的配置契约；调用依赖 OCR 的路由时会返回稳定的
-`provider_unavailable`，不会回退到猜测结果。
-
-## 输入目录与会话隔离
-
-工具运行时从 `RunnableConfig` 获取并验证 `workspace_id`、`user_id` 和
-`thread_id`，只允许读取：
-
-```text
-.data/uploads/<workspace_id>/<user_id>/<thread_id>/
+```
+┌─────────┐     multipart      ┌──────────┐      WS chat.send
+│  前端    │ ─── POST ──────→  │ Upload   │  ←── + attachments ──→ Gateway
+│ Composer │                   │ API      │
+└────┬─────┘                   └──────────┘           │
+     │ GET /uploads/{s}/{f}                           ▼
+     │                                         ┌─────────────┐
+     │                                         │ Coordinator  │
+     │                                         │ (附件块注入) │
+     │                                         └──────┬──────┘
+     │                                                │ spawn_worker
+     │                                                ▼
+     │                                         ┌─────────────┐
+     │                                         │ visual_     │
+     │◄──── 置信度 + 引用 ────────────────────── │ researcher  │
+     │                                         └──────┬──────┘
+     │                                                │ image_analyze
+     │                                                ▼
+     │                                ┌───────────────────────────────┐
+     │                                │     ImageAnalyzeService       │
+     │                                │  ┌─────────┐  ┌───────────┐  │
+     │                                │  │ OCR     │  │ Signal    │  │
+     │                                │  │ RapidOCR│  │ OpenCV    │  │
+     │                                │  └─────────┘  └───────────┘  │
+     │                                │  ┌─────────┐  ┌───────────┐  │
+     │                                │  │ VLM     │  │ Router    │  │
+     │                                │  │ Qwen VL │  │ 确定性    │  │
+     │                                │  └─────────┘  └───────────┘  │
+     │                                └───────────────────────────────┘
 ```
 
-模型可以传入该目录内的绝对路径或项目相对路径。响应只回显安全文件名、哈希、
-媒体类型和尺寸，不回显本地绝对路径。缺少会话上下文时工具以
-`session_context_required` 失败关闭。
+## 上传 API
 
-首期默认拒绝 URL、GIF、SVG、PDF、TIFF、动画 WebP、低于 48 像素的图片、
-超字节和超像素图片。文件扩展名和请求 Content-Type 均不作为可信格式依据。
+### POST `/api/v1/uploads`
 
-## VLM 配置
+**认证**: Cookie + CSRF Token（`X-CSRF-Token` header）
 
-`tools.vision.vlm.model_route` 默认指向 `vision-worker`。仓库已将它连接到
-`qwen3-vl-plus` 的非思考模式 preset；启用时需要可访问该模型的 `QWEN_API_KEY`。
-route 的全部候选模型必须显式声明：
+**请求**: `multipart/form-data`
 
-```yaml
-capabilities:
-  vision: true
-  structured_output: true
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `session_id` | string | 当前会话 ID |
+| `file` | binary | 图片文件（JPEG/PNG/WebP，≤10MB） |
+
+**响应**: `201 Created`
+
+```json
+{
+  "file_name": "a1b2c3d4e5f6.jpg",
+  "url": "/api/v1/uploads/{session_id}/a1b2c3d4e5f6.jpg",
+  "media_type": "image/jpeg",
+  "size_bytes": 245760,
+  "width": 1024,
+  "height": 768,
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb924..."
+}
 ```
 
-仓库现有文本模型没有被自动标记为视觉模型。若模型未获授权、route 缺失、能力
-不匹配或密钥不可用，工具返回脱敏的 `provider_unavailable`。VLM 以 Base64 Data
-URL 发送受控图片，不发送本地路径、Cookie、用户身份或任意请求头。
+### GET `/api/v1/uploads/{session_id}/{file_name}`
 
-视觉 preset 的单次模型总超时为 80 秒，外层工具超时为 90 秒；工具运行时会把
-持有该工具的 Worker 与 join wait 自动提高到足以覆盖工具调用的下限。视觉模型
-route 只执行一次付费尝试，避免与工具层重试叠加。
+**认证**: Cookie
 
-## 部署边界
+返回原图，带 `X-Content-Type-Options: nosniff`。
 
-`nova-data` 是单机 Docker Compose 的共享卷方案。多主机或弹性 Worker 部署不能
-依赖本地卷，需要先实现共享 AssetStore（如 S3/MinIO），并让工具接收不可猜测的
-asset ID。
+## auto 路由信号
 
-设计文档尚未定义 Web 上传 API、asset ownership 和聊天附件契约，因此本次没有
-擅自增加前端附件功能。实现上传闭环时，上传端必须复用上述会话目录或 AssetStore
-命名空间。当前本地会话删除流程会同步清理该会话的上传目录；未来 AssetStore 也
-必须提供同等的所有权检查与删除语义。
+| 信号 | 检测方法 | 触发路由 |
+|---|---|---|
+| `has_grid_lines` | 形态学开运算检测长水平/垂直线交叉 | → `table` (fusion) |
+| `has_axes` | 左侧垂直线 + 底部水平线组成 L 形 | → `chart` (fusion) |
+| `text_coverage ≥ 0.15` | OCR 文本区域占图片面积比 | → `ocr` (ocr) |
+| `aligned_text_ratio ≥ 0.65` | 文本行左边缘形成多列对齐 | → `table` (fusion) |
+| `image_category = formula` | 低文本密度 + 高数学符号占比 | → `formula` (fusion) |
+| 以上均不满足 | 默认 | → `describe` (vlm) |
 
-## 验证
+## OCR 引擎
 
-```powershell
-uv run ruff check configs core gateway server tests scripts
-uv run pytest tests/test_vision_safety.py tests/test_vision_router.py `
-  tests/test_image_analyze_tool.py tests/test_vision_vlm.py
+- **Provider**: RapidOCR（`rapidocr-onnxruntime`，ONNX 推理）
+- **模型**: PP-OCRv4（中英混合），首次运行自动下载 ~10MB
+- **预处理**: EXIF 自动旋转、超 `max_dimension` 降采样
+- **重试**: 低置信度时 2x 上采样重试一次
+- **配置**: `configs/agent_config.yaml` → `tools.vision.ocr`
+
+## 附件消息流
+
+1. 前端 `POST /api/v1/uploads` 上传图片，获得 `file_name`
+2. 前端 `chat.send` WebSocket 消息携带 `attachments: [{file_name}]`
+3. Gateway 校验附件存在于会话上传目录，注入附件说明块到 `input_text`
+4. Coordinator 看到附件块，派发 `visual_researcher` Worker
+5. Worker 调用 `image_analyze` 工具处理图片
+
+附件块格式（注入到 `input_text`）:
+```
+---附件---
+[图片] a1b2c3d4.jpg
+路径: .data/uploads/<workspace>/<user>/<session>/a1b2c3d4.jpg
+---附件结束---
 ```
