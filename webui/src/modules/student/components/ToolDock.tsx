@@ -118,15 +118,17 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     {open && <div className="tool-dock-surface">
       {!expanded && <div className="tool-dock-resize-handle" role="separator" aria-label="调整工具侧栏宽度" aria-orientation="vertical" aria-valuemin={MIN_DOCK_WIDTH} aria-valuemax={maxWidth} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={beginResize} onKeyDown={resizeWithKeyboard} />}
       {openTools.length > 0 && <header className="tool-dock-tabs" role="tablist" aria-label="已打开的工具">
-        {openTools.map((tool) => {
-          const item = tools.find((candidate) => candidate.id === tool)!;
-          const Icon = item.icon;
-          const selected = tool === activeTool;
-          return <div key={tool} className={["tool-dock-tab", selected && "active"].filter(Boolean).join(" ")}>
-            <button type="button" role="tab" aria-selected={selected} onClick={() => onActiveToolChange(tool)}><Icon size={15} /><span>{item.label}</span></button>
-            <button type="button" aria-label={"关闭" + item.label} onClick={() => onCloseTool(tool)}><X size={14} /></button>
-          </div>;
-        })}
+        <div className="tool-dock-tab-strip">
+          {openTools.map((tool) => {
+            const item = tools.find((candidate) => candidate.id === tool)!;
+            const Icon = item.icon;
+            const selected = tool === activeTool;
+            return <div key={tool} className={["tool-dock-tab", selected && "active"].filter(Boolean).join(" ")}>
+              <button type="button" role="tab" aria-selected={selected} onClick={() => onActiveToolChange(tool)}><Icon size={15} /><span>{item.label}</span></button>
+              <button type="button" aria-label={"关闭" + item.label} onClick={() => onCloseTool(tool)}><X size={14} /></button>
+            </div>;
+          })}
+        </div>
         <div className="tool-dock-add-control">
           <button className="tool-dock-add-tab" type="button" aria-label="显示工具列表" aria-expanded={toolMenuOpen} aria-haspopup="menu" onClick={() => onToolMenuOpenChange(!toolMenuOpen)}><Plus size={16} /></button>
           {toolMenuOpen && <ToolPicker onOpenTool={openTool} />}

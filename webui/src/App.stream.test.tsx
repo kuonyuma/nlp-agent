@@ -57,6 +57,7 @@ describe("student stream rendering", () => {
 
     const logo = await screen.findByAltText("学校校徽");
     expect(logo.closest(".student-school-logo")).toBeVisible();
+    expect(document.querySelector(".student-app-shell")).toHaveClass("sidebar-is-collapsed");
     expect(logo.closest(".thread-header")).toBeNull();
     expect(screen.getByRole("button", { name: "切换主题" }).closest(".thread-header-actions")).toBeVisible();
 
@@ -110,6 +111,8 @@ describe("student stream rendering", () => {
 
     const menu = screen.getByRole("menu", { name: "工具列表" });
     expect(menu).toBeVisible();
+    expect(document.querySelector(".tool-dock-tab-strip")).toBeInTheDocument();
+    expect(menu.closest(".tool-dock-tab-strip")).toBeNull();
     expect(screen.getByRole("menuitem", { name: "打开浏览器工具" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
     expect(screen.getByRole("button", { name: "显示工具列表" }).parentElement).toContainElement(menu);
