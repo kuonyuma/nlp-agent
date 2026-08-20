@@ -49,11 +49,13 @@ function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }
   </nav>;
 }
 
-export function ToolDock({ open, expanded, openTools, activeTool, onOpenTool, onCloseTool, onActiveToolChange, learningPanel }: {
+export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, learningPanel }: {
   open: boolean;
   expanded: boolean;
   openTools: ToolDockTool[];
   activeTool: ToolDockTool | null;
+  toolMenuOpen: boolean;
+  onToolMenuOpenChange: (open: boolean) => void;
   onOpenTool: (tool: ToolDockTool) => void;
   onCloseTool: (tool: ToolDockTool) => void;
   onActiveToolChange: (tool: ToolDockTool | null) => void;
@@ -61,7 +63,6 @@ export function ToolDock({ open, expanded, openTools, activeTool, onOpenTool, on
 }) {
   const [width, setWidth] = useState(DEFAULT_DOCK_WIDTH);
   const [resizing, setResizing] = useState(false);
-  const [toolMenuOpen, setToolMenuOpen] = useState(false);
   const [maxWidth, setMaxWidth] = useState(getMaxDockWidth);
   const resizeStart = useRef<{ pointerX: number; width: number } | null>(null);
 
@@ -74,10 +75,6 @@ export function ToolDock({ open, expanded, openTools, activeTool, onOpenTool, on
     window.addEventListener("resize", updateMaxWidth);
     return () => window.removeEventListener("resize", updateMaxWidth);
   }, []);
-
-  useEffect(() => {
-    if (!open) setToolMenuOpen(false);
-  }, [open]);
 
   useEffect(() => {
     if (!resizing) return undefined;
@@ -100,7 +97,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, onOpenTool, on
   }, [maxWidth, resizing]);
 
   const openTool = (tool: ToolDockTool) => {
-    setToolMenuOpen(false);
+    onToolMenuOpenChange(false);
     onOpenTool(tool);
   };
   const beginResize = (event: PointerEvent<HTMLDivElement>) => {
@@ -131,7 +128,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, onOpenTool, on
           </div>;
         })}
         <div className="tool-dock-add-control">
-          <button className="tool-dock-add-tab" type="button" aria-label="显示工具列表" aria-expanded={toolMenuOpen} aria-haspopup="menu" onClick={() => setToolMenuOpen((value) => !value)}><Plus size={16} /></button>
+          <button className="tool-dock-add-tab" type="button" aria-label="显示工具列表" aria-expanded={toolMenuOpen} aria-haspopup="menu" onClick={() => onToolMenuOpenChange(!toolMenuOpen)}><Plus size={16} /></button>
           {toolMenuOpen && <ToolPicker onOpenTool={openTool} />}
         </div>
       </header>}

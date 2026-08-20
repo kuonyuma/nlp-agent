@@ -26,6 +26,7 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [toolDockOpen, setToolDockOpen] = useState(false);
   const [toolDockExpanded, setToolDockExpanded] = useState(false);
+  const [toolMenuOpen, setToolMenuOpen] = useState(false);
   const [openTools, setOpenTools] = useState<ToolDockTool[]>([]);
   const [activeTool, setActiveTool] = useState<ToolDockTool | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -76,7 +77,10 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
   };
   const toggleToolDock = () => {
     setToolDockOpen((current) => {
-      if (current) setToolDockExpanded(false);
+      if (current) {
+        setToolDockExpanded(false);
+        setToolMenuOpen(false);
+      }
       return !current;
     });
   };
@@ -140,10 +144,12 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
       expanded={toolDockExpanded}
       openTools={openTools}
       activeTool={activeTool}
+      toolMenuOpen={toolMenuOpen}
+      onToolMenuOpenChange={setToolMenuOpen}
       onOpenTool={openTool}
       onCloseTool={closeTool}
       onActiveToolChange={setActiveTool}
-      learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
+      learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
     />
     <div className="student-school-logo"><SchoolLogo /></div>
     <SettingsDialog open={settingsOpen} settings={workspace.settings} learningContext={workspace.preferences.context} roles={workspace.authSession?.roles} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} onLearningContextChange={workspace.setLearningContext} onOpenDeveloper={() => { if (onNavigateTo) onNavigateTo("/developer"); else location.href = "/developer"; }} onOpenTeacher={() => { if (onNavigateTo) onNavigateTo("/teacher"); else location.href = "/teacher"; }} />
