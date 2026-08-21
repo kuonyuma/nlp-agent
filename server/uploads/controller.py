@@ -11,7 +11,10 @@ from fastapi.responses import FileResponse
 
 from core.identity import AuthenticatedPrincipal
 from core.session_context import SessionContext
+from server.rbac.service import rbac_service
 from server.uploads.schemas import UploadResponse
+from server.web.auth import AuthenticationError, SessionClaims
+from server.web.database_auth import DatabaseSessionClaims
 from server.tools.vision.contracts import VisionError
 from server.tools.vision.input_resolver import session_uploads_root
 from server.tools.vision.safety import (
@@ -29,52 +32,72 @@ _MEDIA_TYPE_TO_EXT: dict[str, str] = {
 }
 
 
-async def get_current_principal(request: Request) -> AuthenticatedPrincipal:
-    """Extract authenticated principal from session cookie or state."""
+async def _current_claims(
+    request: Request,
+) -> SessionClaims | DatabaseSessionClaims | None:
+    """Use the same browser-auth mode as the primary Web API routes."""
     auth = getattr(request.app.state, "auth", None)
     if auth is None:
+        return None
+    token = request.cookies.get(auth.cookie_name)
+    session_factory = getattr(
+        getattr(request.app.state, "gateway", None), "authorization_session_factory", None
+    )
+    if not getattr(request.app.state, "auth_injected", True):
+        database_auth = getattr(request.app.state, "database_auth", None)
+        if database_auth is None or session_factory is None:
+            raise AuthenticationError("database authentication is unavailable")
+        return await database_auth.authenticate(session_factory, token)
+    return auth.authenticate(token)
+
+
+CurrentClaims = Annotated[
+    SessionClaims | DatabaseSessionClaims | None, Depends(_current_claims)
+]
+
+
+async def get_current_principal(
+    request: Request, claims: CurrentClaims
+) -> AuthenticatedPrincipal:
+    """Extract an authenticated principal from the configured browser session."""
+    if claims is None:
         return AuthenticatedPrincipal(
             user_id="local",
             workspace_ids=frozenset({"default"}),
             roles=frozenset({"admin"}),
         )
-    token = request.cookies.get(auth.cookie_name)
-    try:
-        claims = auth.authenticate(token)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
-        ) from exc
     session_factory = getattr(
         getattr(request.app.state, "gateway", None), "authorization_session_factory", None
     )
+    if isinstance(claims, DatabaseSessionClaims):
+        if session_factory is None:
+            raise AuthenticationError("database authentication is unavailable")
+        async with session_factory() as session:
+            return await rbac_service.principal_for_user_id(session, claims.user_id)
     if session_factory is not None and claims.roles != frozenset({"guest"}):
-        from server.user.service import rbac_service
-
         async with session_factory() as session:
             return await rbac_service.principal_for_username(session, claims.user_id)
     return claims.principal()
 
 
-def get_write_access(
+async def get_write_access(
     request: Request,
+    claims: CurrentClaims,
     csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
 ) -> None:
     """Validate CSRF and origin headers for mutating upload requests."""
-    auth = getattr(request.app.state, "auth", None)
-    if auth is None:
+    if claims is None:
         return
-    token = request.cookies.get(auth.cookie_name)
-    try:
-        claims = auth.authenticate(token)
+    if isinstance(claims, DatabaseSessionClaims):
+        database_auth = getattr(request.app.state, "database_auth", None)
+        if database_auth is None:
+            raise AuthenticationError("database authentication is unavailable")
+        database_auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
+        database_auth.require_csrf(claims, csrf_token)
+    else:
+        auth = request.app.state.auth
         auth.require_same_origin(request.headers.get("origin"), request.headers.get("host"))
         auth.require_csrf(claims, csrf_token)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
-        ) from exc
 
 
 async def _resolve_session_context(
