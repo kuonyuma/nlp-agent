@@ -12,6 +12,13 @@ interface ComposerAttachment extends ChatAttachment {
   sourceFile: File;
 }
 
+function uploadErrorMessage(reason: unknown): string {
+  if (reason instanceof Error && typeof (reason as { status?: unknown }).status === "number" && reason.message.trim()) {
+    return reason.message;
+  }
+  return "上传失败，请检查网络后重试";
+}
+
 export function Composer({ sessionId, disabled, running, centered = false, onSend, onCancel, contextControl, modelProfiles = {}, modelProfile, onModelProfileChange }: {
   sessionId?: string | null;
   disabled: boolean;
@@ -74,9 +81,9 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
         status: "ready",
         errorMessage: undefined,
       } : item));
-    } catch {
+    } catch (reason) {
       setAttachments((current) => current.map((item) => item.clientId === attachment.clientId
-        ? { ...item, status: "error", errorMessage: "上传失败" }
+        ? { ...item, status: "error", errorMessage: uploadErrorMessage(reason) }
         : item));
     }
   };
@@ -118,7 +125,7 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
           {attachments.map((att) => (
             <div key={att.clientId} className="attachment-thumbnail" style={{ position: "relative", display: "inline-block" }}>
               <img src={att.url} alt={att.displayName ?? att.fileName} style={{ width: 60, height: 60, objectFit: "cover", opacity: att.status === "uploading" ? 0.5 : 1, borderRadius: "4px" }} />
-              {att.status === "error" && <span style={{ color: "red", position: "absolute", bottom: 0, left: 0, fontSize: "10px", background: "rgba(255,255,255,0.8)", padding: "2px" }}>失败</span>}
+              {att.status === "error" && <span role="status" style={{ color: "red", position: "absolute", bottom: 0, left: 0, fontSize: "10px", background: "rgba(255,255,255,0.8)", padding: "2px" }}>{att.errorMessage}</span>}
               {att.status === "error" && <button type="button" onClick={() => void upload(att)} aria-label={`重试附件 ${att.displayName ?? att.fileName}`} style={{ position: "absolute", right: 2, bottom: 2, display: "flex", padding: 2 }}><RotateCcw size={12} /></button>}
               <button type="button" onClick={() => removeAttachment(att.clientId)} aria-label={`移除附件 ${att.displayName ?? att.fileName}`} style={{ position: "absolute", right: 2, top: 2, display: "flex", padding: 2 }}><X size={12} /></button>
             </div>
