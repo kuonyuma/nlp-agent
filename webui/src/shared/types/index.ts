@@ -192,6 +192,7 @@ export interface SessionLearningMeta {
   categoryId?: string;
   favorite?: boolean;
   archived?: boolean;
+  pinnedAt?: number;
   summary?: string;
   concepts?: string[];
   reviewConcepts?: string[];
@@ -214,6 +215,8 @@ export interface LearningPreferences {
 export interface UserSettings {
   locale: string;
   theme: "system" | "light" | "dark";
+    content_font_size: "small" | "medium" | "large";
+  reduce_motion: boolean;
   show_reasoning: boolean;
   stream_render_interval_ms: number;
   model_profile: string;

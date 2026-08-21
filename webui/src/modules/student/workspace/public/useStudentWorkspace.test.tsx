@@ -100,7 +100,7 @@ describe("useStudentWorkspace settings", () => {
     vi.mocked(api.updateSettings)
       .mockRejectedValueOnce(new Error("first failed"))
       .mockResolvedValueOnce({ settings: {
-        theme: "light", locale: "zh-CN", show_reasoning: true,
+        theme: "light", locale: "zh-CN",content_font_size: "medium", reduce_motion: false, show_reasoning: true,
         stream_render_interval_ms: 30, model_profile: "deepseek", default_workspace_id: "default",
       } });
     const { result } = renderHook(() => useStudentWorkspace());
