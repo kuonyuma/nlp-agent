@@ -131,6 +131,14 @@ button { color: inherit; }
 .session-pin.active {
   color: var(--accent);
 }
+
+@media (hover: none), (pointer: coarse) {
+  .session-pin,
+  .session-menu summary {
+    opacity: 1;
+  }
+}
+
 .session-menu { position: relative; margin-right: 4px; }
 .session-menu summary { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 7px; cursor: pointer; list-style: none; opacity: 0; }
 .session-item:hover summary, .session-menu[open] summary { opacity: 1; }

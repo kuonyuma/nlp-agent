@@ -46,19 +46,28 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
         - (preferences.sessions[first.session_id]?.pinnedAt ?? 0)
       ));
     const itemsByCategory = new Map<string | undefined, SessionSummary[]>();
-    for (const session of visible) {
+    const firstUnpinnedIndexByCategory = new Map<string | undefined, number>();
+    for (const [index, session] of visible.entries()) {
       const meta = preferences.sessions[session.session_id];
       if (meta?.pinnedAt) continue;
       const categoryId = meta?.categoryId;
+      if (!firstUnpinnedIndexByCategory.has(categoryId)) firstUnpinnedIndexByCategory.set(categoryId, index);
       const items = itemsByCategory.get(categoryId) ?? [];
       items.push(session);
       itemsByCategory.set(categoryId, items);
     }
-    return [
-      ...(pinned.length > 0 ? [{ key: "pinned", id: undefined, name: "置顶", items: pinned, pinned: true }] : []),
+    const regularGroups = [
       { key: "uncategorized", id: undefined, name: t("uncategorized"), items: itemsByCategory.get(undefined) ?? [], pinned: false },
       ...preferences.categories.map((category) => ({ key: category.id, id: category.id, name: category.name, items: itemsByCategory.get(category.id) ?? [], pinned: false })),
     ].filter((group) => group.items.length > 0 || !query && !showArchived);
+    regularGroups.sort((first, second) => (
+      (firstUnpinnedIndexByCategory.get(first.id) ?? Number.MAX_SAFE_INTEGER)
+      - (firstUnpinnedIndexByCategory.get(second.id) ?? Number.MAX_SAFE_INTEGER)
+    ));
+    return [
+      ...(pinned.length > 0 ? [{ key: "pinned", id: undefined, name: "置顶", items: pinned, pinned: true }] : []),
+      ...regularGroups,
+    ];
   }, [preferences.categories, preferences.sessions, query, showArchived, t, visible]);
   useEffect(() => {
     const closeOpenMenus = (event: PointerEvent) => {
@@ -155,6 +164,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
 </button>
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
                 <button type="button" onClick={() => { const title = prompt("重命名学习对话", meta.title ?? ""); if (title?.trim()) onMeta(session.session_id, { title: title.trim() }); }}><Pencil size={14} />重命名</button>
+                <button type="button" onClick={() => onMeta(session.session_id, { pinnedAt: meta.pinnedAt ? undefined : Date.now() })}><Pin size={14} />{meta.pinnedAt ? "取消置顶" : "置顶"}</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { archived: !meta.archived })}><Archive size={14} />{meta.archived ? "移出归档" : "归档"}</button>
                 <div className="session-category-actions"><span>移动到分类</span><button type="button" onClick={() => onMeta(session.session_id, { categoryId: undefined })}>未分类</button>{preferences.categories.map((category) => <button key={category.id} type="button" onClick={() => onMeta(session.session_id, { categoryId: category.id })}>{category.name}</button>)}</div>
