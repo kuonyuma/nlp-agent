@@ -50,7 +50,11 @@ export function useSettingsController() {
       const request = settingsSaveQueue.current.then(() => api.updateSettings(patch));
       settingsSaveQueue.current = request.then(() => undefined, () => undefined);
       const response = await request;
-      confirmedSettingsRef.current = response.settings;
+      confirmedSettingsRef.current = {
+        ...confirmedSettingsRef.current,
+        ...patch,
+        ...response.settings,
+      };
       pendingSettingsPatches.current = pendingSettingsPatches.current.filter((item) => item.id !== mutation);
       setSettings(pendingSettingsPatches.current.reduce(
         (current, item) => ({ ...current, ...item.patch }),
@@ -70,16 +74,16 @@ export function useSettingsController() {
       setSettingsError(`设置保存失败：${reason instanceof Error ? reason.message : String(reason)}`);
     }
   }, []);
-    const resetSettings = useCallback(() => {
-  void patchSettings({
-    locale: DEFAULT_SETTINGS.locale,
-    theme: DEFAULT_SETTINGS.theme,
-    content_font_size: DEFAULT_SETTINGS.content_font_size,
-    reduce_motion: DEFAULT_SETTINGS.reduce_motion,
-    show_reasoning: DEFAULT_SETTINGS.show_reasoning,
-    stream_render_interval_ms: DEFAULT_SETTINGS.stream_render_interval_ms,
-  });
-}, [patchSettings]);
+  const resetSettings = useCallback(() => {
+    void patchSettings({
+      locale: DEFAULT_SETTINGS.locale,
+      theme: DEFAULT_SETTINGS.theme,
+      content_font_size: DEFAULT_SETTINGS.content_font_size,
+      reduce_motion: DEFAULT_SETTINGS.reduce_motion,
+      show_reasoning: DEFAULT_SETTINGS.show_reasoning,
+      stream_render_interval_ms: DEFAULT_SETTINGS.stream_render_interval_ms,
+    });
+  }, [patchSettings]);
 
   return { settings, settingsError, initializeSettings, patchSettings, resetSettings };
 }

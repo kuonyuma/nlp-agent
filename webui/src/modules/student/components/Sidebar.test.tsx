@@ -80,4 +80,45 @@ describe("Sidebar delete requests", () => {
     expect(screen.queryByRole("dialog", { name: "新建分类" })).not.toBeInTheDocument();
     expect(onAddCategory).not.toHaveBeenCalled();
   });
+
+  it("groups pinned sessions first across categories and restores source order after unpinning", () => {
+    const sessions = [
+      { session_id: "ordinary", user_id: "student", workspace_id: "default", channel: "web" },
+      { session_id: "pinned_old", user_id: "student", workspace_id: "default", channel: "web" },
+      { session_id: "pinned_new", user_id: "student", workspace_id: "default", channel: "web" },
+    ];
+    const preferences = {
+      ...props.preferences,
+      categories: [
+        { id: "category_1", name: "注意力机制", createdAt: 1 },
+        { id: "category_2", name: "语言模型", createdAt: 2 },
+      ],
+      sessions: {
+        ordinary: { title: "普通会话" },
+        pinned_old: { title: "较早置顶", categoryId: "category_1", pinnedAt: 100 },
+        pinned_new: { title: "最近置顶", categoryId: "category_2", pinnedAt: 200 },
+      },
+    };
+    const { container, rerender } = render(<Sidebar {...props} sessions={sessions} preferences={preferences} />);
+    const visibleTitles = () => Array.from(container.querySelectorAll(".session-main span"), (node) => node.textContent);
+
+    expect(visibleTitles()).toEqual(["最近置顶", "较早置顶", "普通会话"]);
+    expect(screen.getByRole("heading", { name: "置顶" })).toBeVisible();
+
+    rerender(<Sidebar
+      {...props}
+      sessions={sessions}
+      preferences={{
+        ...preferences,
+        sessions: {
+          ...preferences.sessions,
+          pinned_old: { title: "较早置顶", categoryId: "category_1" },
+          pinned_new: { title: "最近置顶", categoryId: "category_2" },
+        },
+      }}
+    />);
+
+    expect(visibleTitles()).toEqual(["普通会话", "较早置顶", "最近置顶"]);
+    expect(screen.queryByRole("heading", { name: "置顶" })).not.toBeInTheDocument();
+  });
 });

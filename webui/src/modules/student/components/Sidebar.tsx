@@ -37,22 +37,27 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
     if (!!meta?.archived !== showArchived) return false;
     const title = meta?.title ?? deriveTitle(session.session_id);
     return title.toLowerCase().includes(query.toLowerCase());
-  }).sort((first, second) => {
-    const firstPinnedAt = preferences.sessions[first.session_id]?.pinnedAt ?? 0;
-    const secondPinnedAt = preferences.sessions[second.session_id]?.pinnedAt ?? 0;
-    return secondPinnedAt - firstPinnedAt;
   }), [preferences.sessions, query, sessions, showArchived]);
   const grouped = useMemo(() => {
+    const pinned = visible
+      .filter((session) => preferences.sessions[session.session_id]?.pinnedAt)
+      .sort((first, second) => (
+        (preferences.sessions[second.session_id]?.pinnedAt ?? 0)
+        - (preferences.sessions[first.session_id]?.pinnedAt ?? 0)
+      ));
     const itemsByCategory = new Map<string | undefined, SessionSummary[]>();
     for (const session of visible) {
-      const categoryId = preferences.sessions[session.session_id]?.categoryId;
+      const meta = preferences.sessions[session.session_id];
+      if (meta?.pinnedAt) continue;
+      const categoryId = meta?.categoryId;
       const items = itemsByCategory.get(categoryId) ?? [];
       items.push(session);
       itemsByCategory.set(categoryId, items);
     }
     return [
-      { id: undefined, name: t("uncategorized"), items: itemsByCategory.get(undefined) ?? [] },
-      ...preferences.categories.map((category) => ({ id: category.id, name: category.name, items: itemsByCategory.get(category.id) ?? [] })),
+      ...(pinned.length > 0 ? [{ key: "pinned", id: undefined, name: "置顶", items: pinned, pinned: true }] : []),
+      { key: "uncategorized", id: undefined, name: t("uncategorized"), items: itemsByCategory.get(undefined) ?? [], pinned: false },
+      ...preferences.categories.map((category) => ({ key: category.id, id: category.id, name: category.name, items: itemsByCategory.get(category.id) ?? [], pinned: false })),
     ].filter((group) => group.items.length > 0 || !query && !showArchived);
   }, [preferences.categories, preferences.sessions, query, showArchived, t, visible]);
   useEffect(() => {
@@ -95,9 +100,9 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
       </nav>
       {!collapsed && searchOpen && <div className="search-box"><Search size={15} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索历史问题" /></div>}
       <div className="session-scroll">
-        {!collapsed && grouped.map((group) => <section className="session-group" key={group.id ?? "uncategorized"}>
+        {!collapsed && grouped.map((group) => <section className="session-group" key={group.key}>
           <h3>
-            <span><BookOpen size={13} />{group.name}</span>
+            <span>{group.pinned ? <Pin size={13} /> : <BookOpen size={13} />}{group.name}</span>
             {group.id && <details className="category-menu">
               <summary aria-label={`${group.name} 分类菜单`}><MoreHorizontal size={14} /></summary>
               <div>
