@@ -244,6 +244,9 @@ def test_project_qwen_web_preset_is_valid_and_other_qwen_presets_stay_offline():
         }
     )
 
+    assert config.providers["qwen"].base_url == (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
     web_preset = config.preset("worker-qwen-web")
     assert web_preset.native_search == NativeSearchConfig(
         enabled=True, forced=True, strategy="turbo"
