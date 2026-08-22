@@ -8,13 +8,13 @@ import type { LearningPreferences, SessionLearningMeta, SessionSummary } from "@
 
 const DEFAULT_SESSION_TITLE = "新的学习对话";
 
-function displayTitle(meta: SessionLearningMeta | undefined, session: SessionSummary): string {
-  // A manual rename always wins; otherwise fall back to the backend LLM title.
-  if (meta?.title && meta.title !== DEFAULT_SESSION_TITLE) return meta.title;
+function displayTitle(session: SessionSummary): string {
+  // The backend conversation row is the single source of truth for the title
+  // (manual rename, LLM summary, and first-question fallback all land there).
   return session.title || DEFAULT_SESSION_TITLE;
 }
 
-export function Sidebar({ sessions, preferences, activeId, open, collapsed, connected, onClose, onCollapse, onExpand, onSelect, onCreate, onMeta, onAddCategory, onRenameCategory, onDeleteCategory, onDelete, onAccount, onSettings }: {
+export function Sidebar({ sessions, preferences, activeId, open, collapsed, connected, onClose, onCollapse, onExpand, onSelect, onCreate, onRename, onMeta, onAddCategory, onRenameCategory, onDeleteCategory, onDelete, onAccount, onSettings }: {
   sessions: SessionSummary[];
   preferences: LearningPreferences;
   activeId: string | null;
@@ -26,6 +26,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   onExpand: () => void;
   onSelect: (id: string) => void;
   onCreate: () => void;
+  onRename: (id: string, title: string) => void;
   onMeta: (id: string, patch: Partial<SessionLearningMeta>) => void;
   onAddCategory: (name: string) => string;
   onRenameCategory: (id: string, name: string) => void;
@@ -42,7 +43,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   const visible = useMemo(() => sessions.filter((session) => {
     const meta = preferences.sessions[session.session_id];
     if (!!meta?.archived !== showArchived) return false;
-    const title = displayTitle(meta, session);
+    const title = displayTitle(session);
     return title.toLowerCase().includes(query.toLowerCase());
   }), [preferences.sessions, query, sessions, showArchived]);
   const grouped = useMemo(() => {
@@ -88,7 +89,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
             {group.id && <details className="category-menu">
               <summary aria-label={`${group.name} 分类菜单`}><MoreHorizontal size={14} /></summary>
               <div>
-                <button type="button" onClick={() => {
+                <button type="button" aria-label="重命名分类" onClick={() => {
                   const name = prompt("重命名分类", group.name);
                   if (name?.trim()) onRenameCategory(group.id!, name.trim());
                 }}><Pencil size={13} />重命名</button>
@@ -98,11 +99,11 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
           </h3>
           {group.items.map((session) => {
             const meta = preferences.sessions[session.session_id] ?? {};
-            const title = displayTitle(meta, session);
+            const title = displayTitle(session);
             return <div className={`session-item ${activeId === session.session_id ? "active" : ""}`} key={session.session_id}>
               <button className="session-main" type="button" onClick={() => { onSelect(session.session_id); onClose(); }}><span>{title}</span></button>
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
-                <button type="button" onClick={() => { const name = prompt("重命名学习对话", title); if (name?.trim()) onMeta(session.session_id, { title: name.trim() }); }}><Pencil size={14} />重命名</button>
+                <button type="button" aria-label="重命名学习对话" onClick={() => { const name = prompt("重命名学习对话", title); if (name?.trim()) onRename(session.session_id, name.trim()); }}><Pencil size={14} />重命名</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { archived: !meta.archived })}><Archive size={14} />{meta.archived ? "移出归档" : "归档"}</button>
                 <div className="session-category-actions"><span>移动到分类</span><button type="button" onClick={() => onMeta(session.session_id, { categoryId: undefined })}>未分类</button>{preferences.categories.map((category) => <button key={category.id} type="button" onClick={() => onMeta(session.session_id, { categoryId: category.id })}>{category.name}</button>)}</div>

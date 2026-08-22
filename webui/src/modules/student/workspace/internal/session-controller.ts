@@ -50,7 +50,7 @@ export function useSessionController({ preferences, persistPreferences, updateSe
         return null;
       }
       setSessions((current) => current.some((item) => item.session_id === session.session_id) ? current : [session, ...current]);
-      updateSessionMeta(session.session_id, { topic: preferences.context.topic_name, title: "新的学习对话" });
+      updateSessionMeta(session.session_id, { topic: preferences.context.topic_name });
       setActiveSessionId(session.session_id);
       return session.session_id;
     })();
@@ -80,6 +80,18 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     if (activeSessionRef.current === sessionId) setActiveSessionId(remaining[0]?.session_id ?? null);
   }, [persistPreferences, sessions]);
 
+  const renameSessionTitle = useCallback(async (sessionId: string, title: string) => {
+    const renamed = await api.renameSession(sessionId, title);
+    setSessions((current) => current.map((session) => session.session_id === sessionId ? { ...session, title: renamed.title } : session));
+    persistPreferences((current) => {
+      const meta = current.sessions[sessionId];
+      if (!meta?.title) return current;
+      const next = { ...meta };
+      delete next.title;
+      return { ...current, sessions: { ...current.sessions, [sessionId]: next } };
+    });
+  }, [persistPreferences]);
+
   return {
     sessions,
     setSessions,
@@ -92,5 +104,6 @@ export function useSessionController({ preferences, persistPreferences, updateSe
     createBackendSession,
     startNewChat,
     deleteSession,
+    renameSessionTitle,
   };
 }

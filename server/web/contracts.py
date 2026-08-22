@@ -21,6 +21,10 @@ class CreateSessionBody(StrictModel):
     workspace_id: str = Field(default="default", min_length=1, max_length=128)
 
 
+class RenameSessionBody(StrictModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
 class LoginBody(StrictModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=512)

@@ -279,3 +279,134 @@ def test_session_list_requires_read_permission_and_exposes_title(monkeypatch):
 
     assert requires and requires[0][1] == Permission.AGENT_SESSION_READ
     assert items[0]["title"] == "注意力机制"
+
+
+# --- 15-char cap + first-question fallback --------------------------------
+
+
+def test_clean_title_truncates_to_fifteen_chars():
+    long = "这是一个非常长的对话标题超过了十五个字的限制"
+    assert _clean_title(long) == "这是一个非常长的对话标题超过了"
+
+
+def test_first_question_title_strips_preamble_and_truncates():
+    from server.agent.session_service import _first_question_title
+
+    assert _first_question_title("什么是注意力机制？") == "什么是注意力机制？"
+    assert _first_question_title("") == ""
+    raw = (
+        '<!-- nlp-learning-context:{"topic_name":"Transformer"} -->\n'
+        "[学习设置：主题=Transformer；难度=入门]\n"
+        "什么是注意力机制？"
+    )
+    assert _first_question_title(raw) == "什么是注意力机制？"
+    with_attachment = (
+        "什么是注意力机制？\n\n---附件---\n[图片] photo.png\n路径: photo.png\n---附件结束---"
+    )
+    assert _first_question_title(with_attachment) == "什么是注意力机制？"
+    assert _first_question_title("这是一个非常长的用户提问需要被截断到十五个字符以内作为标题") == "这是一个非常长的用户提问需要被…"
+
+
+def test_session_list_falls_back_to_first_question(monkeypatch):
+    from server.agent.session_service import DatabaseSessionService
+
+    monkeypatch.setattr(
+        "server.agent.session_service.authorization_service.require",
+        lambda principal, permission, **kwargs: None,
+    )
+
+    row = SimpleNamespace(
+        id="s1",
+        created_at=datetime(2026, 1, 1),
+        last_message_at=datetime(2026, 1, 2),
+        updated_at=datetime(2026, 1, 1),
+        owner_user_id="u1",
+        workspace_id="ws1",
+        channel="web",
+        title="",
+    )
+
+    class _ScalarResult:
+        def all(self):
+            return [row]
+
+    class _TurnResult:
+        def all(self):
+            return [("s1", "什么是注意力机制？")]
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def scalars(self, statement):
+            return _ScalarResult()
+
+        async def execute(self, statement):
+            return _TurnResult()
+
+    class _Factory:
+        def __call__(self):
+            return _Session()
+
+    principal = SimpleNamespace(user_id="u1", workspace_ids={"ws1"})
+    service = DatabaseSessionService(_Factory())
+
+    items = asyncio.run(service.list(principal))
+
+    assert items[0]["title"] == "什么是注意力机制？"
+
+
+def _rename_service(monkeypatch):
+    from core.session_context import SessionContext
+    from server.agent.session_service import DatabaseSessionService
+
+    monkeypatch.setattr(
+        "server.agent.session_service.authorization_service.require",
+        lambda principal, permission, **kwargs: None,
+    )
+
+    async def fake_resolve(self, principal, session_id):
+        return SessionContext(
+            session_id=session_id,
+            user_id=principal.user_id,
+            workspace_id="ws1",
+            channel="web",
+        )
+
+    monkeypatch.setattr(DatabaseSessionService, "resolve", fake_resolve)
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, statement):
+            return MagicMock()
+
+    class _Factory:
+        def begin(self):
+            return _Session()
+
+    return DatabaseSessionService(_Factory())
+
+
+def test_session_rename_updates_title(monkeypatch):
+    service = _rename_service(monkeypatch)
+    principal = SimpleNamespace(user_id="u1", workspace_ids={"ws1"})
+
+    result = asyncio.run(service.rename(principal, "s1", "  注意力机制入门  "))
+
+    assert result == {"session_id": "s1", "title": "注意力机制入门"}
+
+
+def test_session_rename_rejects_empty_title(monkeypatch):
+    service = _rename_service(monkeypatch)
+    principal = SimpleNamespace(user_id="u1", workspace_ids={"ws1"})
+
+    with pytest.raises(ValueError):
+        asyncio.run(service.rename(principal, "s1", "   "))

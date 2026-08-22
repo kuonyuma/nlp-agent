@@ -39,6 +39,7 @@ from server.web.database_auth import DatabaseSessionAuth, DatabaseSessionClaims
 from server.agent.session_service import DatabaseSessionService, local_session_service
 from server.web.contracts import (
     CreateSessionBody,
+    RenameSessionBody,
     LoginBody,
     ReplaceUserRolesBody,
     ReplaceRolePermissionsBody,
@@ -871,6 +872,27 @@ def create_app(
         authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         context = await request.app.state.gateway.sessions.resolve(principal, session_id)
         return context.model_dump(mode="json")
+
+    @app.patch("/api/v1/sessions/{session_id}", tags=["sessions"])
+    async def rename_session(
+        session_id: str,
+        body: RenameSessionBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        result = await request.app.state.gateway.sessions.rename(
+            principal, session_id, body.title
+        )
+        await hub.broadcast(
+            control_event(
+                "session.updated",
+                session_id=session_id,
+                payload={"scope": "title"},
+            ),
+            user_id=principal.user_id,
+        )
+        return result
 
     @app.get("/api/v1/sessions/{session_id}/messages", tags=["sessions"])
     async def get_messages(session_id: str, request: Request, principal: Principal):

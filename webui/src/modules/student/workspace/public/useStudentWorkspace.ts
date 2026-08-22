@@ -38,6 +38,7 @@ export function useStudentWorkspace() {
     createBackendSession,
     startNewChat,
     deleteSession,
+    renameSessionTitle,
   } = useSessionController({ preferences, persistPreferences, updateSessionMeta });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [modelProfiles, setModelProfiles] = useState<Record<string, RuntimeModelProfile>>({});
@@ -173,6 +174,7 @@ export function useStudentWorkspace() {
     send,
     cancel,
     deleteSession,
+    renameSessionTitle,
     updateSessionMeta,
     setLearningContext,
     addCategory,

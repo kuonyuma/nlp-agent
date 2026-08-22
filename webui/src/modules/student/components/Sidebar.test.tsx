@@ -4,10 +4,10 @@ import type { ComponentProps } from "react";
 import { Sidebar } from "./Sidebar";
 
 const props: ComponentProps<typeof Sidebar> = {
-  sessions: [{ session_id: "session_1", user_id: "student", workspace_id: "default", channel: "web" }],
-  preferences: { version: 2, context: { topic_id: null, topic_name: "", level: "beginner", mode: "explain" }, categories: [{ id: "category_1", name: "注意力机制", createdAt: 1 }], sessions: { session_1: { title: "Attention 入门", categoryId: "category_1" } } },
+  sessions: [{ session_id: "session_1", user_id: "student", workspace_id: "default", channel: "web", title: "Attention 入门" }],
+  preferences: { version: 2, context: { topic_id: null, topic_name: "", level: "beginner", mode: "explain" }, categories: [{ id: "category_1", name: "注意力机制", createdAt: 1 }], sessions: { session_1: { categoryId: "category_1" } } },
   activeId: "session_1", open: true, collapsed: false, connected: true,
-  onClose: vi.fn(), onCollapse: vi.fn(), onExpand: vi.fn(), onSelect: vi.fn(), onCreate: vi.fn(), onMeta: vi.fn(), onAddCategory: vi.fn(() => "category_2"), onRenameCategory: vi.fn(), onDeleteCategory: vi.fn(), onDelete: vi.fn(), onAccount: vi.fn(), onSettings: vi.fn(),
+  onClose: vi.fn(), onCollapse: vi.fn(), onExpand: vi.fn(), onSelect: vi.fn(), onCreate: vi.fn(), onRename: vi.fn(), onMeta: vi.fn(), onAddCategory: vi.fn(() => "category_2"), onRenameCategory: vi.fn(), onDeleteCategory: vi.fn(), onDelete: vi.fn(), onAccount: vi.fn(), onSettings: vi.fn(),
 };
 
 describe("Sidebar delete requests", () => {
@@ -88,11 +88,14 @@ describe("Sidebar delete requests", () => {
     expect(screen.getByText("Transformer 模型讲解")).toBeInTheDocument();
   });
 
-  it("prefers a manual rename over the backend title", () => {
-    const sessions = [{ session_id: "session_3", user_id: "student", workspace_id: "default", channel: "web", title: "后端摘要" }];
-    render(<Sidebar {...props} sessions={sessions} preferences={{ ...props.preferences, sessions: { session_3: { title: "我的重命名" } } }} />);
+  it("renames a session through the backend callback", () => {
+    vi.stubGlobal("prompt", vi.fn(() => "新的标题"));
+    const onRename = vi.fn();
+    render(<Sidebar {...props} onRename={onRename} />);
 
-    expect(screen.getByText("我的重命名")).toBeInTheDocument();
-    expect(screen.queryByText("后端摘要")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重命名学习对话" }));
+
+    expect(onRename).toHaveBeenCalledWith("session_1", "新的标题");
+    vi.unstubAllGlobals();
   });
 });

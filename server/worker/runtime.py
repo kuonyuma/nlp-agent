@@ -98,6 +98,11 @@ async def run_worker() -> None:
                     },
                 ),
             )
+            # The turn is already durable as completed, but the original worker
+            # may have died after the DB write and before on_turn_completed
+            # re-armed the summarizer.  schedule_summary is idempotent, so
+            # re-arm it here on the retry path instead of losing the title.
+            schedule_summary(database_runtime.session_factory, task.context.session_id)
         elif turn.status == TurnStatus.CANCELLED:
             terminal_events = ((
                 GatewayEventType.TURN_CANCELLED,
