@@ -102,6 +102,8 @@ class ToolApprovalBody(StrictModel):
 class UpdateSettingsBody(StrictModel):
     locale: str | None = Field(default=None, min_length=2, max_length=20)
     theme: Literal["system", "light", "dark"] | None = None
+    content_font_size: Literal["small", "medium", "large"] | None = None
+    reduce_motion: bool | None = None
     show_reasoning: bool | None = None
     stream_render_interval_ms: int | None = Field(default=None, ge=0, le=1_000)
     default_workspace_id: str | None = Field(default=None, min_length=1, max_length=128)

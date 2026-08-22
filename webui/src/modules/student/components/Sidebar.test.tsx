@@ -81,7 +81,7 @@ describe("Sidebar delete requests", () => {
     expect(onAddCategory).not.toHaveBeenCalled();
   });
 
-  it("renders the backend title when the session has no manual rename", () => {
+  it("renders the backend title when the session has no local metadata", () => {
     const sessions = [{ session_id: "session_2", user_id: "student", workspace_id: "default", channel: "web", title: "Transformer 模型讲解" }];
     render(<Sidebar {...props} sessions={sessions} preferences={{ ...props.preferences, sessions: {} }} />);
 
@@ -97,5 +97,80 @@ describe("Sidebar delete requests", () => {
 
     expect(onRename).toHaveBeenCalledWith("session_1", "新的标题");
     vi.unstubAllGlobals();
+  });
+
+  it("groups pinned sessions first across categories and restores source order after unpinning", () => {
+    const sessions = [
+      { session_id: "ordinary", user_id: "student", workspace_id: "default", channel: "web", title: "普通会话" },
+      { session_id: "pinned_old", user_id: "student", workspace_id: "default", channel: "web", title: "较早置顶" },
+      { session_id: "pinned_new", user_id: "student", workspace_id: "default", channel: "web", title: "最近置顶" },
+    ];
+    const preferences = {
+      ...props.preferences,
+      categories: [
+        { id: "category_1", name: "注意力机制", createdAt: 1 },
+        { id: "category_2", name: "语言模型", createdAt: 2 },
+      ],
+      sessions: {
+        ordinary: {},
+        pinned_old: { categoryId: "category_1", pinnedAt: 100 },
+        pinned_new: { categoryId: "category_2", pinnedAt: 200 },
+      },
+    };
+    const { container, rerender } = render(<Sidebar {...props} sessions={sessions} preferences={preferences} />);
+    const visibleTitles = () => Array.from(container.querySelectorAll(".session-main span"), (node) => node.textContent);
+
+    expect(visibleTitles()).toEqual(["最近置顶", "较早置顶", "普通会话"]);
+    expect(screen.getByRole("heading", { name: "置顶" })).toBeVisible();
+
+    rerender(<Sidebar
+      {...props}
+      sessions={sessions}
+      preferences={{
+        ...preferences,
+        sessions: {
+          ...preferences.sessions,
+          pinned_old: { categoryId: "category_1" },
+          pinned_new: { categoryId: "category_2" },
+        },
+      }}
+    />);
+
+    expect(visibleTitles()).toEqual(["普通会话", "较早置顶", "最近置顶"]);
+    expect(screen.queryByRole("heading", { name: "置顶" })).not.toBeInTheDocument();
+  });
+
+  it("keeps unpinned category groups in the original session order", () => {
+    const sessions = [
+      { session_id: "category_2_session", user_id: "student", workspace_id: "default", channel: "web", title: "语言模型会话" },
+      { session_id: "category_1_session", user_id: "student", workspace_id: "default", channel: "web", title: "注意力机制会话" },
+    ];
+    const preferences = {
+      ...props.preferences,
+      categories: [
+        { id: "category_1", name: "注意力机制", createdAt: 1 },
+        { id: "category_2", name: "语言模型", createdAt: 2 },
+      ],
+      sessions: {
+        category_1_session: { categoryId: "category_1" },
+        category_2_session: { categoryId: "category_2" },
+      },
+    };
+    const { container } = render(<Sidebar {...props} sessions={sessions} preferences={preferences} />);
+
+    expect(Array.from(container.querySelectorAll(".session-main span"), (node) => node.textContent)).toEqual([
+      "语言模型会话",
+      "注意力机制会话",
+    ]);
+  });
+
+  it("offers pinning from the session menu", () => {
+    const onMeta = vi.fn();
+    const { container } = render(<Sidebar {...props} onMeta={onMeta} />);
+
+    fireEvent.click(container.querySelector(".session-menu summary")!);
+    fireEvent.click(screen.getByRole("button", { name: "置顶" }));
+
+    expect(onMeta).toHaveBeenCalledWith("session_1", { pinnedAt: expect.any(Number) });
   });
 });

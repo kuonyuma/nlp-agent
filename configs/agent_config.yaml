@@ -86,7 +86,9 @@ providers:
 
   qwen:
     adapter: qwen
-    base_url: https://ws-okvvhep7qcxtt1xa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    # Use the public mainland endpoint so deployments can use their own
+    # compatible DashScope API key instead of a collaborator's workspace key.
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: QWEN_API_KEY
     default_headers: {}
 

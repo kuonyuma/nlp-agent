@@ -171,4 +171,18 @@ describe("Composer", () => {
     expect(screen.queryByRole("img", { name: "failed.png" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("发送")).toBeDisabled();
   });
+
+  it("shows the server rejection reason for a failed upload", async () => {
+    vi.mocked(uploadAttachment).mockRejectedValueOnce(
+      Object.assign(new Error("仅支持 JPEG、PNG 或 WebP 图片"), { status: 415 }),
+    );
+    const { container } = render(
+      <Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId="sess-1" />
+    );
+    const file = new File(["unsupported"], "image.gif", { type: "image/gif" });
+
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+
+    expect(await screen.findByRole("status")).toHaveTextContent("仅支持 JPEG、PNG 或 WebP 图片");
+  });
 });

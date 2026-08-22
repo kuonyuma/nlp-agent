@@ -101,7 +101,7 @@ export const api = {
     request<TurnRecord>(`/chat/turns/${encodeURIComponent(turnId)}/cancel`, { method: "POST" }),
   getSettings: () => request<{ preferences: { settings?: Partial<UserSettings> }; runtime: SettingsRuntime }>("/settings"),
   updateSettings: (settings: Partial<UserSettings>) =>
-    request<{ settings: UserSettings }>("/settings", {
+    request<{ settings: Partial<UserSettings> }>("/settings", {
       method: "PATCH",
       body: JSON.stringify(settings),
     }),

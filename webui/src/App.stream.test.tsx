@@ -5,7 +5,7 @@ const stream = vi.hoisted(() => {
   let lastRequestId = "";
   let lastModelProfile = "";
   const updateSettings = vi.fn(async (patch: Record<string, unknown>) => ({ settings: {
-    locale: "zh-CN", theme: "system", show_reasoning: false,
+    locale: "zh-CN", theme: "system",content_font_size: "medium", reduce_motion: false, show_reasoning: false,
     stream_render_interval_ms: 30, model_profile: "deepseek", ...patch,
   } }));
   return {

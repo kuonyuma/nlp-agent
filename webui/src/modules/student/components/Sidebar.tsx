@@ -1,5 +1,5 @@
-import { Archive, BookOpen, FolderPlus, Heart, Menu, MoreHorizontal, Pencil, Plus, Search, Settings, Trash2, UserRound, X } from "lucide-react";
-import { useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { Archive, BookOpen, FolderPlus, Heart, Menu, MoreHorizontal, Pencil, Pin, Plus, Search, Settings, Trash2, UserRound, X } from "lucide-react";
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import novaMarkUrl from "../../../../logo/nova-remove.png";
 
@@ -47,19 +47,53 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
     return title.toLowerCase().includes(query.toLowerCase());
   }), [preferences.sessions, query, sessions, showArchived]);
   const grouped = useMemo(() => {
+    const pinned = visible
+      .filter((session) => preferences.sessions[session.session_id]?.pinnedAt)
+      .sort((first, second) => (
+        (preferences.sessions[second.session_id]?.pinnedAt ?? 0)
+        - (preferences.sessions[first.session_id]?.pinnedAt ?? 0)
+      ));
     const itemsByCategory = new Map<string | undefined, SessionSummary[]>();
-    for (const session of visible) {
-      const categoryId = preferences.sessions[session.session_id]?.categoryId;
+    const firstUnpinnedIndexByCategory = new Map<string | undefined, number>();
+    for (const [index, session] of visible.entries()) {
+      const meta = preferences.sessions[session.session_id];
+      if (meta?.pinnedAt) continue;
+      const categoryId = meta?.categoryId;
+      if (!firstUnpinnedIndexByCategory.has(categoryId)) firstUnpinnedIndexByCategory.set(categoryId, index);
       const items = itemsByCategory.get(categoryId) ?? [];
       items.push(session);
       itemsByCategory.set(categoryId, items);
     }
-    return [
-      { id: undefined, name: t("uncategorized"), items: itemsByCategory.get(undefined) ?? [] },
-      ...preferences.categories.map((category) => ({ id: category.id, name: category.name, items: itemsByCategory.get(category.id) ?? [] })),
+    const regularGroups = [
+      { key: "uncategorized", id: undefined, name: t("uncategorized"), items: itemsByCategory.get(undefined) ?? [], pinned: false },
+      ...preferences.categories.map((category) => ({ key: category.id, id: category.id, name: category.name, items: itemsByCategory.get(category.id) ?? [], pinned: false })),
     ].filter((group) => group.items.length > 0 || !query && !showArchived);
+    regularGroups.sort((first, second) => (
+      (firstUnpinnedIndexByCategory.get(first.id) ?? Number.MAX_SAFE_INTEGER)
+      - (firstUnpinnedIndexByCategory.get(second.id) ?? Number.MAX_SAFE_INTEGER)
+    ));
+    return [
+      ...(pinned.length > 0 ? [{ key: "pinned", id: undefined, name: "置顶", items: pinned, pinned: true }] : []),
+      ...regularGroups,
+    ];
   }, [preferences.categories, preferences.sessions, query, showArchived, t, visible]);
+  useEffect(() => {
+    const closeOpenMenus = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
 
+      document
+        .querySelectorAll<HTMLDetailsElement>(
+          ".category-menu[open], .session-menu[open]",
+        )
+        .forEach((menu) => {
+          if (!menu.contains(target)) menu.open = false;
+        });
+    };
+
+    document.addEventListener("pointerdown", closeOpenMenus);
+    return () => document.removeEventListener("pointerdown", closeOpenMenus);
+  }, []);
   const createCategory = () => setCategoryDialogOpen(true);
   const expandFromCollapsedRail = (event: MouseEvent<HTMLElement>) => {
     if (!collapsed || event.target !== event.currentTarget) return;
@@ -83,9 +117,9 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
       </nav>
       {!collapsed && searchOpen && <div className="search-box"><Search size={15} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索历史问题" /></div>}
       <div className="session-scroll">
-        {!collapsed && grouped.map((group) => <section className="session-group" key={group.id ?? "uncategorized"}>
+        {!collapsed && grouped.map((group) => <section className="session-group" key={group.key}>
           <h3>
-            <span><BookOpen size={13} />{group.name}</span>
+            <span>{group.pinned ? <Pin size={13} /> : <BookOpen size={13} />}{group.name}</span>
             {group.id && <details className="category-menu">
               <summary aria-label={`${group.name} 分类菜单`}><MoreHorizontal size={14} /></summary>
               <div>
@@ -101,15 +135,50 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
             const meta = preferences.sessions[session.session_id] ?? {};
             const title = displayTitle(session);
             return <div className={`session-item ${activeId === session.session_id ? "active" : ""}`} key={session.session_id}>
-              <button className="session-main" type="button" onClick={() => { onSelect(session.session_id); onClose(); }}><span>{title}</span></button>
+              <button
+  className="session-main"
+  type="button"
+  onClick={() => {
+    onSelect(session.session_id);
+    onClose();
+  }}
+>
+  <span>{title}</span>
+</button>
+{meta.favorite && (
+  <button
+    type="button"
+    className="session-favorite active"
+    aria-label="取消收藏"
+    aria-pressed="true"
+    title="取消收藏"
+    onClick={() => onMeta(session.session_id, { favorite: false })}
+  >
+    <Heart size={14} fill="currentColor" />
+  </button>
+)}
+              <button
+  type="button"
+  className={`session-pin ${meta.pinnedAt ? "active" : ""}`}
+  aria-label={meta.pinnedAt ? "取消置顶" : "置顶对话"}
+  aria-pressed={Boolean(meta.pinnedAt)}
+  title={meta.pinnedAt ? "取消置顶" : "置顶对话"}
+  onClick={() =>
+    onMeta(session.session_id, {
+      pinnedAt: meta.pinnedAt ? undefined : Date.now(),
+    })
+  }
+>
+  <Pin size={14} />
+</button>
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
                 <button type="button" aria-label="重命名学习对话" onClick={() => { const name = prompt("重命名学习对话", title); if (name?.trim()) onRename(session.session_id, name.trim()); }}><Pencil size={14} />重命名</button>
+                <button type="button" onClick={() => onMeta(session.session_id, { pinnedAt: meta.pinnedAt ? undefined : Date.now() })}><Pin size={14} />{meta.pinnedAt ? "取消置顶" : "置顶"}</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { archived: !meta.archived })}><Archive size={14} />{meta.archived ? "移出归档" : "归档"}</button>
                 <div className="session-category-actions"><span>移动到分类</span><button type="button" onClick={() => onMeta(session.session_id, { categoryId: undefined })}>未分类</button>{preferences.categories.map((category) => <button key={category.id} type="button" onClick={() => onMeta(session.session_id, { categoryId: category.id })}>{category.name}</button>)}</div>
                 <button className="danger" type="button" onClick={() => onDelete(session.session_id, title)}><Trash2 size={14} />删除</button>
               </div></details>
-              {meta.favorite && <Heart className="favorite-mark" size={11} fill="currentColor" />}
             </div>;
           })}
         </section>)}
