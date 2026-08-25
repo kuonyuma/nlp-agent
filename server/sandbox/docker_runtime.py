@@ -228,7 +228,7 @@ class DockerRuntimeAdapter:
     async def managed_runtime_ids(self) -> set[str]:
         """List only Manager-owned containers; never enumerate arbitrary Docker work."""
         process = await asyncio.create_subprocess_exec(
-            "docker", "ps", "--all", "--quiet", "--filter", "label=nova.sandbox.managed=true",
+            "docker", "ps", "--all", "--no-trunc", "--quiet", "--filter", "label=nova.sandbox.managed=true",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

@@ -98,3 +98,22 @@ def test_destroy_fails_closed_when_docker_returns_nonzero() -> None:
                 await adapter.destroy("container-id")
 
     asyncio.run(exercise())
+
+
+def test_managed_runtime_listing_preserves_full_container_ids() -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+
+    adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image="registry.example/nova@sha256:" + "1" * 64))
+
+    async def exercise() -> tuple[set[str], tuple[object, ...]]:
+        with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn:
+            process = AsyncMock()
+            process.returncode = 0
+            process.communicate.return_value = (b"full-container-id\n", b"")
+            spawn.return_value = process
+            ids = await adapter.managed_runtime_ids()
+            return ids, spawn.call_args.args
+
+    ids, command = asyncio.run(exercise())
+    assert ids == {"full-container-id"}
+    assert command == ("docker", "ps", "--all", "--no-trunc", "--quiet", "--filter", "label=nova.sandbox.managed=true")
