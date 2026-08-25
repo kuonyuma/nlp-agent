@@ -30,10 +30,12 @@ async def test_manager_destroys_unregistered_managed_container() -> None:
     name = f"nova-manager-orphan-{uuid4().hex}"
     engine = create_engine(DatabaseConfig(os.environ["NLP_AGENT_DATABASE_URL"], pool_size=1, max_overflow=0))
     try:
-        subprocess.run(
+        container = subprocess.run(
             ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), "alpine:3.20", "sleep", "300"],
             check=True, capture_output=True, text=True, timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
         )
+        container_id = container.stdout.strip()
+        assert container_id
         manager = WarmPoolManager(
             session_factory=create_session_factory(engine),
             docker=DockerRuntimeAdapter(DockerRuntimeConfig(image="alpine@sha256:" + "0" * 64)),
@@ -41,7 +43,7 @@ async def test_manager_destroys_unregistered_managed_container() -> None:
             ready_target=0,
         )
         actions = await manager.reconcile()
-        assert name in actions.destroy_orphans
+        assert container_id in actions.destroy_orphans
         remaining = subprocess.run(["docker", "inspect", name], capture_output=True, text=True, timeout=30)
         assert remaining.returncode != 0
     finally:
@@ -64,6 +66,7 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
     from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
     from server.sandbox.contracts import SandboxScope
     from server.sandbox.manager import WarmPoolManager
+    from server.web.database_auth import DatabaseSessionAuth
     from server.user.schemas import UserCreate
     from server.user.service import UserService
 
@@ -72,10 +75,12 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
     factory = create_session_factory(engine)
     now = datetime.now(UTC).replace(tzinfo=None)
     try:
-        subprocess.run(
+        container = subprocess.run(
             ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), "alpine:3.20", "sleep", "300"],
             check=True, capture_output=True, text=True, timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
         )
+        container_id = container.stdout.strip()
+        assert container_id
         async with factory.begin() as session:
             user = await UserService(session).create_user(
                 UserCreate(username=f"reconcile{uuid4().hex[:10]}", display_name="Reconcile", password="InitialPw0rd1")
@@ -87,28 +92,15 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
             lease_id = str(uuid4())
             session_expires_at = now + timedelta(hours=1)
             lease_expires_at = now + timedelta(hours=1)
-            revoked_at = None
-            if lifecycle_state in {"logout", "revoke"}:
-                revoked_at = now
-            elif lifecycle_state == "ttl":
-                session_expires_at = now - timedelta(seconds=1)
-            elif lifecycle_state == "disabled":
-                user.status = "disabled"
-            elif lifecycle_state == "authorization_changed":
-                user.authorization_version += 1
-            elif lifecycle_state == "lease_expired":
-                lease_expires_at = now - timedelta(seconds=1)
-            elif lifecycle_state == "deleted":
-                user.deleted_at = now
             session.add(SessionModel(
                 id=session_id, user_id=user.id, workspace_id=workspace_id,
                 token_hash=f"token-{session_id}", csrf_hash=f"csrf-{session_id}",
-                authorization_version=user.authorization_version if lifecycle_state != "authorization_changed" else user.authorization_version - 1,
-                expires_at=session_expires_at, revoked_at=revoked_at,
+                authorization_version=user.authorization_version, expires_at=session_expires_at,
+                revoked_at=None,
             ))
             session.add(SandboxEnvironmentModel(id=environment_id, owner_user_id=user.id, generation=1))
             session.add(SandboxRuntimeInstanceModel(
-                id=runtime_id, environment_id=environment_id, external_runtime_id=name,
+                id=runtime_id, environment_id=environment_id, external_runtime_id=container_id,
                 runtime_kind="docker", state="assigned", generation=1,
             ))
             await session.flush()
@@ -117,6 +109,30 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
                 auth_session_id=session_id, runtime_instance_id=runtime_id, workspace_id=workspace_id,
                 generation=1, state="active", expires_at=lease_expires_at,
             ))
+        if lifecycle_state == "logout":
+            await DatabaseSessionAuth().revoke_session_id(factory, user_id=user.id, session_id=session_id)
+        elif lifecycle_state == "revoke":
+            async with factory.begin() as session:
+                await UserService(session).revoke_user_sessions(user.id, actor_user_id="phase3-test-admin")
+        elif lifecycle_state == "disabled":
+            async with factory.begin() as session:
+                await UserService(session).update_user_status(user.id, "disabled", actor_user_id="phase3-test-admin")
+        elif lifecycle_state == "authorization_changed":
+            async with factory.begin() as session:
+                await UserService(session).change_password(user.id, "ChangedPw0rd2")
+        elif lifecycle_state == "deleted":
+            async with factory.begin() as session:
+                await UserService(session).soft_delete_user(user.id, actor_user_id="phase3-test-admin")
+        elif lifecycle_state == "ttl":
+            async with factory.begin() as session:
+                auth_session = await session.get(SessionModel, session_id, with_for_update=True)
+                assert auth_session is not None
+                auth_session.expires_at = now - timedelta(seconds=1)
+        elif lifecycle_state == "lease_expired":
+            async with factory.begin() as session:
+                lease = await session.get(SandboxLeaseModel, lease_id, with_for_update=True)
+                assert lease is not None
+                lease.expires_at = now - timedelta(seconds=1)
         manager = WarmPoolManager(
             session_factory=factory,
             docker=DockerRuntimeAdapter(DockerRuntimeConfig(image="alpine@sha256:" + "0" * 64)),
