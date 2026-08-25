@@ -26,6 +26,8 @@ jobs:
       - run: pytest tests/test_sandbox_docker_runtime.py tests/test_sandbox_runtime_protocol.py tests/test_sandbox_events.py -q
       - name: Verify Phase 4 model Sandbox contracts
         run: pytest tests/test_sandbox_model_tools.py tests/test_sandbox_optimization.py tests/test_sandbox_commands.py tests/test_sandbox_manager_rpc.py tests/test_sandbox_fault_injection.py tests/test_sandbox_metrics_trim.py -q
+      - name: Verify Phase 5 extension contracts
+        run: pytest tests/test_sandbox_phase5.py -q
       - name: Verify durable Redis Stream replay
         run: RUN_SANDBOX_REDIS_INTEGRATION=1 pytest tests/test_sandbox_redis_integration.py -q
       - name: Install gVisor runsc

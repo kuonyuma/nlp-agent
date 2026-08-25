@@ -590,7 +590,7 @@ class WarmPoolManager:
                 SandboxRuntimeInstanceModel(
                     id=runtime_id,
                     runtime_kind=self._runtime_kind,
-                    image_digest=self._docker.config.image,
+                    image_digest=self._docker.image_digest,
                     resource_profile_id=self._resource_profile_id,
                     state="creating",
                 )

@@ -56,6 +56,12 @@ class DockerRuntimeAdapter:
 
     def __init__(self, config: DockerRuntimeConfig) -> None:
         self.config = config
+        self.runtime_kind = "docker"
+
+    @property
+    def image_digest(self) -> str:
+        """Expose immutable image identity without leaking backend config."""
+        return self.config.image
 
     def create_command(self, *, name: str, claim_nonce: str) -> tuple[str, ...]:
         return (

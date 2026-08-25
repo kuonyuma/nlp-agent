@@ -16,9 +16,14 @@ from .docker_runtime import DockerRuntimeAdapter
 
 @runtime_checkable
 class SandboxRuntimeAdapter(Protocol):
-    """Narrow capability boundary consumed by the isolated Manager."""
+    """Complete lifecycle boundary consumed by the isolated Manager."""
 
-    config: object
+    runtime_kind: str
+    image_digest: str
+
+    async def image_cached(self) -> bool: ...
+    async def create_l1(self, *, name: str) -> str: ...
+    async def start_l1(self, external_runtime_id: str) -> None: ...
 
     async def create_ready(self, *, name: str, claim_nonce: str) -> str: ...
     async def destroy(self, external_runtime_id: str) -> None: ...
@@ -27,6 +32,13 @@ class SandboxRuntimeAdapter(Protocol):
     async def execute(self, external_runtime_id: str, *, source: str) -> dict[str, object]: ...
     async def interrupt(self, external_runtime_id: str) -> None: ...
     async def managed_runtime_ids(self) -> set[str]: ...
+    async def run_scratch(
+        self,
+        *,
+        source: str,
+        timeout_seconds: int = 15,
+        output_limit_bytes: int = 1_000_000,
+    ) -> dict[str, object]: ...
 
 
 @dataclass(frozen=True)
@@ -98,7 +110,7 @@ class FirecrackerRuntimeAdapter:
         self.runtime_kind = "firecracker"
 
     @property
-    def image(self) -> str:
+    def image_digest(self) -> str:
         return self.config.rootfs_image
 
     async def image_cached(self) -> bool:
@@ -127,6 +139,14 @@ class FirecrackerRuntimeAdapter:
 
     async def create_ready(self, *, name: str, claim_nonce: str) -> str:
         del name, claim_nonce
+        raise RuntimeError("Firecracker guest-agent lifecycle is not enabled")
+
+    async def create_l1(self, *, name: str) -> str:
+        del name
+        raise RuntimeError("Firecracker guest-agent lifecycle is not enabled")
+
+    async def start_l1(self, external_runtime_id: str) -> None:
+        del external_runtime_id
         raise RuntimeError("Firecracker guest-agent lifecycle is not enabled")
 
     async def run_scratch(self, *, source: str, timeout_seconds: int = 15, output_limit_bytes: int = 1_000_000) -> dict[str, object]:

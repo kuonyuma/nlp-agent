@@ -11,7 +11,8 @@ default and the only backend enabled by the production examples.
   command, but guest-agent lifecycle operations fail closed until a Linux
   deployment provides the integration and its security tests.
 - `runtime_factory.create_runtime_adapter()` selects a backend explicitly;
-  unknown backends are rejected.
+  unknown backends are rejected. The Kubernetes option requires an injected
+  Manager-owned client; without one, lifecycle calls fail closed.
 
 ## Multi-node scheduling
 
