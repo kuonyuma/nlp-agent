@@ -113,9 +113,11 @@ class DockerRuntimeAdapter:
         process = await asyncio.create_subprocess_exec(
             "docker", "rm", "--force", external_runtime_id,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        await _wait(process)
+        _, stderr = await _communicate(process)
+        if process.returncode != 0:
+            raise RuntimeError(stderr.decode("utf-8", "replace").strip() or "Docker sandbox destroy failed")
 
     async def healthy(self, external_runtime_id: str) -> bool:
         process = await asyncio.create_subprocess_exec(

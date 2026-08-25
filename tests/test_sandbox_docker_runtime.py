@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 
 def test_docker_runtime_command_has_no_host_or_network_escape_hatches() -> None:
     from server.sandbox.docker_runtime import DockerRuntimeConfig, DockerRuntimeAdapter
@@ -79,3 +81,20 @@ def test_execution_protocol_uses_stdin_not_a_docker_command_argument() -> None:
         "docker", "exec", "--interactive", "container-id", "python", "/opt/nova-runtime/nova_runtime.py",
         "execute", "--timeout-seconds", "8", "--output-limit-bytes", "1024",
     )
+
+
+def test_destroy_fails_closed_when_docker_returns_nonzero() -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+
+    adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image="registry.example/nova@sha256:" + "f" * 64))
+
+    async def exercise() -> None:
+        with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn:
+            process = AsyncMock()
+            process.returncode = 1
+            process.communicate.return_value = (b"", b"container is still running")
+            spawn.return_value = process
+            with pytest.raises(RuntimeError, match="still running"):
+                await adapter.destroy("container-id")
+
+    asyncio.run(exercise())
