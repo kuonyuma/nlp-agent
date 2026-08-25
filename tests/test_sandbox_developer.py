@@ -37,3 +37,6 @@ def test_developer_router_exposes_runtime_inventory_and_drain() -> None:
     paths = {route.path for route in router.routes}
     assert "/api/v1/developer/sandbox/runtimes" in paths
     assert "/api/v1/developer/sandbox/runtimes/{runtime_id}/drain" in paths
+    assert "/api/v1/developer/sandbox/runtimes/{runtime_id}" in paths
+    assert "/api/v1/developer/sandbox/executions" in paths
+    assert "/api/v1/developer/sandbox/executions/{execution_id}/events" in paths

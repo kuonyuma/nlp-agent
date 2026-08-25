@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import (
@@ -16,12 +19,13 @@ from server.auth.dependencies import (
     get_db_session,
 )
 from server.web.database_auth import DatabaseSessionClaims
+from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxExecutionModel, SandboxLeaseModel
 from configs.settings import settings
 from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 from server.sandbox.gateway import SandboxGateway
 from server.sandbox.manager import WarmPoolManager
 from server.sandbox.ticket import SandboxTicketSigner
-from server.sandbox.events import SandboxEventStore
+from server.sandbox.events import default_sandbox_event_store
 from server.web.protocol import control_event
 
 from .contracts import SandboxScope
@@ -33,7 +37,7 @@ router = APIRouter(prefix="/api/v1/sandbox", tags=["sandbox"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 DatabaseClaims = Annotated[DatabaseSessionClaims, Depends(get_database_session_claims)]
 inmemory_runtime = InMemoryRuntime()
-sandbox_events = SandboxEventStore()
+sandbox_events = default_sandbox_event_store
 
 
 class ExecuteBody(BaseModel):
@@ -103,12 +107,39 @@ async def ensure_sandbox_lease(
 async def execute_sandbox(
     request: Request,
     body: ExecuteBody,
+    db: DbSession,
     principal: Principal,
     claims: DatabaseClaims,
     _write_claims: WriteClaims,
 ) -> dict:
     scope = SandboxScope.from_authenticated_request(principal, claims)
     execution_id = str(uuid4())
+    environment = await db.scalar(select(SandboxEnvironmentModel).where(SandboxEnvironmentModel.owner_user_id == scope.owner_user_id))
+    lease = None
+    if environment is not None:
+        lease = await db.scalar(select(SandboxLeaseModel).where(
+            SandboxLeaseModel.environment_id == environment.id,
+            SandboxLeaseModel.auth_session_id == scope.auth_session_id,
+            SandboxLeaseModel.state == "active",
+        ))
+    if environment is None or lease is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Sandbox lease is not active.")
+    execution = SandboxExecutionModel(
+        id=execution_id,
+        environment_id=environment.id,
+        runtime_instance_id=lease.runtime_instance_id,
+        lease_id=lease.id,
+        owner_user_id=scope.owner_user_id,
+        workspace_id=scope.workspace_id,
+        actor_type="browser",
+        request_id=execution_id,
+        code_hash=hashlib.sha256(body.source.encode("utf-8")).hexdigest(),
+        status="running",
+        generation=scope.generation,
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    db.add(execution)
+    await db.flush()
     await sandbox_events.append(execution_id, user_id=scope.owner_user_id, event_type="execution.started", payload={})
     await request.app.state.hub.broadcast(control_event("sandbox.execution.started", payload={"execution_id": execution_id, "seq": 1}), user_id=scope.owner_user_id)
     try:
@@ -119,9 +150,22 @@ async def execute_sandbox(
             await request.app.state.hub.broadcast(control_event("sandbox.execution.output", payload={"execution_id": execution_id, **event}), user_id=scope.owner_user_id)
         event = await sandbox_events.append(execution_id, user_id=scope.owner_user_id, event_type="execution.completed", payload={})
         await request.app.state.hub.broadcast(control_event("sandbox.execution.completed", payload={"execution_id": execution_id, **event}), user_id=scope.owner_user_id)
+        execution.status = str(result.get("status") or "completed")
+        execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        await db.commit()
         return {**result, "execution_id": execution_id}
     except PermissionError as error:
+        execution.status = "failed"
+        execution.exit_reason = str(error)[:128]
+        execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        await db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    except Exception as error:
+        execution.status = "failed"
+        execution.exit_reason = f"{type(error).__name__}: {error}"[:128]
+        execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        await db.commit()
+        raise
 
 
 @router.get("/executions/{execution_id}/events")

@@ -37,6 +37,23 @@ def test_artifact_access_ticket_expires() -> None:
         signer.verify(ticket, artifact_id="artifact-a", owner_user_id="user-a")
 
 
+def test_malformed_artifact_ticket_is_always_a_permission_error() -> None:
+    from server.sandbox.artifacts import ArtifactAccessSigner
+
+    signer = ArtifactAccessSigner("test-secret")
+    for ticket in ("not-a-ticket", "!!!!.!!!!", "eyJ4IjoxfQ.bad"):
+        with pytest.raises(PermissionError):
+            signer.verify(ticket, artifact_id="artifact-a", owner_user_id="user-a")
+
+
+def test_artifact_expiry_normalizes_mysql_naive_utc_values() -> None:
+    from datetime import datetime, timezone
+    from server.sandbox.artifacts import artifact_expired
+
+    assert artifact_expired(datetime(2020, 1, 1), now=datetime(2020, 1, 2, tzinfo=timezone.utc))
+    assert not artifact_expired(None)
+
+
 def test_artifact_access_url_uses_configured_separate_origin() -> None:
     from server.sandbox.artifacts import artifact_access_url
 

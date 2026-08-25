@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -13,7 +12,7 @@ from server.infrastructure.mysql.models import SandboxArtifactModel
 from server.web.database_auth import DatabaseSessionClaims
 
 from .artifact_delivery import build_artifact_response, issue_artifact_access_url
-from .artifacts import ArtifactAccessSigner
+from .artifacts import ArtifactAccessSigner, artifact_expired
 
 router = APIRouter(prefix="/api/v1/sandbox/artifacts", tags=["sandbox-artifacts"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
@@ -31,7 +30,7 @@ def _signer() -> ArtifactAccessSigner:
 async def issue_artifact_access(artifact_id: str, request: Request, db: DbSession, principal: Principal, claims: DatabaseClaims) -> dict[str, str]:
     artifact = await db.get(SandboxArtifactModel, artifact_id)
     expires_at = getattr(artifact, "expires_at", None)
-    if artifact is None or artifact.owner_user_id != claims.user_id or principal.user_id != claims.user_id or (expires_at is not None and expires_at.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc)):
+    if artifact is None or artifact.owner_user_id != claims.user_id or principal.user_id != claims.user_id or artifact_expired(expires_at):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     origin = settings.NLP_AGENT_SANDBOX_ARTIFACT_ORIGIN.strip()
     if not origin:
@@ -45,7 +44,7 @@ async def issue_artifact_access(artifact_id: str, request: Request, db: DbSessio
 @router.get("/{artifact_id}/content")
 async def get_artifact_content(artifact_id: str, ticket: str, db: DbSession):
     artifact = await db.get(SandboxArtifactModel, artifact_id)
-    if artifact is None:
+    if artifact is None or artifact_expired(getattr(artifact, "expires_at", None)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
     if not root:

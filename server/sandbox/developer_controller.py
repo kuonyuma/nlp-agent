@@ -14,6 +14,8 @@ from server.infrastructure.mysql.models import SandboxExecutionModel, SandboxRun
 from server.rbac.service import rbac_service
 
 from .developer import capacity_snapshot, summarize_execution_latency, summarize_runtime_states
+from .events import default_sandbox_event_store
+from .metrics import default_sandbox_metrics_store
 
 router = APIRouter(prefix="/api/v1/developer/sandbox", tags=["developer-sandbox"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
@@ -50,11 +52,23 @@ async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, obj
         alerts.append({"code": "pool_deficit", "severity": "warning", "message": "Warm Pool ready capacity is below target."})
     if runtime_states["failed"] > 0:
         alerts.append({"code": "runtime_failed", "severity": "critical", "message": "Sandbox runtimes require reconciliation."})
+    sample = {
+        "timestamp": datetime.now(UTC).timestamp(),
+        "ready": capacity["ready"], "creating": capacity["creating"],
+        "target": capacity["target"], "deficit": capacity["deficit"],
+    }
+    history = [sample]
+    if default_sandbox_metrics_store is not None:
+        try:
+            history = await default_sandbox_metrics_store.record(sample)
+        except Exception:
+            history = [sample]
     return {
         "runtime_states": runtime_states,
         "capacity": capacity,
         "execution_latency": summarize_execution_latency(durations),
         "alerts": alerts,
+        "capacity_history": history,
         "sampled_at": datetime.now(UTC).isoformat(),
     }
 
@@ -93,3 +107,51 @@ async def drain_sandbox_runtime(runtime_id: str, db: DbSession, principal: Princ
     )
     await db.commit()
     return {"id": runtime_id, "state": runtime.state}
+
+
+@router.get("/runtimes/{runtime_id}")
+async def get_sandbox_runtime(runtime_id: str, db: DbSession, principal: Principal) -> dict[str, object | None]:
+    _require_monitor(principal)
+    runtime = await db.get(SandboxRuntimeInstanceModel, runtime_id)
+    if runtime is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sandbox runtime not found.")
+    return {
+        "id": str(runtime.id), "state": runtime.state, "node_id": runtime.node_id,
+        "runtime_kind": runtime.runtime_kind, "resource_profile_id": runtime.resource_profile_id,
+        "external_runtime_id": runtime.external_runtime_id, "image_digest": runtime.image_digest,
+        "environment_id": str(runtime.environment_id) if runtime.environment_id else None,
+        "generation": runtime.generation, "last_heartbeat_at": runtime.last_heartbeat_at.isoformat() if runtime.last_heartbeat_at else None,
+        "failure_reason": runtime.failure_reason, "updated_at": runtime.updated_at.isoformat() if runtime.updated_at else None,
+    }
+
+
+@router.get("/executions")
+async def list_sandbox_executions(db: DbSession, principal: Principal) -> dict[str, list[dict[str, object | None]]]:
+    _require_monitor(principal)
+    rows = (await db.execute(select(SandboxExecutionModel).order_by(SandboxExecutionModel.created_at.desc()).limit(200))).scalars().all()
+    return {"items": [
+        {
+            "id": str(row.id), "owner_user_id": str(row.owner_user_id), "environment_id": str(row.environment_id),
+            "runtime_instance_id": str(row.runtime_instance_id) if row.runtime_instance_id else None,
+            "status": row.status, "generation": row.generation, "started_at": row.started_at.isoformat() if row.started_at else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None, "exit_reason": row.exit_reason,
+        }
+        for row in rows
+    ]}
+
+
+@router.get("/executions/{execution_id}/events")
+async def replay_sandbox_execution_events(
+    execution_id: str,
+    db: DbSession,
+    principal: Principal,
+    after_event_id: str | None = None,
+) -> dict[str, object]:
+    _require_monitor(principal)
+    execution = await db.get(SandboxExecutionModel, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sandbox execution not found.")
+    events = await default_sandbox_event_store.replay(
+        execution_id, user_id=str(execution.owner_user_id), after_event_id=after_event_id,
+    )
+    return {"execution_id": execution_id, "events": events}

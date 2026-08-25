@@ -1,8 +1,12 @@
-"""Ordered sandbox execution events; Redis transport is added behind this seam."""
+"""Ordered sandbox execution events backed by Redis Streams in deployments."""
 
 from __future__ import annotations
 
 from collections import defaultdict
+import json
+from typing import Any
+
+from configs.settings import settings
 
 
 class SandboxEventStore:
@@ -24,9 +28,83 @@ class SandboxEventStore:
         return {key: value for key, value in event.items() if key != "user_id"}
 
     async def replay(self, execution_id: str, *, user_id: str, after_event_id: str | None = None) -> list[dict[str, object]]:
-        after = int(after_event_id or "0")
+        try:
+            after = int(after_event_id or "0")
+        except (TypeError, ValueError):
+            after = 0
         return [
             {key: value for key, value in event.items() if key != "user_id"}
             for event in self._events.get(execution_id, [])
             if event["user_id"] == user_id and int(str(event["event_id"])) > after
         ]
+
+
+class RedisSandboxEventStore:
+    """Redis Stream implementation with bounded retention and owner filtering.
+
+    Each execution gets its own stream.  Redis stream IDs are returned to the
+    browser as cursors, so replay survives web-process restarts and works
+    consistently across multiple API instances.
+    """
+
+    def __init__(self, client: Any, *, stream_prefix: str = "nova:sandbox:events", retention_seconds: int = 86_400, max_events: int = 10_000) -> None:
+        self._client = client
+        self._stream_prefix = stream_prefix.rstrip(":")
+        self._retention_seconds = max(60, retention_seconds)
+        self._max_events = max(100, max_events)
+
+    def _stream_name(self, execution_id: str) -> str:
+        return f"{self._stream_prefix}:{execution_id}"
+
+    async def append(self, execution_id: str, *, user_id: str, event_type: str, payload: dict[str, object]) -> dict[str, object]:
+        stream = self._stream_name(execution_id)
+        event_id = await self._client.xadd(
+            stream,
+            {"user_id": user_id, "type": event_type, "payload": json.dumps(payload, separators=(",", ":"), ensure_ascii=False)},
+            maxlen=self._max_events,
+            approximate=True,
+        )
+        await self._client.expire(stream, self._retention_seconds)
+        event_id = _text(event_id)
+        return {"event_id": event_id, "seq": event_id, "type": event_type, "payload": payload}
+
+    async def replay(self, execution_id: str, *, user_id: str, after_event_id: str | None = None) -> list[dict[str, object]]:
+        cursor = after_event_id or "0-0"
+        if cursor.isdigit():
+            cursor = f"0-{cursor}"
+        rows = await self._client.xrange(self._stream_name(execution_id), min=f"({cursor}", max="+", count=self._max_events)
+        events: list[dict[str, object]] = []
+        for raw_id, raw_fields in rows:
+            fields = {_text(key): _text(value) for key, value in raw_fields.items()}
+            if fields.get("user_id") != user_id:
+                continue
+            try:
+                payload = json.loads(fields.get("payload", "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            events.append({"event_id": _text(raw_id), "seq": _text(raw_id), "type": fields.get("type", ""), "payload": payload})
+        return events
+
+    async def close(self) -> None:
+        close = getattr(self._client, "aclose", None)
+        if close is not None:
+            await close()
+
+
+def _text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def create_sandbox_event_store() -> SandboxEventStore | RedisSandboxEventStore:
+    """Select durable Redis Streams whenever the deployment configured Redis."""
+    redis_url = settings.NLP_AGENT_REDIS_URL.strip()
+    if not redis_url:
+        return SandboxEventStore()
+    from redis.asyncio import Redis
+
+    return RedisSandboxEventStore(Redis.from_url(redis_url, decode_responses=True))
+
+
+default_sandbox_event_store = create_sandbox_event_store()

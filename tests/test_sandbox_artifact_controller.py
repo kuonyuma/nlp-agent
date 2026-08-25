@@ -52,3 +52,22 @@ def test_expired_artifact_is_not_authorized(monkeypatch) -> None:
     app.dependency_overrides[get_database_session_claims] = lambda: DatabaseSessionClaims(user_id="user-a", workspace_id="ws", session_id="s", token_hash_value="t", csrf_hash_value="c", expires_at=datetime.now(timezone.utc), authorization_version=1)
 
     assert TestClient(app).get("/api/v1/sandbox/artifacts/artifact-a/access").status_code == 404
+
+
+def test_expired_artifact_content_is_not_served(monkeypatch, tmp_path) -> None:
+    from configs.settings import settings
+    from server.sandbox.artifact_controller import router
+    from server.sandbox.artifacts import ArtifactAccessSigner
+
+    monkeypatch.setattr(settings, "NLP_AGENT_WEB_SECRET", "test-artifact-secret")
+    monkeypatch.setattr(settings, "NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT", str(tmp_path))
+    artifact = SimpleNamespace(
+        id="artifact-a", owner_user_id="user-a", locator="output.html", mime_type="text/html",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db_session] = lambda: FakeSession(artifact)
+    ticket = ArtifactAccessSigner("test-artifact-secret").issue(artifact_id="artifact-a", owner_user_id="user-a")
+
+    assert TestClient(app).get(f"/api/v1/sandbox/artifacts/artifact-a/content?ticket={ticket}").status_code == 404

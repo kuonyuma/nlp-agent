@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -39,14 +40,24 @@ class ArtifactAccessSigner:
             expected = hmac.new(self._secret, encoded.encode("ascii"), hashlib.sha256).hexdigest()
             padding = "=" * (-len(encoded) % 4)
             payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
-        except (UnicodeEncodeError, ValueError, json.JSONDecodeError) as error:
+        except (binascii.Error, UnicodeError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise PermissionError("invalid sandbox artifact ticket") from error
+        if not isinstance(payload, dict):
+            raise PermissionError("invalid sandbox artifact ticket")
         if not hmac.compare_digest(signature, expected):
             raise PermissionError("invalid sandbox artifact ticket")
         if payload.get("a") != artifact_id or payload.get("u") != owner_user_id:
             raise PermissionError("sandbox artifact ticket does not match the requested artifact")
         if not isinstance(payload.get("e"), int) or payload["e"] < time.time():
             raise PermissionError("sandbox artifact ticket expired")
+
+
+def artifact_expired(expires_at: datetime | None, *, now: datetime | None = None) -> bool:
+    if expires_at is None:
+        return False
+    current = now or datetime.now(UTC)
+    expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
+    return expiry <= current
 
 
 def artifact_access_url(origin: str, *, artifact_id: str, ticket: str) -> str:
