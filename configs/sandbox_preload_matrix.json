@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "profiles": {
+    "python-base": {
+      "modules": ["numpy", "pandas", "matplotlib"],
+      "python_version": "3.11",
+      "runtime_version": "nova-runtime",
+      "image_digest": "",
+      "status": "pending-linux-benchmark"
+    }
+  }
+}

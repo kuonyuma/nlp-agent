@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from configs.settings import settings
+from .faults import SandboxFaultInjector
 
 
 class SandboxEventStore:
@@ -47,16 +48,26 @@ class RedisSandboxEventStore:
     consistently across multiple API instances.
     """
 
-    def __init__(self, client: Any, *, stream_prefix: str = "nova:sandbox:events", retention_seconds: int = 86_400, max_events: int = 10_000) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        stream_prefix: str = "nova:sandbox:events",
+        retention_seconds: int = 86_400,
+        max_events: int = 10_000,
+        fault_injector: SandboxFaultInjector | None = None,
+    ) -> None:
         self._client = client
         self._stream_prefix = stream_prefix.rstrip(":")
         self._retention_seconds = max(60, retention_seconds)
         self._max_events = max(100, max_events)
+        self._faults = fault_injector or SandboxFaultInjector.from_env()
 
     def _stream_name(self, execution_id: str) -> str:
         return f"{self._stream_prefix}:{execution_id}"
 
     async def append(self, execution_id: str, *, user_id: str, event_type: str, payload: dict[str, object]) -> dict[str, object]:
+        self._faults.fail_if_configured("redis.append")
         stream = self._stream_name(execution_id)
         event_id = await self._client.xadd(
             stream,
@@ -69,6 +80,7 @@ class RedisSandboxEventStore:
         return {"event_id": event_id, "seq": event_id, "type": event_type, "payload": payload}
 
     async def replay(self, execution_id: str, *, user_id: str, after_event_id: str | None = None) -> list[dict[str, object]]:
+        self._faults.fail_if_configured("redis.read")
         cursor = after_event_id or "0-0"
         if cursor.isdigit():
             cursor = f"0-{cursor}"
@@ -108,6 +120,7 @@ def create_sandbox_event_store() -> SandboxEventStore | RedisSandboxEventStore:
         Redis.from_url(redis_url, decode_responses=True),
         retention_seconds=settings.NLP_AGENT_SANDBOX_EVENT_RETENTION_S,
         max_events=settings.NLP_AGENT_SANDBOX_EVENT_MAXLEN,
+        fault_injector=SandboxFaultInjector.from_env(),
     )
 
 

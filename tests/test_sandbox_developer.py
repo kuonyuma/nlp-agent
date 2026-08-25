@@ -40,3 +40,12 @@ def test_developer_router_exposes_runtime_inventory_and_drain() -> None:
     assert "/api/v1/developer/sandbox/runtimes/{runtime_id}" in paths
     assert "/api/v1/developer/sandbox/executions" in paths
     assert "/api/v1/developer/sandbox/executions/{execution_id}/events" in paths
+    assert "/api/v1/developer/sandbox/preload-compatibility" in paths
+    assert "/api/v1/developer/sandbox/capacity/prewarm" in paths
+
+
+def test_sandbox_router_exposes_server_issued_confirmation_endpoint() -> None:
+    from server.sandbox.controller import router
+
+    paths = {route.path for route in router.routes}
+    assert "/api/v1/sandbox/confirmations" in paths

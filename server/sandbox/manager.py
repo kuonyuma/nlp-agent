@@ -91,6 +91,8 @@ class WarmPoolManager:
         ready_target: int,
         adaptive_policy: AdaptivePoolPolicy | None = None,
         fault_injector: SandboxFaultInjector | None = None,
+        adaptive_state_store: object | None = None,
+        metrics_store: object | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._docker = docker
@@ -98,6 +100,9 @@ class WarmPoolManager:
         self._ready_target = ready_target
         self._adaptive_policy = adaptive_policy
         self._faults = fault_injector or SandboxFaultInjector.from_env()
+        self._adaptive_state_store = adaptive_state_store
+        self._metrics_store = metrics_store
+        self._requested_target: int | None = None
 
     @staticmethod
     def _trace(name: str, **payload: object) -> None:
@@ -118,11 +123,64 @@ class WarmPoolManager:
             refill_p95_s=refill_p95_s,
         )
 
-    def _effective_ready_target(self) -> int:
-        return self.recommended_ready_target(
-            arrival_rate_per_min=settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN,
-            refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+    async def _effective_ready_target(self) -> int:
+        if self._requested_target is not None:
+            return self._requested_target
+        arrival_rate = settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN
+        refill_p95 = settings.NLP_AGENT_SANDBOX_REFILL_P95_S
+        latest = getattr(self._metrics_store, "latest", None)
+        if latest is not None:
+            try:
+                sample = await latest()
+                if sample:
+                    arrival_rate = max(0.0, float(sample.get("arrival_rate_per_min", arrival_rate)))
+                    refill_p95 = max(0.0, float(sample.get("refill_p95_s", refill_p95)))
+            except Exception as error:
+                self._trace("sandbox.manager.metrics.unavailable", error=type(error).__name__)
+        desired = self.recommended_ready_target(
+            arrival_rate_per_min=arrival_rate,
+            refill_p95_s=refill_p95,
         )
+        if self._adaptive_policy is None or self._adaptive_state_store is None:
+            return desired
+        load = getattr(self._adaptive_state_store, "load", None)
+        save = getattr(self._adaptive_state_store, "save", None)
+        if load is None or save is None:
+            return desired
+        try:
+            current, scaled_at = await load()
+        except Exception as error:
+            # Redis is an optimization input, never a reason to stop the
+            # control plane.  Fall back to the deterministic target until the
+            # next reconciliation can read state again.
+            self._trace("sandbox.manager.adaptive_state.unavailable", error=type(error).__name__)
+            return desired
+        current = self._ready_target if current is None else current
+        last = datetime.fromtimestamp(scaled_at, UTC) if scaled_at is not None else None
+        now = datetime.now(UTC)
+        if self._adaptive_policy.should_scale(
+            current_target=current,
+            desired_target=desired,
+            last_scaled_at=last,
+            now=now,
+        ):
+            try:
+                await save(target=desired, scaled_at=now.timestamp())
+            except Exception as error:
+                self._trace("sandbox.manager.adaptive_state.save_failed", error=type(error).__name__)
+                return desired
+            return desired
+        return current
+
+    async def request_target(self, target: int) -> None:
+        if target < 0:
+            raise ValueError("pool target must be non-negative")
+        upper = (
+            self._adaptive_policy.ready_max
+            if self._adaptive_policy is not None
+            else max(self._ready_target, settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX)
+        )
+        self._requested_target = min(target, upper)
 
     async def refill(self) -> int:
         """Create only the deficit. Docker runs outside every database transaction."""
@@ -138,7 +196,7 @@ class WarmPoolManager:
                 # lock session is held waiting for a second connection.
                 await self._fail_stale_creating(lock_session)
                 counts = await self._counts(lock_session)
-                target = self._effective_ready_target()
+                target = await self._effective_ready_target()
                 deficit = refill_deficit(
                     target=target,
                     ready_count=counts.ready_count,
@@ -156,13 +214,14 @@ class WarmPoolManager:
         """Management-plane capacity data for dashboards and alert thresholds."""
         async with self._session_factory() as session:
             counts = await self._counts(session)
+        target = await self._effective_ready_target()
         return {
             "resource_profile": self._resource_profile_id,
             "ready": counts.ready_count,
             "creating": counts.creating_count,
-            "target": self._effective_ready_target(),
+            "target": target,
             "deficit": refill_deficit(
-                target=self._effective_ready_target(),
+                target=target,
                 ready_count=counts.ready_count,
                 creating_count=counts.creating_count,
             ),
@@ -214,6 +273,7 @@ class WarmPoolManager:
             external_id = runtime.external_runtime_id
         if external_id:
             try:
+                self._faults.fail_if_configured("docker.destroy")
                 await self._docker.destroy(external_id)
             except Exception as error:
                 async with self._session_factory.begin() as session:
@@ -273,6 +333,7 @@ class WarmPoolManager:
 
     async def reconcile(self) -> ReconcileActions:
         """Fail DB rows for vanished containers and remove unmanaged-in-DB orphans."""
+        self._faults.fail_if_configured("manager.reconcile")
         async with self._session_factory() as session:
             rows = list(
                 (await session.scalars(
@@ -302,6 +363,7 @@ class WarmPoolManager:
                         runtime.claim_nonce_hash = None
         for external_id in actions.destroy_orphans:
             try:
+                self._faults.fail_if_configured("docker.destroy")
                 await self._docker.destroy(external_id)
             except Exception:
                 # It remains labelled and will be discovered again on the next pass.
@@ -408,6 +470,7 @@ class WarmPoolManager:
             if not external_id:
                 continue
             try:
+                self._faults.fail_if_configured("docker.destroy")
                 await self._docker.destroy(external_id)
             except Exception as error:
                 async with self._session_factory.begin() as session:
@@ -463,6 +526,7 @@ class WarmPoolManager:
                 # slot proceeds through the same L3 readiness gate.
                 external_id = await self._docker.create_ready(name=name, claim_nonce="")
             if not await self._docker.kernel_ready(external_id):
+                self._faults.fail_if_configured("docker.destroy")
                 await self._docker.destroy(external_id)
                 raise RuntimeError("new sandbox kernel did not become ready")
         except Exception as error:

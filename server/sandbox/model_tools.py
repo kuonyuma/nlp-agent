@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from contextlib import asynccontextmanager
 import hashlib
 from typing import Any
 from uuid import uuid4
@@ -31,10 +32,10 @@ from server.infrastructure.mysql.models import (
 )
 
 from .contracts import SandboxScope
+from .confirmation import SandboxConfirmationSigner
 from .events import default_sandbox_event_store
 from .inmemory_runtime import InMemoryRuntime
 from .manager import WarmPoolManager
-from .optimization import AdaptivePoolPolicy
 from .ticket import SandboxTicketClaims, SandboxTicketSigner
 
 
@@ -71,6 +72,10 @@ class SandboxModelToolService:
         self._manager = manager
         self._interactive = interactive or InMemoryRuntime()
         self._signer = SandboxTicketSigner(settings.NLP_AGENT_WEB_SECRET.strip() or "phase4-local-sandbox-secret")
+        self._confirmation_signer = SandboxConfirmationSigner(
+            settings.NLP_AGENT_WEB_SECRET.strip() or "phase4-local-sandbox-secret"
+        )
+        self._local_executions: dict[str, dict[str, object]] = {}
 
     async def _authorize(self, config: RunnableConfig, *, require_lease: bool = False) -> _AuthorizedModelContext | None:
         from core.session_context import SessionContext
@@ -136,31 +141,133 @@ class SandboxModelToolService:
             )
 
     def _manager_for_docker(self) -> WarmPoolManager | None:
-        if self._manager is not None:
-            return self._manager
-        if self.session_factory is None:
-            return None
-        image = settings.NLP_AGENT_SANDBOX_DOCKER_IMAGE_DIGEST.strip()
-        if not image:
-            return None
-        from .docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
-
-        self._manager = WarmPoolManager(
-            session_factory=self.session_factory,
-            docker=DockerRuntimeAdapter(DockerRuntimeConfig(image=image)),
-            resource_profile_id="python-base",
-            ready_target=max(1, settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET),
-            adaptive_policy=(
-                AdaptivePoolPolicy(
-                    ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
-                    ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
-                    burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
-                )
-                if settings.NLP_AGENT_SANDBOX_ADAPTIVE_POOL_ENABLED
-                else None
-            ),
-        )
+        # Docker access is an explicit dependency supplied by the isolated
+        # Manager control plane.  The Web process never constructs an adapter.
         return self._manager
+
+    async def _start_execution(
+        self,
+        authorized: _AuthorizedModelContext,
+        *,
+        source: str,
+        actor_type: str = "model",
+        runtime_id: str | None = None,
+        config: RunnableConfig | None = None,
+    ) -> str | None:
+        execution_id = str(uuid4())
+        trace_id: str | None = None
+        span_id: str | None = None
+        parent_span_id: str | None = None
+        try:
+            from core.observability.context import TelemetryContext
+
+            trace_context = TelemetryContext.from_config(config)
+            if trace_context is not None:
+                trace_id = trace_context.trace_id
+                parent_span_id = trace_context.span_id
+        except Exception:
+            trace_context = None
+        trace_id = trace_id or uuid4().hex
+        span_id = span_id or uuid4().hex
+        if self.session_factory is None:
+            self._local_executions[execution_id] = {
+                "id": execution_id,
+                "owner_user_id": authorized.context.user_id,
+                "status": "running",
+                "runtime_instance_id": runtime_id,
+                "started_at": _utc_now().isoformat(),
+                "completed_at": None,
+                "exit_reason": None,
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "parent_span_id": parent_span_id,
+            }
+        else:
+            if authorized.scope is None or authorized.environment_id is None:
+                return None
+            async with self.session_factory.begin() as session:
+                session.add(
+                    SandboxExecutionModel(
+                        id=execution_id,
+                        environment_id=authorized.environment_id,
+                        runtime_instance_id=runtime_id,
+                        lease_id=authorized.lease_id,
+                        owner_user_id=authorized.context.user_id,
+                        workspace_id=authorized.context.workspace_id,
+                        actor_type=actor_type,
+                        request_id=execution_id,
+                        code_hash=hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                        status="running",
+                        generation=authorized.scope.generation,
+                        trace_id=trace_id,
+                        span_id=span_id,
+                        parent_span_id=parent_span_id,
+                        started_at=_utc_now(),
+                    )
+                )
+        await default_sandbox_event_store.append(
+            execution_id,
+            user_id=authorized.context.user_id,
+            event_type="execution.started",
+            payload={"actor_type": actor_type, "trace_id": trace_id, "span_id": span_id},
+        )
+        return execution_id
+
+    async def _finish_execution(
+        self,
+        execution_id: str,
+        *,
+        user_id: str,
+        status: str,
+        error: BaseException | None = None,
+        result: dict[str, object] | None = None,
+    ) -> None:
+        reason = f"{type(error).__name__}: {error}"[:128] if error else None
+        if self.session_factory is None:
+            local = self._local_executions.get(execution_id)
+            if local is not None:
+                local.update({"status": status, "completed_at": _utc_now().isoformat(), "exit_reason": reason})
+        else:
+            async with self.session_factory.begin() as session:
+                execution = await session.get(SandboxExecutionModel, execution_id, with_for_update=True)
+                if execution is not None:
+                    execution.status = status
+                    execution.exit_reason = reason
+                    execution.completed_at = _utc_now()
+                    if result is not None:
+                        execution.resource_summary_json = {
+                            "stdout_bytes": len(str(result.get("stdout") or "").encode("utf-8")),
+                            "stderr_bytes": len(str(result.get("stderr") or "").encode("utf-8")),
+                        }
+        await default_sandbox_event_store.append(
+            execution_id,
+            user_id=user_id,
+            event_type="execution.failed" if error else "execution.completed",
+            payload={"status": status, **({"error": type(error).__name__} if error else {})},
+        )
+
+    def _verify_confirmation(
+        self,
+        authorized: _AuthorizedModelContext,
+        *,
+        tool_name: str,
+        source: str,
+        confirmation_token: str | None,
+    ) -> bool:
+        if not confirmation_token:
+            return False
+        code_hash = hashlib.sha256(source.encode("utf-8")).hexdigest() if source else ""
+        try:
+            self._confirmation_signer.verify(
+                confirmation_token,
+                user_id=authorized.context.user_id,
+                session_id=authorized.context.session_id,
+                tool_name=tool_name,
+                code_hash=code_hash,
+            )
+        except PermissionError:
+            return False
+        return True
 
     @staticmethod
     def _trace(name: str, *, config: RunnableConfig | None = None, **payload: object) -> None:
@@ -177,6 +284,34 @@ class SandboxModelToolService:
             # Tool execution must remain usable when optional telemetry is not configured.
             return
 
+    @asynccontextmanager
+    async def _tool_span(self, name: str, *, config: RunnableConfig | None = None):
+        """Create a durable TOOL span when the caller supplied telemetry context.
+
+        Local/unit-test calls intentionally remain usable without a database-backed
+        telemetry runtime; production requests carry the context from the gateway.
+        """
+        try:
+            from core.observability.context import TelemetryContext
+            from core.observability.models import SpanKind
+            from core.observability.runtime import global_telemetry
+
+            context = TelemetryContext.from_config(config)
+            if context is None:
+                yield None
+                return
+            span_context = global_telemetry.span(
+                SpanKind.TOOL,
+                name,
+                context=context,
+                attributes={"sandbox": True},
+            )
+        except Exception:
+            yield None
+            return
+        async with span_context as span:
+            yield span
+
     async def status(self, *, config: RunnableConfig) -> dict[str, object]:
         authorized = await self._authorize(config)
         if authorized is None:
@@ -191,28 +326,50 @@ class SandboxModelToolService:
         return {"ok": True, "mode": self.mode, **payload}
 
     async def run_scratch(self, *, source: str, config: RunnableConfig) -> dict[str, object]:
-        authorized = await self._authorize(config)
+        authorized = await self._authorize(config, require_lease=self.session_factory is not None)
         if authorized is None:
             return _error("not_authorized", "sandbox model context is not authenticated")
         self._trace("sandbox.model.scratch.started", config=config, code_chars=len(source))
+        execution_id = await self._start_execution(authorized, source=source, config=config)
+        if execution_id is None:
+            return _error("lease_required", "an active Sandbox environment is required")
         try:
-            if self.mode == "inmemory":
-                result = await InMemoryRuntime().execute(user_id="scratch", source=source)
-            else:
-                manager = self._manager_for_docker()
-                if manager is None:
-                    return _error("sandbox_unavailable", "Docker Sandbox Manager is not configured")
-                result = await manager.run_scratch(source=source)
+            async with self._tool_span("sandbox.scratch", config=config):
+                if self.mode == "inmemory":
+                    result = await InMemoryRuntime().execute(user_id="scratch", source=source)
+                else:
+                    manager = self._manager_for_docker()
+                    if manager is None:
+                        error = RuntimeError("Docker Sandbox Manager is not configured")
+                        await self._finish_execution(
+                            execution_id,
+                            user_id=authorized.context.user_id,
+                            status="failed",
+                            error=error,
+                        )
+                        return _error("sandbox_unavailable", str(error))
+                    result = await manager.run_scratch(source=source)
         except Exception as error:
+            await self._finish_execution(execution_id, user_id=authorized.context.user_id, status="failed", error=error)
             self._trace("sandbox.model.scratch.failed", config=config, error=type(error).__name__)
             return _error("scratch_failed", str(error)[:500])
-        self._trace("sandbox.model.scratch.completed", config=config, status=result.get("status", "completed"))
-        return {"ok": True, **result}
+        status = str(result.get("status", "completed"))
+        await self._finish_execution(execution_id, user_id=authorized.context.user_id, status=status, result=result)
+        self._trace("sandbox.model.scratch.completed", config=config, status=status)
+        return {"ok": True, "execution_id": execution_id, **result}
 
     async def run_active(
-        self, *, source: str, config: RunnableConfig, confirmed: bool = False
+        self, *, source: str, config: RunnableConfig, confirmed: bool = False,
+        confirmation_token: str | None = None,
     ) -> dict[str, object]:
-        if not confirmed:
+        del confirmed  # Boolean input is retained for wire compatibility, never trusted.
+        confirmation_context = await self._authorize(config)
+        if confirmation_context is None or not self._verify_confirmation(
+            confirmation_context,
+            tool_name="sandbox_run_active_kernel",
+            source=source,
+            confirmation_token=confirmation_token,
+        ):
             return {
                 "ok": False,
                 "code": "confirmation_required",
@@ -222,38 +379,38 @@ class SandboxModelToolService:
         if authorized is None:
             return _error("lease_required", "an active authenticated Sandbox lease is required")
         if self.mode == "inmemory":
-            result = await self._interactive.execute(user_id=authorized.context.user_id, source=source)
-            return {"ok": True, "execution_id": str(uuid4()), **result}
+            execution_id = await self._start_execution(authorized, source=source, config=config)
+            if execution_id is None:
+                return _error("lease_required", "an active Sandbox environment is required")
+            try:
+                async with self._tool_span("sandbox.active_kernel", config=config):
+                    result = await self._interactive.execute(user_id=authorized.context.user_id, source=source)
+            except Exception as error:
+                await self._finish_execution(
+                    execution_id,
+                    user_id=authorized.context.user_id,
+                    status="failed",
+                    error=error,
+                )
+                raise
+            await self._finish_execution(
+                execution_id,
+                user_id=authorized.context.user_id,
+                status=str(result.get("status") or "completed"),
+                result=result,
+            )
+            return {"ok": True, "execution_id": execution_id, **result}
         manager = self._manager_for_docker()
         if manager is None or authorized.scope is None or authorized.lease_id is None:
             return _error("sandbox_unavailable", "Docker Sandbox Manager is not configured")
         claim = await manager.claim(authorized.scope, lease_id=authorized.lease_id)
         if claim is None:
             return _error("warming", "Sandbox runtime is warming; retry shortly")
-        execution_id = str(uuid4())
-        async with self.session_factory.begin() as session:
-            session.add(
-                SandboxExecutionModel(
-                    id=execution_id,
-                    environment_id=claim.runtime.environment_id,
-                    runtime_instance_id=claim.runtime.id,
-                    lease_id=authorized.lease_id,
-                    owner_user_id=authorized.context.user_id,
-                    workspace_id=authorized.context.workspace_id,
-                    actor_type="model",
-                    request_id=execution_id,
-                    code_hash=hashlib.sha256(source.encode("utf-8")).hexdigest(),
-                    status="running",
-                    generation=claim.runtime.generation,
-                    started_at=_utc_now(),
-                )
-            )
-        await default_sandbox_event_store.append(
-            execution_id,
-            user_id=authorized.context.user_id,
-            event_type="execution.started",
-            payload={"actor_type": "model"},
+        execution_id = await self._start_execution(
+            authorized, source=source, runtime_id=str(claim.runtime.id), config=config
         )
+        if execution_id is None:
+            return _error("lease_required", "an active Sandbox environment is required")
         ticket = self._signer.issue(
             SandboxTicketClaims(
                 authorized.context.user_id,
@@ -270,49 +427,35 @@ class SandboxModelToolService:
             auth_session_id=authorized.context.session_id,
         )
         try:
-            result = await manager.execute_claimed(
-                authorized.scope,
-                lease_id=claims.lease_id,
-                runtime_id=claims.runtime_id,
-                generation=claims.generation,
-                nonce=claims.nonce,
-                source=source,
-            )
+            async with self._tool_span("sandbox.active_kernel", config=config):
+                result = await manager.execute_claimed(
+                    authorized.scope,
+                    lease_id=claims.lease_id,
+                    runtime_id=claims.runtime_id,
+                    generation=claims.generation,
+                    nonce=claims.nonce,
+                    source=source,
+                )
         except Exception as error:
-            async with self.session_factory.begin() as session:
-                execution = await session.get(SandboxExecutionModel, execution_id, with_for_update=True)
-                if execution is not None:
-                    execution.status = "failed"
-                    execution.exit_reason = f"{type(error).__name__}: {error}"[:128]
-                    execution.completed_at = _utc_now()
-            await default_sandbox_event_store.append(
-                execution_id,
-                user_id=authorized.context.user_id,
-                event_type="execution.failed",
-                payload={"error": type(error).__name__},
-            )
+            await self._finish_execution(execution_id, user_id=authorized.context.user_id, status="failed", error=error)
             raise
-        async with self.session_factory.begin() as session:
-            execution = await session.get(SandboxExecutionModel, execution_id, with_for_update=True)
-            if execution is not None:
-                execution.status = str(result.get("status") or "completed")
-                execution.completed_at = _utc_now()
-                execution.resource_summary_json = {
-                    "stdout_bytes": len(str(result.get("stdout") or "").encode("utf-8")),
-                    "stderr_bytes": len(str(result.get("stderr") or "").encode("utf-8")),
-                }
-        await default_sandbox_event_store.append(
+        await self._finish_execution(
             execution_id,
             user_id=authorized.context.user_id,
-            event_type="execution.completed",
-            payload={"status": result.get("status", "completed")},
+            status=str(result.get("status") or "completed"),
+            result=result,
         )
         return {"ok": True, "execution_id": execution_id, **result}
 
     async def explain_execution(self, *, execution_id: str, config: RunnableConfig) -> dict[str, object]:
         authorized = await self._authorize(config)
         if authorized is None or self.session_factory is None:
-            return _error("not_authorized", "execution explanation requires an authenticated database session")
+            if authorized is None:
+                return _error("not_authorized", "execution explanation requires an authenticated session")
+            local = self._local_executions.get(execution_id)
+            if local is None or local.get("owner_user_id") != authorized.context.user_id:
+                return _error("not_found", "sandbox execution was not found")
+            return {"ok": True, "execution": {key: value for key, value in local.items() if key != "owner_user_id"}, "events": (await default_sandbox_event_store.replay(execution_id, user_id=authorized.context.user_id))[-50:]}
         async with self.session_factory() as session:
             execution = await session.get(SandboxExecutionModel, execution_id)
             if execution is None or str(execution.owner_user_id) != authorized.context.user_id:
@@ -324,6 +467,9 @@ class SandboxModelToolService:
                 "runtime_instance_id": str(execution.runtime_instance_id) if execution.runtime_instance_id else None,
                 "started_at": execution.started_at.isoformat() if execution.started_at else None,
                 "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
+                "trace_id": execution.trace_id,
+                "span_id": execution.span_id,
+                "parent_span_id": execution.parent_span_id,
             }
             events = await default_sandbox_event_store.replay(
                 execution_id,
@@ -336,6 +482,21 @@ class SandboxModelToolService:
         }
 
     async def interrupt_own(self, *, execution_id: str, config: RunnableConfig) -> dict[str, object]:
+        if self.session_factory is None:
+            authorized = await self._authorize(config)
+            if authorized is None:
+                return _error("not_authorized", "interrupt requires an authenticated Sandbox session")
+            local = self._local_executions.get(execution_id)
+            if local is None or local.get("owner_user_id") != authorized.context.user_id or local.get("status") != "running":
+                return _error("not_found", "running Sandbox execution was not found")
+            local.update({"status": "interrupted", "exit_reason": "user.interrupt", "completed_at": _utc_now().isoformat()})
+            await default_sandbox_event_store.append(
+                execution_id,
+                user_id=authorized.context.user_id,
+                event_type="execution.interrupted",
+                payload={"reason": "user.interrupt"},
+            )
+            return {"ok": True, "execution_id": execution_id, "status": "interrupted"}
         authorized = await self._authorize(config, require_lease=True)
         if authorized is None or self.session_factory is None:
             return _error("not_authorized", "interrupt requires an authenticated Sandbox lease")
@@ -355,11 +516,39 @@ class SandboxModelToolService:
         manager = self._manager_for_docker()
         if manager is None:
             return _error("sandbox_unavailable", "Docker Sandbox Manager is not configured")
-        await manager.interrupt_runtime(runtime_id)
-        return {"ok": True, "execution_id": execution_id, "status": "interrupt_requested"}
+        try:
+            await manager.interrupt_runtime(runtime_id)
+        except Exception as error:
+            return _error("interrupt_failed", str(error)[:500])
+        async with self.session_factory.begin() as session:
+            execution = await session.get(SandboxExecutionModel, execution_id, with_for_update=True)
+            if execution is not None:
+                execution.status = "interrupted"
+                execution.exit_reason = "user.interrupt"
+                execution.completed_at = _utc_now()
+        await default_sandbox_event_store.append(
+            execution_id,
+            user_id=authorized.context.user_id,
+            event_type="execution.interrupted",
+            payload={"runtime_instance_id": runtime_id},
+        )
+        return {"ok": True, "execution_id": execution_id, "status": "interrupted"}
 
-    async def reset(self, *, config: RunnableConfig, confirmed: bool = False) -> dict[str, object]:
-        if not confirmed:
+    async def reset(
+        self,
+        *,
+        config: RunnableConfig,
+        confirmed: bool = False,
+        confirmation_token: str | None = None,
+    ) -> dict[str, object]:
+        del confirmed
+        confirmation_context = await self._authorize(config)
+        if confirmation_context is None or not self._verify_confirmation(
+            confirmation_context,
+            tool_name="sandbox_reset",
+            source="",
+            confirmation_token=confirmation_token,
+        ):
             return {"ok": False, "code": "confirmation_required", "error": "sandbox_reset requires explicit user confirmation"}
         authorized = await self._authorize(config, require_lease=True)
         if authorized is None or authorized.runtime_id is None:
@@ -384,10 +573,12 @@ class SourceInput(BaseModel):
 
 class ConfirmedSourceInput(SourceInput):
     confirmed: bool = Field(default=False, description="必须由用户明确确认高风险操作")
+    confirmation_token: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 class ConfirmedInput(BaseModel):
     confirmed: bool = Field(default=False, description="必须由用户明确确认高风险操作")
+    confirmation_token: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 @tool("sandbox_status")
@@ -416,16 +607,16 @@ async def sandbox_interrupt_own(execution_id: str, config: RunnableConfig) -> di
 
 @tool("sandbox_run_active_kernel", args_schema=ConfirmedSourceInput)
 async def sandbox_run_active_kernel(
-    source: str, confirmed: bool = False, config: RunnableConfig | None = None
+    source: str, confirmed: bool = False, confirmation_token: str | None = None, config: RunnableConfig | None = None
 ) -> dict[str, object]:
     """经用户确认后在用户 Interactive Kernel 执行代码；这是高风险操作。"""
-    return await _model_sandbox_service.run_active(source=source, config=config or {}, confirmed=confirmed)
+    return await _model_sandbox_service.run_active(source=source, config=config or {}, confirmed=confirmed, confirmation_token=confirmation_token)
 
 
 @tool("sandbox_reset", args_schema=ConfirmedInput)
-async def sandbox_reset(confirmed: bool = False, config: RunnableConfig | None = None) -> dict[str, object]:
+async def sandbox_reset(confirmed: bool = False, confirmation_token: str | None = None, config: RunnableConfig | None = None) -> dict[str, object]:
     """经用户确认后销毁当前 Runtime 并重建干净实例；这是高风险操作。"""
-    return await _model_sandbox_service.reset(config=config or {}, confirmed=confirmed)
+    return await _model_sandbox_service.reset(config=config or {}, confirmed=confirmed, confirmation_token=confirmation_token)
 
 
 MODEL_SANDBOX_TOOLS: tuple[BaseTool, ...] = (

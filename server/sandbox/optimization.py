@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+import json
 from math import ceil
+from pathlib import Path
 from typing import Iterable
 
 
@@ -98,3 +100,19 @@ def check_preload_compatibility(
             "notes": "; ".join(reasons),
         }
     )
+
+
+def load_preload_matrix(path: Path) -> dict[str, object]:
+    """Load the operator-maintained compatibility matrix without executing it."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {"profiles": {}, "source": str(path), "available": False}
+    if not isinstance(payload, dict):
+        return {"profiles": {}, "source": str(path), "available": False}
+    profiles = payload.get("profiles", {})
+    return {
+        "profiles": profiles if isinstance(profiles, dict) else {},
+        "source": str(path),
+        "available": True,
+    }

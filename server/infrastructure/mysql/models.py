@@ -892,6 +892,9 @@ class SandboxExecutionModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
     resource_summary_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
 
 

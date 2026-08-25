@@ -40,3 +40,33 @@ def test_fault_injection_is_opt_in_and_named() -> None:
     SandboxFaultInjector.from_env("").fail_if_configured("docker.create")
     with pytest.raises(SandboxInjectedFault):
         SandboxFaultInjector.from_env("docker.create").fail_if_configured("docker.create")
+
+
+def test_preload_matrix_is_operator_visible() -> None:
+    from pathlib import Path
+
+    from server.sandbox.optimization import load_preload_matrix
+
+    matrix = load_preload_matrix(Path("configs/sandbox_preload_matrix.json"))
+    assert matrix["available"] is True
+    assert "python-base" in matrix["profiles"]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_state_store_persists_target_and_cooldown() -> None:
+    from server.sandbox.metrics import RedisSandboxAdaptiveStateStore
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.values: dict[str, object] = {}
+
+        async def hgetall(self, _key: str) -> dict[str, object]:
+            return self.values
+
+        async def hset(self, _key: str, *, mapping: dict[str, object]) -> None:
+            self.values.update(mapping)
+
+    store = RedisSandboxAdaptiveStateStore(FakeRedis())
+    assert await store.load() == (None, None)
+    await store.save(target=4, scaled_at=12.5)
+    assert await store.load() == (4, 12.5)

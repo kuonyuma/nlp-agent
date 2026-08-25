@@ -21,10 +21,8 @@ from server.auth.dependencies import (
 from server.web.database_auth import DatabaseSessionClaims
 from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxExecutionModel, SandboxLeaseModel
 from configs.settings import settings
-from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 from server.sandbox.gateway import SandboxGateway
-from server.sandbox.manager import WarmPoolManager
-from server.sandbox.optimization import AdaptivePoolPolicy
+from server.sandbox.confirmation import SandboxConfirmationSigner
 from server.sandbox.ticket import SandboxTicketSigner
 from server.sandbox.events import SandboxEventStore, default_sandbox_event_store
 from server.web.protocol import control_event
@@ -50,6 +48,11 @@ class RuntimeTicketBody(BaseModel):
     ticket: str | None = Field(default=None, max_length=2_048)
 
 
+class ConfirmationBody(BaseModel):
+    tool_name: str = Field(pattern=r"^sandbox_(run_active_kernel|reset)$")
+    source: str = Field(default="", max_length=20_000)
+
+
 def _sandbox_gateway(request: Request) -> SandboxGateway:
     existing = getattr(request.app.state, "sandbox_execution_gateway", None)
     if existing is not None:
@@ -63,24 +66,15 @@ def _sandbox_gateway(request: Request) -> SandboxGateway:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox ticket signing is not configured.")
     manager = None
     if mode == "docker":
-        image = settings.NLP_AGENT_SANDBOX_DOCKER_IMAGE_DIGEST.strip()
-        if not image:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox Docker image is not configured.")
-        manager = WarmPoolManager(
-            session_factory=factory,
-            docker=DockerRuntimeAdapter(DockerRuntimeConfig(image=image)),
-            resource_profile_id="python-base",
-            ready_target=max(1, settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET),
-            adaptive_policy=(
-                AdaptivePoolPolicy(
-                    ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
-                    ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
-                    burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
-                )
-                if settings.NLP_AGENT_SANDBOX_ADAPTIVE_POOL_ENABLED
-                else None
-            ),
-        )
+        # The Web process may receive an explicitly injected Manager client,
+        # but it must never construct a Docker adapter or open the Engine
+        # socket.  The isolated manager runner owns that capability.
+        manager = getattr(request.app.state, "sandbox_manager", None)
+        if manager is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Isolated Sandbox Manager is not connected.",
+            )
     if mode not in {"inmemory", "docker"}:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox runtime is not enabled.")
     if mode == "docker" and isinstance(sandbox_events, SandboxEventStore):
@@ -102,6 +96,31 @@ async def describe_sandbox(
     return await sandbox_lifecycle_service.describe(
         db, SandboxScope.from_authenticated_request(principal, claims)
     )
+
+
+@router.post("/confirmations")
+async def issue_sandbox_confirmation(
+    body: ConfirmationBody,
+    principal: Principal,
+    claims: DatabaseClaims,
+    _write_claims: WriteClaims,
+) -> dict[str, object]:
+    """Issue a user-approved, operation- and code-bound high-risk credential."""
+    if principal.user_id != claims.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sandbox identity mismatch.")
+    if body.tool_name == "sandbox_run_active_kernel" and not body.source.strip():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Source is required for active-kernel confirmation.")
+    secret = settings.NLP_AGENT_WEB_SECRET.strip()
+    if not secret:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox confirmation signing is not configured.")
+    code_hash = hashlib.sha256(body.source.encode("utf-8")).hexdigest() if body.source else ""
+    token = SandboxConfirmationSigner(secret).issue(
+        user_id=claims.user_id,
+        session_id=claims.session_id,
+        tool_name=body.tool_name,
+        code_hash=code_hash,
+    )
+    return {"confirmation_token": token, "tool_name": body.tool_name, "code_hash": code_hash, "expires_in": 120}
 
 
 @router.post("/lease")

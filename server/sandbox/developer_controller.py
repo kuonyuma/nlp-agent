@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,9 +18,18 @@ from server.rbac.service import rbac_service
 from .developer import capacity_snapshot, summarize_execution_latency, summarize_runtime_states
 from .events import default_sandbox_event_store
 from .metrics import default_sandbox_metrics_store
+from .commands import create_sandbox_manager_command_store
+from .optimization import AdaptivePoolPolicy, load_preload_matrix
 
 router = APIRouter(prefix="/api/v1/developer/sandbox", tags=["developer-sandbox"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+class PrewarmBody(BaseModel):
+    expected_sessions: int = Field(ge=0, le=100_000)
+    sessions_per_runtime: int = Field(default=1, ge=1, le=100)
+    profile_id: str = Field(default="python-base", min_length=1, max_length=64)
+    execute_at: datetime | None = None
 
 
 def _require_monitor(principal: Principal) -> None:
@@ -59,6 +70,9 @@ def _execution_payload(row: SandboxExecutionModel) -> dict[str, object | None]:
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         "exit_reason": row.exit_reason,
+        "trace_id": row.trace_id,
+        "span_id": row.span_id,
+        "parent_span_id": row.parent_span_id,
     }
 
 
@@ -91,7 +105,13 @@ async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, obj
         .limit(50)
     )).scalars().all()
     durations: list[float] = []
+    sampled_now = datetime.now(UTC)
+    observed_arrivals = 0
     for started_at, completed_at in execution_rows:
+        if started_at is not None:
+            started_for_rate = started_at.replace(tzinfo=UTC) if started_at.tzinfo is None else started_at
+            if timedelta(0) <= sampled_now - started_for_rate <= timedelta(minutes=5):
+                observed_arrivals += 1
         if started_at is None or completed_at is None:
             continue
         if started_at.tzinfo is None:
@@ -108,9 +128,11 @@ async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, obj
     if runtime_states["failed"] > 0:
         alerts.append({"code": "runtime_failed", "severity": "critical", "message": "Sandbox runtimes require reconciliation."})
     sample = {
-        "timestamp": datetime.now(UTC).timestamp(),
+        "timestamp": sampled_now.timestamp(),
         "ready": capacity["ready"], "creating": capacity["creating"],
         "target": capacity["target"], "deficit": capacity["deficit"],
+        "arrival_rate_per_min": round(observed_arrivals / 5.0, 3),
+        "refill_p95_s": settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
     }
     history = [sample]
     if default_sandbox_metrics_store is not None:
@@ -148,6 +170,51 @@ async def list_sandbox_runtimes(db: DbSession, principal: Principal) -> dict[str
         select(SandboxRuntimeInstanceModel).order_by(SandboxRuntimeInstanceModel.updated_at.desc()).limit(200)
     )).scalars().all()
     return {"items": [_runtime_payload(row) for row in rows]}
+
+
+@router.get("/preload-compatibility")
+async def preload_compatibility(principal: Principal) -> dict[str, object]:
+    _require_monitor(principal)
+    configured = settings.NLP_AGENT_SANDBOX_PRELOAD_MATRIX_PATH.strip()
+    path = Path(configured) if configured else settings.BASE_DIR / "configs" / "sandbox_preload_matrix.json"
+    return load_preload_matrix(path)
+
+
+@router.post("/capacity/prewarm")
+async def request_capacity_prewarm(body: PrewarmBody, principal: Principal) -> dict[str, object]:
+    """Queue a control-plane command; Web never opens Docker itself."""
+    _require_monitor(principal)
+    policy = AdaptivePoolPolicy(
+        ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
+        ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
+        burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
+    )
+    target = policy.target_before_class(
+        expected_sessions=body.expected_sessions,
+        sessions_per_runtime=body.sessions_per_runtime,
+    )
+    store = create_sandbox_manager_command_store()
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sandbox Manager command stream is unavailable.",
+        )
+    try:
+        command_id = await store.request_pool_target(
+            profile_id=body.profile_id,
+            target=target,
+            reason=f"developer.prewarm:{principal.user_id}",
+            execute_at=body.execute_at.isoformat() if body.execute_at else None,
+        )
+    finally:
+        await store.close()
+    return {
+        "command_id": command_id,
+        "profile_id": body.profile_id,
+        "target": target,
+        "expected_sessions": body.expected_sessions,
+        "execute_at": body.execute_at.isoformat() if body.execute_at else None,
+    }
 
 
 @router.post("/runtimes/{runtime_id}/drain")

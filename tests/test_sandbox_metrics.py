@@ -26,7 +26,10 @@ def test_redis_metrics_store_keeps_bounded_history() -> None:
     async def exercise():
         store = RedisSandboxMetricsStore(FakeRedis())
         await store.record({"timestamp": 1.0, "ready": 1})
-        return await store.record({"timestamp": 2.0, "ready": 2})
+        history = await store.record({"timestamp": 2.0, "ready": 2})
+        latest = await store.latest()
+        return history, latest
 
-    history = asyncio.run(exercise())
+    history, latest = asyncio.run(exercise())
     assert [item["ready"] for item in history] == [1, 2]
+    assert latest == {"timestamp": 2.0, "ready": 2}
