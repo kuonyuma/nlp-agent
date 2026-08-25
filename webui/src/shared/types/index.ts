@@ -114,6 +114,7 @@ export interface TeacherBookArchiveItemPreview {
   file_name: string;
   action: "create" | "update" | "unchanged";
   expected_revision: number;
+  current_markdown: string;
   content_markdown: string;
   removed_frameworks: string[];
   warnings: string[];

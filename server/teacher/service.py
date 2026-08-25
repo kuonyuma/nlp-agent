@@ -328,6 +328,7 @@ class TeacherService:
                     file_name=archive_page.file_name,
                     action=action,
                     expected_revision=expected_revision,
+                    current_markdown=current_content,
                     content_markdown=archive_page.content_markdown,
                     removed_frameworks=archive_page.removed_frameworks,
                     warnings=warnings,

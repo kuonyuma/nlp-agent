@@ -206,6 +206,7 @@ class TeacherBookArchiveItemPreview(StrictTeacherModel):
     file_name: str
     action: Literal["create", "update", "unchanged"]
     expected_revision: int = Field(ge=0)
+    current_markdown: str = ""
     content_markdown: str
     removed_frameworks: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

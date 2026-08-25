@@ -920,6 +920,10 @@ button { color: inherit; }
 .teacher-book-archive-item { display: grid; gap: 2px; padding: 8px 9px; border: 1px solid #e3e0ef; border-radius: 8px; background: #fff; }
 .teacher-book-archive-item strong { overflow: hidden; color: #303240; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .teacher-book-archive-item small { overflow: hidden; color: var(--teacher-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.teacher-book-archive-item details { margin-top: 3px; color: #5547b6; font-size: 9px; }
+.teacher-book-archive-item details summary { cursor: pointer; }
+.teacher-book-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 4px; }
+.teacher-book-diff pre { max-height: 120px; margin: 0; overflow: auto; padding: 5px; border: 1px solid #e3e0ef; border-radius: 5px; background: #fbfbfe; color: #454655; font: 9px/1.5 "Cascadia Code", monospace; white-space: pre-wrap; }
 .teacher-book-archive-item.create { border-color: #b8e3c9; background: #f6fff8; }
 .teacher-book-archive-item.update { border-color: #ddd8ff; background: #fff; }
 .teacher-book-archive-item.unchanged { opacity: .65; }
