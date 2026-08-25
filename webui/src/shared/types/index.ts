@@ -190,7 +190,6 @@ export interface SessionLearningMeta {
   title?: string;
   topic?: string;
   categoryId?: string;
-  favorite?: boolean;
   archived?: boolean;
   pinnedAt?: number;
   summary?: string;
