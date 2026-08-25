@@ -1,0 +1,66 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { LearningBookNavigationItem, LearningBookPage } from "@/shared/types";
+
+import { api } from "@/platform/http/api";
+
+import { KnowledgeBookPanel } from "./KnowledgeBookPanel";
+
+vi.mock("@/platform/http/api", () => ({
+  api: {
+    getLearningBookNavigation: vi.fn(),
+    getLearningBookPage: vi.fn(),
+  },
+}));
+
+const navigation: LearningBookNavigationItem[] = [
+  { topic_id: "topic-1", topic_name: "基础", knowledge_point_id: "point-1", title: "词法分析", sort_order: 1, revision: 1 },
+  { topic_id: "topic-1", topic_name: "基础", knowledge_point_id: "point-2", title: "句法分析", sort_order: 2, revision: 1 },
+];
+
+const page: LearningBookPage = {
+  workspace_id: "workspace-1",
+  topic_id: "topic-1",
+  topic_name: "基础",
+  knowledge_point_id: "point-1",
+  title: "词法分析",
+  content_markdown: "## 核心概念\n\n词元是文本处理的基本单位。\n\n## 练习",
+  revision: 1,
+};
+
+describe("KnowledgeBookPanel", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    vi.mocked(api.getLearningBookNavigation).mockResolvedValue({ workspace_id: "workspace-1", items: navigation });
+    vi.mocked(api.getLearningBookPage).mockImplementation((_workspaceId, knowledgePointId) => Promise.resolve({ page: { ...page, knowledge_point_id: knowledgePointId, title: knowledgePointId === "point-2" ? "句法分析" : page.title } }));
+  });
+
+  it("loads the published navigation and renders page headings for the right outline", async () => {
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByText("词法分析")).toBeInTheDocument();
+    expect(await screen.findByText("词元是文本处理的基本单位。")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "核心概念" }).length).toBeGreaterThan(0));
+    expect(api.getLearningBookNavigation).toHaveBeenCalledWith("workspace-1");
+    expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-1");
+  });
+
+  it("shows an explicit empty state when the teacher has not published a page", async () => {
+    vi.mocked(api.getLearningBookNavigation).mockResolvedValue({ workspace_id: "workspace-1", items: [] });
+
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByText("教师还没有发布知识教材。")).toBeInTheDocument();
+    expect(screen.getByText("从左侧目录选择一个知识点开始阅读。")).toBeInTheDocument();
+  });
+
+  it("restores the last knowledge point when the reader is reopened", async () => {
+    window.sessionStorage.setItem("nova:knowledge-book:workspace-1", JSON.stringify({ selectedId: "point-2", expandedTopics: ["topic-1"], scrollPositions: { "point-2": 120 }, leftCollapsed: true, rightCollapsed: false }));
+
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByRole("heading", { name: "句法分析" })).toBeInTheDocument();
+    expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-2");
+  });
+});

@@ -1,8 +1,8 @@
-import { BookOpenCheck, FileText, Globe2, Plus, Terminal, X } from "lucide-react";
+import { BookOpenCheck, BookOpenText, FileText, Globe2, Plus, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 
-export type ToolDockTool = "files" | "learning" | "browser" | "terminal";
+export type ToolDockTool = "files" | "learning" | "book" | "browser" | "terminal";
 
 const tools: Array<{
   id: ToolDockTool;
@@ -14,11 +14,12 @@ const tools: Array<{
 }> = [
   { id: "files", label: "文件", buttonLabel: "打开文件工具", shortcut: "Ctrl+P", icon: FileText, description: "代码工作区将在这里打开。" },
   { id: "learning", label: "学习记录", buttonLabel: "打开学习记录工具", shortcut: "Ctrl+Alt+S", icon: BookOpenCheck, description: "查看本次对话的学习目标、概念与进度。" },
+  { id: "book", label: "知识教材", buttonLabel: "打开知识教材工具", shortcut: "Ctrl+Alt+B", icon: BookOpenText, description: "阅读教师发布的知识点教材与实操内容。" },
   { id: "browser", label: "浏览器", buttonLabel: "打开浏览器工具", shortcut: "Ctrl+T", icon: Globe2, description: "后续可在这里安全查看学习资料与网页。" },
   { id: "terminal", label: "终端", buttonLabel: "打开终端工具", shortcut: "Ctrl+~", icon: Terminal, description: "代码沙箱接入后将在这里显示终端与运行输出。" },
 ];
 
-function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning"> }) {
+function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning" | "book"> }) {
   const item = tools.find((candidate) => candidate.id === tool)!;
   const Icon = item.icon;
   return <section className="tool-dock-empty-panel">
@@ -49,7 +50,7 @@ function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }
   </nav>;
 }
 
-export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, learningPanel }: {
+export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, learningPanel, knowledgeBookPanel }: {
   open: boolean;
   expanded: boolean;
   openTools: ToolDockTool[];
@@ -60,6 +61,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   onCloseTool: (tool: ToolDockTool) => void;
   onActiveToolChange: (tool: ToolDockTool | null) => void;
   learningPanel: ReactNode;
+  knowledgeBookPanel: ReactNode;
 }) {
   const [width, setWidth] = useState(DEFAULT_DOCK_WIDTH);
   const [resizing, setResizing] = useState(false);
@@ -150,7 +152,11 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
             <kbd>{item.shortcut}</kbd>
           </button>;
         })}
-      </nav> : activeTool === "learning" ? learningPanel : activeTool ? <EmptyToolPanel tool={activeTool} /> : null}
+      </nav> : <div className="tool-dock-panels">
+        {openTools.map((tool) => <div className="tool-dock-panel" key={tool} hidden={tool !== activeTool} aria-hidden={tool !== activeTool}>
+          {tool === "learning" ? learningPanel : tool === "book" ? knowledgeBookPanel : <EmptyToolPanel tool={tool} />}
+        </div>)}
+      </div>}
     </div>}
   </aside>;
 }

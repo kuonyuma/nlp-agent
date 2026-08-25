@@ -78,19 +78,24 @@ export function stripInternalChatMetadata(content: string): string {
   return content.replace(/\s*<!--\s*guided-result\s*:\s*(?:\{[\s\S]*?\}\s*-->|[\s\S]*$)/gi, "").trimEnd();
 }
 
-export function MarkdownContent({ children, streaming = false }: { children: string; streaming?: boolean }) {
+export function MarkdownContent({ children, streaming = false, headingIds }: { children: string; streaming?: boolean; headingIds?: string[] }) {
   const dark = document.documentElement.classList.contains("dark");
+  let headingIndex = 0;
+  const nextHeadingId = () => headingIds?.[headingIndex++];
   return (
     <div className="markdown-content prose prose-zinc max-w-none dark:prose-invert prose-headings:scroll-mt-20 prose-pre:p-0">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
+          h1: ({ children: value, ...props }) => <h1 {...props} id={nextHeadingId()}>{value}</h1>,
           h2: ({ children: value }) => {
             const text = headingText(value);
             const educational = /练习|思考|核心|概念|误区|总结/.test(text);
-            return <h2 className={educational ? "education-heading" : undefined}>{value}</h2>;
+            return <h2 id={nextHeadingId()} className={educational ? "education-heading" : undefined}>{value}</h2>;
           },
+          h3: ({ children: value, ...props }) => <h3 {...props} id={nextHeadingId()}>{value}</h3>,
+          h4: ({ children: value, ...props }) => <h4 {...props} id={nextHeadingId()}>{value}</h4>,
           code: ({ className, children: value, ...props }) => {
             const match = /language-([\w-]+)/.exec(className ?? "");
             const content = String(value).replace(/\n$/, "");

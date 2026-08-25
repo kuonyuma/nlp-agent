@@ -1,0 +1,16 @@
+import { describe, expect, it } from "vitest";
+
+import { indexMarkdownHeadings } from "./knowledgeBook";
+
+describe("knowledge book Markdown headings", () => {
+  it("ignores fenced code and creates duplicate-safe anchors", () => {
+    const result = indexMarkdownHeadings(["# 章节", "", "## 介绍", "```python", "# not a heading", "```", "## 介绍", "### [训练](#practice)"].join("\n"));
+
+    expect(result.headingIds).toEqual(["章节", "介绍", "介绍-2", "训练"]);
+    expect(result.headings.map((heading) => heading.text)).toEqual(["介绍", "介绍", "训练"]);
+  });
+
+  it("falls back to a readable section id for symbol-only headings", () => {
+    expect(indexMarkdownHeadings("## !!!").headings[0]).toMatchObject({ text: "!!!", id: "section" });
+  });
+});

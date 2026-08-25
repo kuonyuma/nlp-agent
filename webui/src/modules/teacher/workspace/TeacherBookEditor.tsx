@@ -60,8 +60,14 @@ export function TeacherBookEditor({ workspaceId }: Props) {
     }
   }, [selectedId, workspaceId]);
 
-  useEffect(() => { void loadNavigation(); }, [loadNavigation]);
-  useEffect(() => { void loadPage(); }, [loadPage]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadNavigation(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadNavigation]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadPage(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadPage]);
 
   const groups = useMemo(() => groupNavigation(navigation), [navigation]);
   const save = async () => {

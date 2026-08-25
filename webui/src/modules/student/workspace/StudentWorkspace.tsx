@@ -7,6 +7,7 @@ import { AccountDialog } from "@/modules/student/components/AccountDialog";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { LearningContextBar } from "@/modules/student/components/LearningContextBar";
 import { LearningPanel } from "@/modules/student/components/LearningPanel";
+import { KnowledgeBookPanel } from "@/modules/student/components/KnowledgeBookPanel";
 import { LoginDialog } from "@/modules/student/components/LoginDialog";
 import { MessageList } from "@/modules/student/components/MessageList";
 import { SettingsDialog } from "@/modules/student/components/SettingsDialog";
@@ -150,6 +151,7 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
       onCloseTool={closeTool}
       onActiveToolChange={setActiveTool}
       learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
+      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} />}
     />
     <div className="student-school-logo"><SchoolLogo /></div>
     <SettingsDialog open={settingsOpen} settings={workspace.settings} learningContext={workspace.preferences.context} roles={workspace.authSession?.roles} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} onReset={workspace.resetSettings} onLearningContextChange={workspace.setLearningContext} onOpenDeveloper={() => { if (onNavigateTo) onNavigateTo("/developer"); else location.href = "/developer"; }} onOpenTeacher={() => { if (onNavigateTo) onNavigateTo("/teacher"); else location.href = "/teacher"; }} />
