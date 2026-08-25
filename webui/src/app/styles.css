@@ -617,7 +617,7 @@ button { color: inherit; }
   .learning-context-menu-sections { width:100% !important; box-sizing:border-box; grid-template-columns:minmax(0,1fr) !important; }
   .learning-context-menu-sections button { grid-column:1 / -1; }
   @keyframes learning-context-options-in { from { opacity:0; transform:translateX(6px); } to { opacity:1; transform:translateX(0); } }
-  @media (max-width:640px) { .composer-toolbar > span { display:none; }.learning-context-menu-panel,.learning-context-menu-panel.has-options { right:0; width:196px; }.learning-context-menu-options { right:0; bottom:calc(100% + 8px); width:196px; max-height:190px; } }
+  @media (max-width:640px) { .composer-toolbar > span { display:none; }.composer-toolbar .learning-context-menu { margin-left:auto; }.learning-context-menu-panel,.learning-context-menu-panel.has-options { right:0; width:196px; }.learning-context-menu-options { right:0; bottom:calc(100% + 8px); width:196px; max-height:190px; } }
 
 
   /* Writable Developer control plane. */
