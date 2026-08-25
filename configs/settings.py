@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     NLP_AGENT_SANDBOX_RECONCILE_INTERVAL_S: int = 30
     NLP_AGENT_SANDBOX_EVENT_RETENTION_S: int = 86_400
     NLP_AGENT_SANDBOX_EVENT_MAXLEN: int = 10_000
+    NLP_AGENT_SANDBOX_MANAGER_RPC_TIMEOUT_S: float = 20.0
     NLP_AGENT_SANDBOX_METRICS_RETENTION_S: int = 7 * 24 * 3600
     NLP_AGENT_SANDBOX_ARTIFACT_ORIGIN: str = ""
     # Public Nova origin allowed to embed artifact documents.  It is kept

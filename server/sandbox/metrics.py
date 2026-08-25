@@ -7,7 +7,12 @@ import time
 from typing import Any
 
 from configs.settings import settings
+from sqlalchemy import func, select
+
+from server.infrastructure.mysql.models import SandboxExecutionModel, SandboxRuntimeInstanceModel
+
 from .faults import SandboxFaultInjector
+from .optimization import AdaptivePoolPolicy
 
 
 class RedisSandboxMetricsStore:
@@ -133,6 +138,51 @@ def create_sandbox_metrics_store() -> RedisSandboxMetricsStore | None:
         Redis.from_url(redis_url, decode_responses=True),
         retention_seconds=settings.NLP_AGENT_SANDBOX_METRICS_RETENTION_S,
     )
+
+
+async def record_sandbox_capacity_sample(session_factory: Any, *, store: Any | None = None) -> None:
+    """Collect adaptive inputs on a timer, independent of dashboard visits."""
+    metrics_store = store if store is not None else default_sandbox_metrics_store
+    if metrics_store is None:
+        return
+    now = time.time()
+    from datetime import UTC, datetime, timedelta
+
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=5)
+    async with session_factory() as session:
+        states = list((await session.scalars(select(SandboxRuntimeInstanceModel.state))).all())
+        arrivals = int(
+            await session.scalar(
+                select(func.count()).select_from(SandboxExecutionModel).where(
+                    SandboxExecutionModel.started_at >= cutoff
+                )
+            )
+            or 0
+        )
+    arrival_rate = round(arrivals / 5.0, 3)
+    policy = AdaptivePoolPolicy(
+        ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
+        ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
+        burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
+    )
+    adaptive_target = policy.target_for(
+        arrival_rate_per_min=arrival_rate,
+        refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+    )
+    sample = {
+        "timestamp": now,
+        "ready": sum(state == "ready_unbound" for state in states),
+        "creating": sum(state == "creating" for state in states),
+        "target": settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET,
+        "adaptive_target": adaptive_target,
+        "deficit": max(0, adaptive_target - sum(state == "ready_unbound" for state in states)),
+        "arrival_rate_per_min": arrival_rate,
+        "refill_p95_s": settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+    }
+    try:
+        await metrics_store.record(sample)
+    except Exception:
+        return
 
 
 default_sandbox_metrics_store = create_sandbox_metrics_store()

@@ -90,11 +90,17 @@ class WarmPoolService:
         )
         if environment is None:
             raise LookupError("sandbox environment does not exist")
-        existing = await session.scalar(
-            select(SandboxRuntimeInstanceModel)
-            .where(SandboxRuntimeInstanceModel.environment_id == environment.id, SandboxRuntimeInstanceModel.state == RuntimeState.ASSIGNED)
-            .with_for_update()
-        )
+        existing = None
+        if environment.active_runtime_id is not None:
+            existing = await session.scalar(
+                select(SandboxRuntimeInstanceModel)
+                .where(
+                    SandboxRuntimeInstanceModel.id == environment.active_runtime_id,
+                    SandboxRuntimeInstanceModel.environment_id == environment.id,
+                    SandboxRuntimeInstanceModel.state == RuntimeState.ASSIGNED,
+                )
+                .with_for_update()
+            )
         if existing is not None:
             # A claim is one-shot.  Rotate the nonce when a second command
             # reuses the same assigned runtime so callers never fall back to a

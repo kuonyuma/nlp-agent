@@ -43,9 +43,15 @@ class RedisSandboxManagerCommandStore:
         )
         return command_id.decode("utf-8") if isinstance(command_id, bytes) else str(command_id)
 
-    async def read(self, *, after_id: str = "0-0", count: int = 20) -> tuple[str, list[dict[str, str]]]:
+    async def read(
+        self,
+        *,
+        after_id: str = "0-0",
+        count: int = 20,
+        block_ms: int = 1000,
+    ) -> tuple[str, list[dict[str, str]]]:
         self._faults.fail_if_configured("redis.xread")
-        rows = await self._client.xread({self._stream: after_id}, count=count, block=1000)
+        rows = await self._client.xread({self._stream: after_id}, count=count, block=max(1, block_ms))
         if not rows:
             return after_id, []
         commands: list[dict[str, str]] = []

@@ -133,8 +133,12 @@ class WarmPoolManager:
             try:
                 sample = await latest()
                 if sample:
-                    arrival_rate = max(0.0, float(sample.get("arrival_rate_per_min", arrival_rate)))
-                    refill_p95 = max(0.0, float(sample.get("refill_p95_s", refill_p95)))
+                    stamp = float(sample.get("timestamp", 0) or 0)
+                    if stamp <= 0 or datetime.now(UTC).timestamp() - stamp <= 300:
+                        arrival_rate = max(0.0, float(sample.get("arrival_rate_per_min", arrival_rate)))
+                        refill_p95 = max(0.0, float(sample.get("refill_p95_s", refill_p95)))
+                    else:
+                        self._trace("sandbox.manager.metrics.stale", age_seconds=round(datetime.now(UTC).timestamp() - stamp, 1))
             except Exception as error:
                 self._trace("sandbox.manager.metrics.unavailable", error=type(error).__name__)
         desired = self.recommended_ready_target(
@@ -255,9 +259,11 @@ class WarmPoolManager:
                 or lease.user_id != scope.owner_user_id
                 or lease.auth_session_id != scope.auth_session_id
                 or lease.state != "active"
-                or lease.generation != scope.generation
                 or lease.expires_at <= _utc_now()
             ):
+                return None
+            environment = await session.get(SandboxEnvironmentModel, lease.environment_id)
+            if environment is None or lease.generation != environment.generation:
                 return None
             claim = await warm_pool_service.claim(session, scope)
             if claim is not None:
@@ -293,8 +299,15 @@ class WarmPoolManager:
         await self.refill()
         self._trace("sandbox.manager.destroy.completed", runtime_id=runtime_id, reason=reason)
 
-    async def reset_runtime(self, runtime_id: str) -> None:
+    async def reset_runtime(
+        self,
+        runtime_id: str,
+        *,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+    ) -> None:
         """Fence every existing ticket before destroying the user's runtime."""
+        self._trace("sandbox.manager.reset.started", runtime_id=runtime_id, trace_id=trace_id, span_id=span_id)
         async with self._session_factory.begin() as session:
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
             if runtime is None or runtime.environment_id is None:
@@ -302,7 +315,30 @@ class WarmPoolManager:
             environment = await session.get(SandboxEnvironmentModel, runtime.environment_id, with_for_update=True)
             if environment is not None:
                 environment.generation += 1
+                leases = list(
+                    (
+                        await session.scalars(
+                            select(SandboxLeaseModel)
+                            .where(
+                                SandboxLeaseModel.environment_id == environment.id,
+                                SandboxLeaseModel.state == "active",
+                            )
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+                for lease in leases:
+                    # Rebind active leases to the new environment fence while
+                    # clearing the destroyed runtime assignment. Old tickets
+                    # still carry the previous runtime generation and fail.
+                    lease.generation = environment.generation
+                    lease.runtime_instance_id = None
+                # Clear the authoritative pointer before the Docker destroy
+                # transaction.  A concurrent claim can therefore not reuse
+                # the old assigned runtime during the reset hand-off.
+                environment.active_runtime_id = None
         await self.destroy_runtime(runtime_id, reason="user.restart")
+        self._trace("sandbox.manager.reset.completed", runtime_id=runtime_id, trace_id=trace_id, span_id=span_id)
 
     async def run_scratch(
         self,
@@ -310,17 +346,43 @@ class WarmPoolManager:
         source: str,
         timeout_seconds: int = 15,
         output_limit_bytes: int = 1_000_000,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> dict[str, object]:
         """Run an isolated model experiment without claiming a user runtime."""
         self._faults.fail_if_configured("docker.scratch")
-        return await self._docker.run_scratch(
-            source=source,
-            timeout_seconds=timeout_seconds,
-            output_limit_bytes=output_limit_bytes,
+        self._trace("sandbox.manager.scratch.started", trace_id=trace_id, span_id=span_id)
+        try:
+            result = await self._docker.run_scratch(
+                source=source,
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+            )
+        except Exception as error:
+            self._trace(
+                "sandbox.manager.scratch.failed",
+                trace_id=trace_id,
+                span_id=span_id,
+                error=type(error).__name__,
+            )
+            raise
+        self._trace(
+            "sandbox.manager.scratch.completed",
+            trace_id=trace_id,
+            span_id=span_id,
+            status=result.get("status"),
         )
+        return result
 
-    async def interrupt_runtime(self, runtime_id: str) -> None:
+    async def interrupt_runtime(
+        self,
+        runtime_id: str,
+        *,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+    ) -> None:
         """Interrupt only a runtime owned by this manager's database row."""
+        self._trace("sandbox.manager.interrupt.started", runtime_id=runtime_id, trace_id=trace_id, span_id=span_id)
         async with self._session_factory() as session:
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id)
             if runtime is None or runtime.state != RuntimeState.ASSIGNED:
@@ -330,6 +392,7 @@ class WarmPoolManager:
             raise LookupError("sandbox runtime has no Docker container")
         self._faults.fail_if_configured("docker.interrupt")
         await self._docker.interrupt(external_id)
+        self._trace("sandbox.manager.interrupt.completed", runtime_id=runtime_id, trace_id=trace_id, span_id=span_id)
 
     async def reconcile(self) -> ReconcileActions:
         """Fail DB rows for vanished containers and remove unmanaged-in-DB orphans."""
@@ -370,6 +433,13 @@ class WarmPoolManager:
                 pass
         await self._retry_draining_runtimes()
         await self._destroy_unleased_assigned_runtimes()
+        if self._metrics_store is not None:
+            try:
+                from .metrics import record_sandbox_capacity_sample
+
+                await record_sandbox_capacity_sample(self._session_factory, store=self._metrics_store)
+            except Exception as error:
+                self._trace("sandbox.manager.metrics.record_failed", error=type(error).__name__)
         await self.refill()
         return actions
 
@@ -412,16 +482,24 @@ class WarmPoolManager:
         generation: int,
         nonce: str | None,
         source: str,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> dict[str, object]:
         """Fence a one-time browser command before it ever reaches Docker."""
-        self._trace("sandbox.manager.execute.started", runtime_id=runtime_id, lease_id=lease_id)
+        self._trace(
+            "sandbox.manager.execute.started",
+            runtime_id=runtime_id,
+            lease_id=lease_id,
+            trace_id=trace_id,
+            span_id=span_id,
+        )
         async with self._session_factory.begin() as session:
             lease = await session.get(SandboxLeaseModel, lease_id, with_for_update=True)
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
             if (
                 lease is None or runtime is None or lease.user_id != scope.owner_user_id
                 or lease.auth_session_id != scope.auth_session_id or lease.state != "active"
-                or lease.generation != generation or runtime.generation != generation
+                or lease.generation != runtime.generation or runtime.generation != generation
                 or runtime.state != RuntimeState.ASSIGNED
                 or runtime.environment_id != lease.environment_id
             ):
@@ -445,7 +523,13 @@ class WarmPoolManager:
             raise RuntimeError("claimed runtime has no container id")
         try:
             result = await self._docker.execute(external_id, source=source)
-            self._trace("sandbox.manager.execute.completed", runtime_id=runtime_id, status=result.get("status"))
+            self._trace(
+                "sandbox.manager.execute.completed",
+                runtime_id=runtime_id,
+                status=result.get("status"),
+                trace_id=trace_id,
+                span_id=span_id,
+            )
             return result
         except TimeoutError:
             # An interrupted kernel can retain a corrupt execution state; replace

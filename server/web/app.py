@@ -79,6 +79,7 @@ from server.rbac.service import rbac_service
 from server.infrastructure.mysql.models import UserModel
 from server.sandbox.service import sandbox_lifecycle_service
 from server.sandbox.artifact_retention import purge_expired_artifacts
+from server.sandbox.metrics import record_sandbox_capacity_sample
 from server.release_notes.service import (
     ReleaseNoteConflictError,
     ReleaseNoteNotFoundError,
@@ -189,11 +190,20 @@ def create_app(
         # Bind model-facing Sandbox tools to the same authenticated DB session
         # factory as the HTTP gateway.  The module-level tool objects remain
         # stable for LangChain catalogs while their service is request-safe.
+        from server.sandbox.manager_rpc import create_sandbox_manager_rpc_client
         from server.sandbox.model_tools import configure_model_sandbox_service
 
-        configure_model_sandbox_service(
+        sandbox_manager = (
+            create_sandbox_manager_rpc_client()
+            if settings.NLP_AGENT_SANDBOX_RUNTIME_MODE.strip().lower() == "docker"
+            else None
+        )
+        app.state.sandbox_manager = sandbox_manager
+
+        sandbox_model_service = configure_model_sandbox_service(
             mode=settings.NLP_AGENT_SANDBOX_RUNTIME_MODE,
             session_factory=gateway.authorization_session_factory,
+            manager=sandbox_manager,
         )
         await gateway.start()
         redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
@@ -238,6 +248,7 @@ def create_app(
                     store_root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
                     if store_root:
                         await purge_expired_artifacts(factory, store_root=Path(store_root))
+                    await record_sandbox_capacity_sample(factory)
                     await asyncio.sleep(sandbox_reconcile_interval_s)
             except asyncio.CancelledError:
                 raise
@@ -255,6 +266,9 @@ def create_app(
             if authorization_listener is not None:
                 authorization_listener.cancel()
                 await asyncio.gather(authorization_listener, return_exceptions=True)
+            if sandbox_manager is not None:
+                await sandbox_manager.close()
+            await sandbox_model_service.close()
             await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()

@@ -52,6 +52,33 @@ def test_preload_matrix_is_operator_visible() -> None:
     assert "python-base" in matrix["profiles"]
 
 
+def test_startup_benchmark_reports_stage_percentiles_and_updates_matrix(tmp_path) -> None:
+    import json
+
+    from scripts.benchmark_sandbox_startup import percentile, update_preload_matrix
+    from server.sandbox.optimization import PreloadCompatibility
+
+    assert percentile([10.0, 20.0, 30.0], 0.50) == 20.0
+    assert percentile([10.0, 20.0, 30.0], 0.95) == 29.0
+    path = tmp_path / "matrix.json"
+    path.write_text('{"version": 1, "profiles": {}}', encoding="utf-8")
+    update_preload_matrix(
+        path,
+        PreloadCompatibility(
+            "python-base", "image@sha256:x", "3.11", "nova-runtime", ("numpy",), status="compatible"
+        ),
+        {
+            "iterations": [{"stages": {"create_ms": 10.0}}],
+            "image_cached": True,
+            "stage_percentiles_ms": {"create_ms": {"p50": 10.0, "p95": 10.0}},
+        },
+    )
+    row = json.loads(path.read_text(encoding="utf-8"))["profiles"]["python-base"]
+    assert row["status"] == "compatible"
+    assert row["benchmark"]["iterations"] == 1
+    assert row["benchmark"]["stage_percentiles_ms"]["create_ms"]["p95"] == 10.0
+
+
 @pytest.mark.asyncio
 async def test_adaptive_state_store_persists_target_and_cooldown() -> None:
     from server.sandbox.metrics import RedisSandboxAdaptiveStateStore

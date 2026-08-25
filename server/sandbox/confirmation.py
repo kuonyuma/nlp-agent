@@ -9,6 +9,9 @@ import hmac
 import json
 import time
 from datetime import timedelta
+from typing import Any
+
+from configs.settings import settings
 
 
 class SandboxConfirmationSigner:
@@ -43,7 +46,7 @@ class SandboxConfirmationSigner:
         session_id: str,
         tool_name: str,
         code_hash: str,
-    ) -> None:
+    ) -> dict[str, object]:
         try:
             encoded, signature = token.split(".", maxsplit=1)
             expected = hmac.new(self._secret, encoded.encode("ascii"), hashlib.sha256).hexdigest()
@@ -61,3 +64,49 @@ class SandboxConfirmationSigner:
             raise PermissionError("sandbox confirmation token does not match the requested operation")
         if not isinstance(payload.get("e"), int) or payload["e"] < time.time():
             raise PermissionError("sandbox confirmation token expired")
+        return payload
+
+
+class InMemoryConfirmationReplayStore:
+    """Development fallback; production uses Redis for cross-Web-instance use."""
+
+    def __init__(self) -> None:
+        self._used: dict[str, float] = {}
+
+    async def consume(self, token: str, *, expires_at: float) -> bool:
+        now = time.time()
+        self._used = {key: value for key, value in self._used.items() if value > now}
+        key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        if key in self._used:
+            return False
+        self._used[key] = expires_at
+        return True
+
+    async def close(self) -> None:
+        return None
+
+
+class RedisConfirmationReplayStore:
+    def __init__(self, client: Any, *, prefix: str = "nova:sandbox:confirmation:") -> None:
+        self._client = client
+        self._prefix = prefix
+
+    async def consume(self, token: str, *, expires_at: float) -> bool:
+        key = self._prefix + hashlib.sha256(token.encode("utf-8")).hexdigest()
+        ttl = max(1, int(expires_at - time.time()))
+        result = await self._client.set(key, "1", nx=True, ex=ttl)
+        return bool(result)
+
+    async def close(self) -> None:
+        close = getattr(self._client, "aclose", None)
+        if close is not None:
+            await close()
+
+
+def create_confirmation_replay_store() -> RedisConfirmationReplayStore | InMemoryConfirmationReplayStore:
+    redis_url = settings.NLP_AGENT_REDIS_URL.strip()
+    if not redis_url:
+        return InMemoryConfirmationReplayStore()
+    from redis.asyncio import Redis
+
+    return RedisConfirmationReplayStore(Redis.from_url(redis_url, decode_responses=True))

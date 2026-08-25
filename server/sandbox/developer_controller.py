@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,7 +77,7 @@ def _execution_payload(row: SandboxExecutionModel) -> dict[str, object | None]:
 
 
 @router.get("/overview")
-async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, object]:
+async def sandbox_overview(request: Request, db: DbSession, principal: Principal) -> dict[str, object]:
     _require_monitor(principal)
     rows = (await db.execute(select(SandboxRuntimeInstanceModel.state, func.count()).group_by(SandboxRuntimeInstanceModel.state))).all()
     runtime_states = summarize_runtime_states([(str(state), int(count)) for state, count in rows])
@@ -122,6 +122,28 @@ async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, obj
         if duration >= 0:
             durations.append(duration)
     capacity = capacity_snapshot(runtime_states, target=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET)
+    adaptive_target = AdaptivePoolPolicy(
+        ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
+        ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
+        burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
+    ).target_for(
+        arrival_rate_per_min=round(observed_arrivals / 5.0, 3),
+        refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+    )
+    capacity["adaptive_target"] = adaptive_target
+    manager = getattr(request.app.state, "sandbox_manager", None)
+    snapshot = getattr(manager, "capacity_snapshot", None)
+    if snapshot is not None:
+        try:
+            manager_capacity = await snapshot()
+            for key in ("ready", "creating", "target", "deficit", "adaptive_target"):
+                if key in manager_capacity:
+                    capacity[key] = int(manager_capacity[key])
+            adaptive_target = int(capacity["adaptive_target"])
+        except Exception:
+            # The dashboard remains useful during a Manager restart; the
+            # database-derived sample above is the safe fallback.
+            pass
     alerts: list[dict[str, str]] = []
     if capacity["deficit"] > 0:
         alerts.append({"code": "pool_deficit", "severity": "warning", "message": "Warm Pool ready capacity is below target."})
@@ -131,6 +153,7 @@ async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, obj
         "timestamp": sampled_now.timestamp(),
         "ready": capacity["ready"], "creating": capacity["creating"],
         "target": capacity["target"], "deficit": capacity["deficit"],
+        "adaptive_target": adaptive_target,
         "arrival_rate_per_min": round(observed_arrivals / 5.0, 3),
         "refill_p95_s": settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
     }
@@ -184,6 +207,11 @@ async def preload_compatibility(principal: Principal) -> dict[str, object]:
 async def request_capacity_prewarm(body: PrewarmBody, principal: Principal) -> dict[str, object]:
     """Queue a control-plane command; Web never opens Docker itself."""
     _require_monitor(principal)
+    if body.profile_id != "python-base":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only the python-base Sandbox Manager profile is currently schedulable.",
+        )
     policy = AdaptivePoolPolicy(
         ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
         ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+import time
 
 from configs.settings import settings
 from server.infrastructure.mysql.config import DatabaseConfig
@@ -16,6 +17,7 @@ from server.infrastructure.mysql.engine import create_engine, create_session_fac
 from .commands import create_sandbox_manager_command_store
 from .docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 from .manager import WarmPoolManager
+from .manager_rpc import create_sandbox_manager_rpc_server
 from .optimization import AdaptivePoolPolicy
 from .metrics import create_sandbox_adaptive_state_store, create_sandbox_metrics_store
 
@@ -53,14 +55,29 @@ async def run_forever() -> None:
         metrics_store=metrics_store,
     )
     command_store = create_sandbox_manager_command_store()
+    rpc_server = create_sandbox_manager_rpc_server(manager)
     command_cursor = "0-0"
     pending_commands: list[dict[str, str]] = []
+    next_reconcile = 0.0
     try:
         while True:
-            await manager.reconcile()
+            now_monotonic = time.monotonic()
+            if now_monotonic >= next_reconcile:
+                try:
+                    await manager.reconcile()
+                except Exception:
+                    # A Docker/DB/Redis fault must not terminate the isolated
+                    # control plane.  The next scheduled pass retries it.
+                    pass
+                next_reconcile = now_monotonic + max(5, settings.NLP_AGENT_SANDBOX_RECONCILE_INTERVAL_S)
+            if rpc_server is not None:
+                try:
+                    await rpc_server.process_once(block_ms=25)
+                except Exception:
+                    pass
             if command_store is not None:
                 try:
-                    command_cursor, commands = await command_store.read(after_id=command_cursor)
+                    command_cursor, commands = await command_store.read(after_id=command_cursor, block_ms=1)
                 except Exception:
                     # Redis is an optional optimization/control input.  Keep
                     # reconciling Docker and retry the stream on the next pass.
@@ -84,7 +101,13 @@ async def run_forever() -> None:
                     due.append(command)
                 pending_commands = remaining
                 for command in due:
-                    if command.get("type") != "pool_target" or command.get("profile_id") != "python-base":
+                    if command.get("type") != "pool_target":
+                        continue
+                    if command.get("profile_id") != "python-base":
+                        manager._trace(
+                            "sandbox.manager.command.unsupported_profile",
+                            profile_id=command.get("profile_id"),
+                        )
                         continue
                     try:
                         await manager.request_target(int(command["target"]))
@@ -92,10 +115,12 @@ async def run_forever() -> None:
                         continue
                 if due:
                     await manager.refill()
-            await asyncio.sleep(max(5, settings.NLP_AGENT_SANDBOX_RECONCILE_INTERVAL_S))
+            await asyncio.sleep(0.05)
     finally:
         if command_store is not None:
             await command_store.close()
+        if rpc_server is not None:
+            await rpc_server.close()
         if adaptive_state_store is not None:
             await adaptive_state_store.close()
         if metrics_store is not None:

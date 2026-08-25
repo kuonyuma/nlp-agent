@@ -162,3 +162,141 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
     finally:
         subprocess.run(["docker", "rm", "--force", name], capture_output=True, text=True, timeout=30)
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reset_claim_execute_uses_new_environment_generation() -> None:
+    """Regression: reset must fence old tickets without bricking the next claim."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from server.infrastructure.mysql import DatabaseConfig, create_engine, create_session_factory
+    from server.infrastructure.mysql.models import (
+        SandboxEnvironmentModel,
+        SandboxLeaseModel,
+        SandboxRuntimeInstanceModel,
+        SessionModel,
+        WorkspaceMemberModel,
+    )
+    from server.sandbox.contracts import SandboxScope
+    from server.sandbox.manager import WarmPoolManager
+    from server.sandbox.warm_pool import RuntimeState
+    from server.user.schemas import UserCreate
+    from server.user.service import UserService
+
+    class FakeDocker:
+        config = SimpleNamespace(image="nova-test@sha256:" + "0" * 64)
+
+        async def destroy(self, external_id: str) -> None:
+            assert external_id == "runtime-old"
+
+        async def kernel_ready(self, external_id: str) -> bool:
+            return external_id == "runtime-new"
+
+        async def execute(self, external_id: str, *, source: str) -> dict[str, object]:
+            assert external_id == "runtime-new"
+            assert source == "print(1)"
+            return {"status": "completed", "stdout": "1\n", "stderr": ""}
+
+        async def managed_runtime_ids(self) -> set[str]:
+            return {"runtime-new"}
+
+        async def image_cached(self) -> bool:
+            return True
+
+    engine = create_engine(DatabaseConfig(os.environ["NLP_AGENT_DATABASE_URL"], pool_size=2, max_overflow=0))
+    factory = create_session_factory(engine)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    try:
+        async with factory.begin() as session:
+            user = await UserService(session).create_user(
+                UserCreate(username=f"reset{uuid4().hex[:10]}", display_name="Reset", password="InitialPw0rd1")
+            )
+            workspace_id = await session.scalar(
+                select(WorkspaceMemberModel.workspace_id).where(WorkspaceMemberModel.user_id == user.id)
+            )
+            session_id = str(uuid4())
+            environment_id = str(uuid4())
+            old_runtime_id = str(uuid4())
+            new_runtime_id = str(uuid4())
+            lease_id = str(uuid4())
+            session.add(
+                SessionModel(
+                    id=session_id,
+                    user_id=user.id,
+                    workspace_id=workspace_id,
+                    token_hash=f"token-{session_id}",
+                    csrf_hash=f"csrf-{session_id}",
+                    authorization_version=1,
+                    expires_at=now + timedelta(hours=1),
+                )
+            )
+            session.add(
+                SandboxEnvironmentModel(
+                    id=environment_id,
+                    owner_user_id=user.id,
+                    generation=1,
+                    active_runtime_id=old_runtime_id,
+                )
+            )
+            session.add(
+                SandboxRuntimeInstanceModel(
+                    id=old_runtime_id,
+                    environment_id=environment_id,
+                    external_runtime_id="runtime-old",
+                    runtime_kind="docker",
+                    state=RuntimeState.ASSIGNED,
+                    generation=1,
+                )
+            )
+            session.add(
+                SandboxRuntimeInstanceModel(
+                    id=new_runtime_id,
+                    external_runtime_id="runtime-new",
+                    runtime_kind="docker",
+                    state=RuntimeState.READY_UNBOUND,
+                    generation=1,
+                )
+            )
+            session.add(
+                SandboxLeaseModel(
+                    id=lease_id,
+                    environment_id=environment_id,
+                    user_id=user.id,
+                    auth_session_id=session_id,
+                    runtime_instance_id=old_runtime_id,
+                    workspace_id=workspace_id,
+                    generation=1,
+                    state="active",
+                    expires_at=now + timedelta(hours=1),
+                )
+            )
+        manager = WarmPoolManager(
+            session_factory=factory,
+            docker=FakeDocker(),
+            resource_profile_id="python-base",
+            ready_target=0,
+        )
+        await manager.reset_runtime(old_runtime_id)
+        scope = SandboxScope(
+            owner_user_id=str(user.id),
+            auth_session_id=session_id,
+            workspace_id=str(workspace_id),
+            generation=1,
+            lease_expires_at=now + timedelta(hours=1),
+        )
+        claim = await manager.claim(scope, lease_id=lease_id)
+        assert claim is not None
+        assert claim.runtime.generation == 2
+        result = await manager.execute_claimed(
+            scope,
+            lease_id=lease_id,
+            runtime_id=str(claim.runtime.id),
+            generation=claim.runtime.generation,
+            nonce=claim.nonce,
+            source="print(1)",
+        )
+        assert result["status"] == "completed"
+    finally:
+        await engine.dispose()

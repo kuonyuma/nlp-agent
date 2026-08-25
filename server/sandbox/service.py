@@ -107,7 +107,7 @@ class SandboxLifecycleService:
                 user_id=scope.owner_user_id,
                 auth_session_id=scope.auth_session_id,
                 workspace_id=scope.workspace_id,
-                generation=scope.generation,
+                generation=environment.generation,
                 actor_type="browser",
                 state="active",
                 expires_at=scope.lease_expires_at,
@@ -115,7 +115,10 @@ class SandboxLifecycleService:
             session.add(lease)
         else:
             lease.state = "active"
-            lease.generation = scope.generation
+            # Lease generation is the Environment fencing generation.  The
+            # authenticated authorization version remains in ``scope`` and is
+            # checked separately by the Manager's auth lifecycle guard.
+            lease.generation = environment.generation
             lease.workspace_id = scope.workspace_id
             lease.expires_at = scope.lease_expires_at
             lease.renewed_at = now

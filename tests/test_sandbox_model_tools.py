@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,72 @@ def _config(*, user_id: str = "local", session_id: str = "model-session") -> dic
             "workspace_id": "default",
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_database_scratch_does_not_require_interactive_lease() -> None:
+    from server.infrastructure.mysql.models import SandboxExecutionModel, SessionModel, UserModel
+    from server.sandbox.model_tools import SandboxModelToolService
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.execution: object | None = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, model, identifier, **_kwargs):
+            if model is SessionModel:
+                return SimpleNamespace(
+                    id=identifier,
+                    user_id="local",
+                    workspace_id="default",
+                    revoked_at=None,
+                    expires_at=now + timedelta(minutes=5),
+                    authorization_version=1,
+                )
+            if model is UserModel:
+                return SimpleNamespace(
+                    id="local",
+                    authorization_version=1,
+                    status="active",
+                    deleted_at=None,
+                )
+            if model is SandboxExecutionModel:
+                return self.execution
+            return None
+
+        async def scalar(self, _statement):
+            return None
+
+        def add(self, item):
+            if isinstance(item, SandboxExecutionModel):
+                self.execution = item
+
+        async def flush(self):
+            return None
+
+    session = FakeSession()
+
+    class Factory:
+        def __call__(self):
+            return session
+
+        def begin(self):
+            return session
+
+    service = SandboxModelToolService(mode="inmemory", session_factory=Factory())
+    result = await service.run_scratch(source="print(2 + 2)", config=_config())
+
+    assert result["ok"] is True
+    assert result["execution_id"]
+    assert session.execution is not None
+    assert session.execution.lease_id is None
 
 
 @pytest.mark.asyncio
@@ -43,6 +111,13 @@ async def test_model_scratch_does_not_share_interactive_kernel() -> None:
 
     assert active["ok"] is True
     assert "42" in active["stdout"]
+    replayed = await service.run_active(
+        source="answer = 41\nprint(answer + 1)",
+        config=context,
+        confirmed=True,
+        confirmation_token=token,
+    )
+    assert replayed["code"] == "confirmation_required"
     assert scratch["ok"] is True
     assert scratch["stdout"].strip() == "False"
     assert scratch["execution_id"]
