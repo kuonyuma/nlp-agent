@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import random
 import hashlib
+import re
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from gateway.contracts import (
     GatewayEvent,
@@ -115,7 +117,8 @@ class GatewayRepository:
                     workspace_id TEXT NOT NULL,
                     asset_path TEXT NOT NULL,
                     media_type TEXT NOT NULL,
-                    content BLOB NOT NULL,
+                    draft_content BLOB NOT NULL,
+                    published_content BLOB,
                     size_bytes INTEGER NOT NULL,
                     sha256 TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -882,7 +885,23 @@ class GatewayRepository:
                    WHERE workspace_id=? AND knowledge_point_id=?""",
                 (revision, updated_at, workspace_id, knowledge_point_id),
             )
+            for asset_path in self._asset_paths_from_markdown(str(current["draft_markdown"])):
+                self._conn.execute(
+                    """UPDATE gateway_knowledge_book_assets
+                       SET published_content=draft_content,updated_at=?
+                       WHERE workspace_id=? AND asset_path=?""",
+                    (_now(), workspace_id, asset_path),
+                )
         return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
+
+    @staticmethod
+    def _asset_paths_from_markdown(markdown: str) -> set[str]:
+        paths: set[str] = set()
+        for raw_path in re.findall(r"/assets/(assets/[^)\s\"']+)", markdown):
+            path = unquote(raw_path)
+            if path.startswith("assets/") and ".." not in path.split("/"):
+                paths.add(path)
+        return paths
 
     def apply_knowledge_book_import(
         self,
@@ -923,10 +942,10 @@ class GatewayRepository:
                 content = bytes(asset["content"])
                 self._conn.execute(
                     """INSERT INTO gateway_knowledge_book_assets(
-                       workspace_id,asset_path,media_type,content,size_bytes,sha256,updated_at)
+                       workspace_id,asset_path,media_type,draft_content,size_bytes,sha256,updated_at)
                        VALUES (?,?,?,?,?,?,?)
                        ON CONFLICT(workspace_id,asset_path) DO UPDATE SET
-                         media_type=excluded.media_type,content=excluded.content,
+                         media_type=excluded.media_type,draft_content=excluded.draft_content,
                          size_bytes=excluded.size_bytes,sha256=excluded.sha256,
                          updated_at=excluded.updated_at""",
                     (
@@ -944,12 +963,14 @@ class GatewayRepository:
     def get_knowledge_book_asset(self, workspace_id: str, asset_path: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                """SELECT workspace_id,asset_path,media_type,content,size_bytes,sha256
+                """SELECT workspace_id,asset_path,media_type,published_content AS content,size_bytes,sha256
                    FROM gateway_knowledge_book_assets
                    WHERE workspace_id=? AND asset_path=?""",
                 (workspace_id, asset_path),
             ).fetchone()
-        return dict(row) if row is not None else None
+        if row is None or row["content"] is None:
+            return None
+        return dict(row)
 
     def select_guided_blueprint(self, *, workspace_id: str, topic_id: str) -> dict[str, Any] | None:
         catalog = self.get_teaching_catalog(workspace_id)["catalog"]

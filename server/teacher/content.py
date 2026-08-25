@@ -18,6 +18,8 @@ _EXTERNAL_RESOURCE_RE = re.compile(
     r"!?\[[^\]]*\]\(\s*(?:https?:|//|data:|javascript:)",
     re.IGNORECASE,
 )
+_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})[ \t]+")
+MAX_MARKDOWN_BYTES = 1 * 1024 * 1024
 
 
 def _is_valid_markdown_name(file_name: str) -> bool:
@@ -85,6 +87,32 @@ def _filter_code_tabs(content: str) -> tuple[str, list[str]]:
     return "".join(output), sorted(removed)
 
 
+def _heading_warnings(content: str) -> list[str]:
+    warnings: list[str] = []
+    previous_level: int | None = None
+    fence_char: str | None = None
+    fence_length = 0
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        fence_match = _FENCE_RE.match(line)
+        if fence_char is not None:
+            if fence_match and fence_match.group(1)[0] == fence_char and len(fence_match.group(1)) >= fence_length:
+                fence_char = None
+            continue
+        if fence_match:
+            marker = fence_match.group(1)
+            fence_char = marker[0]
+            fence_length = len(marker)
+            continue
+        heading = _HEADING_RE.match(line)
+        if not heading:
+            continue
+        level = len(heading.group(1))
+        if previous_level is not None and level > previous_level + 1:
+            warnings.append(f"第 {line_number} 行标题层级从 h{previous_level} 跳到 h{level}，建议补齐中间层级")
+        previous_level = level
+    return warnings
+
+
 def normalize_teacher_markdown(file_name: str, content_markdown: str) -> TeacherBookImportPreview:
     if not _is_valid_markdown_name(file_name):
         raise ValueError("教材导入只接受不含路径的 .md 文件")
@@ -92,6 +120,8 @@ def normalize_teacher_markdown(file_name: str, content_markdown: str) -> Teacher
         raise ValueError("教材 Markdown 不支持原始 HTML、脚本、嵌入或危险链接标记")
     if _EXTERNAL_RESOURCE_RE.search(content_markdown):
         raise ValueError("教材 Markdown 不支持外部链接或外部图片资源")
+    if len(content_markdown.encode("utf-8")) > MAX_MARKDOWN_BYTES:
+        raise ValueError("教材 Markdown 单文件不能超过 1 MB")
 
     normalized, removed_frameworks = _filter_code_tabs(
         content_markdown.replace("\r\n", "\n").replace("\r", "\n")
@@ -101,6 +131,7 @@ def normalize_teacher_markdown(file_name: str, content_markdown: str) -> Teacher
         warnings.append("已移除非 PyTorch 代码标签，仅保留 PyTorch/all 代码片段")
     if not normalized.strip():
         warnings.append("正文为空，保存后不能发布")
+    warnings.extend(_heading_warnings(normalized))
     return TeacherBookImportPreview(
         file_name=file_name,
         content_markdown=normalized,

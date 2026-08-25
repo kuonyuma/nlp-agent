@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import unquote
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
@@ -717,7 +719,24 @@ class MySQLGatewayRepository:
                     "knowledge_point_id": knowledge_point_id,
                 },
             )
+            for asset_path in self._asset_paths_from_markdown(str(current["draft_markdown"])):
+                connection.execute(
+                    text(
+                        "UPDATE nlp_knowledge_book_assets SET published_content=draft_content,"
+                        "updated_at=UTC_TIMESTAMP(6) WHERE workspace_id=:workspace_id AND asset_path=:asset_path"
+                    ),
+                    {"workspace_id": workspace_id, "asset_path": asset_path},
+                )
         return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
+
+    @staticmethod
+    def _asset_paths_from_markdown(markdown: str) -> set[str]:
+        paths: set[str] = set()
+        for raw_path in re.findall(r"/assets/(assets/[^)\s\"']+)", markdown):
+            path = unquote(raw_path)
+            if path.startswith("assets/") and ".." not in path.split("/"):
+                paths.add(path)
+        return paths
 
     def apply_knowledge_book_import(
         self,
@@ -778,16 +797,16 @@ class MySQLGatewayRepository:
                 content = bytes(asset["content"])
                 connection.execute(
                     text(
-                        "INSERT INTO nlp_knowledge_book_assets(workspace_id,asset_path,media_type,content,"
-                        "size_bytes,sha256) VALUES(:workspace_id,:asset_path,:media_type,:content,:size_bytes,:sha256) "
-                        "ON DUPLICATE KEY UPDATE media_type=VALUES(media_type),content=VALUES(content),"
+                        "INSERT INTO nlp_knowledge_book_assets(workspace_id,asset_path,media_type,draft_content,"
+                        "size_bytes,sha256) VALUES(:workspace_id,:asset_path,:media_type,:draft_content,:size_bytes,:sha256) "
+                        "ON DUPLICATE KEY UPDATE media_type=VALUES(media_type),draft_content=VALUES(draft_content),"
                         "size_bytes=VALUES(size_bytes),sha256=VALUES(sha256),updated_at=UTC_TIMESTAMP(6)"
                     ),
                     {
                         "workspace_id": workspace_id,
                         "asset_path": str(asset["asset_path"]),
                         "media_type": str(asset["media_type"]),
-                        "content": content,
+                        "draft_content": content,
                         "size_bytes": len(content),
                         "sha256": str(asset.get("sha256") or hashlib.sha256(content).hexdigest()),
                     },
@@ -798,12 +817,14 @@ class MySQLGatewayRepository:
         with self._engine.connect() as connection:
             row = connection.execute(
                 text(
-                    "SELECT workspace_id,asset_path,media_type,content,size_bytes,sha256 "
+                    "SELECT workspace_id,asset_path,media_type,published_content AS content,size_bytes,sha256 "
                     "FROM nlp_knowledge_book_assets WHERE workspace_id=:workspace_id AND asset_path=:asset_path"
                 ),
                 {"workspace_id": workspace_id, "asset_path": asset_path},
             ).mappings().first()
-        return dict(row) if row else None
+        if row is None or row["content"] is None:
+            return None
+        return dict(row)
 
     def teaching_topic(self, workspace_id: str, topic_id: str):
         catalog = self.get_teaching_catalog(workspace_id)["catalog"]

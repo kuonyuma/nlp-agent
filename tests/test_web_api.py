@@ -611,6 +611,13 @@ def test_teacher_book_archive_preview_apply_and_asset_read_are_atomic(web_app):
         assert applied.status_code == 200
         assert applied.json()["applied_count"] == 1
         assert client.get("/api/v1/teacher/book/default/pages/attention").json()["page"]["revision"] == 1
+        assert client.get("/api/v1/learning/book/default/assets/assets/attention.png").status_code == 404
+        published = client.post(
+            "/api/v1/teacher/book/default/pages/attention/publish",
+            json={"expected_revision": 1},
+            headers=write_headers(csrf),
+        )
+        assert published.status_code == 200
         asset = client.get("/api/v1/learning/book/default/assets/assets/attention.png")
         assert asset.status_code == 200
         assert asset.content == b"png"

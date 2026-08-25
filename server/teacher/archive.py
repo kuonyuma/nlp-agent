@@ -38,9 +38,12 @@ _IMAGE_RE = re.compile(r"(!\[[^\]]*\]\(\s*)(?:<([^>]+)>|(\S+?))(\s*(?:\"[^\"]*\"
 @dataclass(frozen=True)
 class ArchivePage:
     topic_id: str
+    topic_name: str | None
+    topic_sort_order: int
     knowledge_point_id: str
     file_name: str
     title: str | None
+    sort_order: int
     content_markdown: str
     removed_frameworks: list[str]
     warnings: list[str]
@@ -75,7 +78,7 @@ def _is_symlink(info: zipfile.ZipInfo) -> bool:
     return info.create_system == 3 and stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF)
 
 
-def _manifest_pages(manifest: object) -> tuple[str, int, list[dict[str, str | None]]]:
+def _manifest_pages(manifest: object) -> tuple[str, int, list[dict[str, object]]]:
     if not isinstance(manifest, dict):
         raise ValueError("manifest.json 必须是 JSON 对象")
     if manifest.get("format_version") != 1:
@@ -94,11 +97,17 @@ def _manifest_pages(manifest: object) -> tuple[str, int, list[dict[str, str | No
         if not isinstance(topic, dict):
             raise ValueError("manifest.json 的 topics 项必须是对象")
         topic_id = topic.get("id")
+        topic_name = topic.get("name")
+        topic_sort_order = topic.get("sort_order", 0)
         points = topic.get("knowledge_points")
         if not isinstance(topic_id, str) or not topic_id.strip() or topic_id in topic_ids:
             raise ValueError("manifest.json 包含重复或无效的主题 ID")
         if not isinstance(points, list):
             raise ValueError("manifest.json 的 knowledge_points 必须是数组")
+        if topic_name is not None and (not isinstance(topic_name, str) or len(topic_name) > 120):
+            raise ValueError(f"主题 {topic_id} 的 name 无效")
+        if not isinstance(topic_sort_order, int) or topic_sort_order < 0:
+            raise ValueError(f"主题 {topic_id} 的 sort_order 无效")
         topic_ids.add(topic_id)
         for point in points:
             if not isinstance(point, dict):
@@ -106,14 +115,25 @@ def _manifest_pages(manifest: object) -> tuple[str, int, list[dict[str, str | No
             point_id = point.get("id")
             file_name = point.get("file")
             point_title = point.get("name")
+            sort_order = point.get("sort_order", 0)
             if not isinstance(point_id, str) or not point_id.strip() or point_id in point_ids:
                 raise ValueError("manifest.json 包含重复或无效的知识点 ID")
             if not isinstance(file_name, str) or not file_name.lower().endswith(".md"):
                 raise ValueError(f"知识点 {point_id} 必须指向 .md 文件")
             if point_title is not None and (not isinstance(point_title, str) or len(point_title) > 120):
                 raise ValueError(f"知识点 {point_id} 的 name 无效")
+            if not isinstance(sort_order, int) or sort_order < 0:
+                raise ValueError(f"知识点 {point_id} 的 sort_order 无效")
             point_ids.add(point_id)
-            pages.append({"topic_id": topic_id, "knowledge_point_id": point_id, "file": file_name, "title": point_title})
+            pages.append({
+                "topic_id": topic_id,
+                "topic_name": topic_name,
+                "topic_sort_order": topic_sort_order,
+                "knowledge_point_id": point_id,
+                "file": file_name,
+                "title": point_title,
+                "sort_order": sort_order,
+            })
     return title.strip(), 1, pages
 
 
@@ -210,9 +230,12 @@ def parse_teacher_book_archive(file_name: str, archive_bytes: bytes, *, workspac
         pages.append(
             ArchivePage(
                 topic_id=str(entry["topic_id"]),
+                topic_name=str(entry["topic_name"]) if entry["topic_name"] is not None else None,
+                topic_sort_order=int(entry["topic_sort_order"]),
                 knowledge_point_id=str(entry["knowledge_point_id"]),
                 file_name=file_name,
                 title=str(entry["title"]) if entry["title"] is not None else None,
+                sort_order=int(entry["sort_order"]),
                 content_markdown=rewritten,
                 removed_frameworks=normalized.removed_frameworks,
                 warnings=[*normalized.warnings, *image_warnings],

@@ -357,7 +357,8 @@ class KnowledgeBookAssetModel(TimestampedModel, Base):
     )
     asset_path: Mapped[str] = mapped_column(String(512, collation="utf8mb4_bin"), primary_key=True)
     media_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    draft_content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    published_content: Mapped[bytes | None] = mapped_column(LargeBinary)
     size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
     sha256: Mapped[str] = mapped_column(String(64, collation="ascii_bin"), nullable=False)
 

@@ -85,7 +85,7 @@ def test_repository_batch_import_is_atomic_and_persists_assets(tmp_path):
     repository = GatewayRepository(tmp_path / "gateway.sqlite3")
     repository.apply_knowledge_book_import(
         "workspace-1",
-        [{"knowledge_point_id": "attention", "expected_revision": 0, "content_markdown": "# v1"}],
+        [{"knowledge_point_id": "attention", "expected_revision": 0, "content_markdown": "# v1\n\n![a](/api/v1/learning/book/workspace-1/assets/assets/a.png)"}],
         [{"asset_path": "assets/a.png", "media_type": "image/png", "content": b"a", "sha256": "a" * 64}],
     )
 
@@ -99,7 +99,8 @@ def test_repository_batch_import_is_atomic_and_persists_assets(tmp_path):
             [],
         )
 
-    assert repository.get_knowledge_page("workspace-1", "attention")["draft_markdown"] == "# v1"
+    assert repository.get_knowledge_page("workspace-1", "attention")["draft_markdown"].startswith("# v1")
     assert repository.get_knowledge_page("workspace-1", "new") is None
+    repository.publish_knowledge_page("workspace-1", "attention", expected_revision=1)
     assert repository.get_knowledge_book_asset("workspace-1", "assets/a.png")["content"] == b"a"
     repository.close()

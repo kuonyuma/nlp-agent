@@ -318,6 +318,8 @@ class TeacherService:
                 "unchanged" if current_content == archive_page.content_markdown else "update"
             )
             warnings = list(archive_page.warnings)
+            if archive_page.topic_name and archive_page.topic_name != topic.name:
+                warnings.append("Manifest 中的主题名称与教师目录不同，已以教师目录名称为准")
             if archive_page.title and archive_page.title != point.name:
                 warnings.append("Manifest 中的知识点名称与教师目录不同，已以教师目录名称为准")
             items.append(
