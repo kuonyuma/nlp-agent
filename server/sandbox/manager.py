@@ -17,9 +17,9 @@ from configs.settings import settings
 from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxLeaseModel, SandboxRuntimeInstanceModel, SessionModel, UserModel
 
 from .contracts import SandboxScope
-from .docker_runtime import DockerRuntimeAdapter
 from .faults import SandboxFaultInjector
 from .optimization import AdaptivePoolPolicy
+from .runtime_adapters import SandboxRuntimeAdapter
 from .warm_pool import RuntimeClaim, RuntimeState, reconcile_runtime_ids, runtime_container_name, warm_pool_service
 
 
@@ -86,7 +86,7 @@ class WarmPoolManager:
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
-        docker: DockerRuntimeAdapter,
+        docker: SandboxRuntimeAdapter,
         resource_profile_id: str,
         ready_target: int,
         adaptive_policy: AdaptivePoolPolicy | None = None,
@@ -96,6 +96,7 @@ class WarmPoolManager:
     ) -> None:
         self._session_factory = session_factory
         self._docker = docker
+        self._runtime_kind = str(getattr(docker, "runtime_kind", "docker"))
         self._resource_profile_id = resource_profile_id
         self._ready_target = ready_target
         self._adaptive_policy = adaptive_policy
@@ -588,7 +589,7 @@ class WarmPoolManager:
             session.add(
                 SandboxRuntimeInstanceModel(
                     id=runtime_id,
-                    runtime_kind="docker",
+                    runtime_kind=self._runtime_kind,
                     image_digest=self._docker.config.image,
                     resource_profile_id=self._resource_profile_id,
                     state="creating",

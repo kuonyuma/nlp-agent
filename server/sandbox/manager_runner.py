@@ -15,11 +15,11 @@ from server.infrastructure.mysql.config import DatabaseConfig
 from server.infrastructure.mysql.engine import create_engine, create_session_factory
 
 from .commands import create_sandbox_manager_command_store
-from .docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 from .manager import WarmPoolManager
 from .manager_rpc import create_sandbox_manager_rpc_server
 from .optimization import AdaptivePoolPolicy
 from .metrics import create_sandbox_adaptive_state_store, create_sandbox_metrics_store
+from .runtime_factory import create_runtime_adapter
 
 
 async def run_forever() -> None:
@@ -37,9 +37,15 @@ async def run_forever() -> None:
         else None
     )
     metrics_store = create_sandbox_metrics_store() if settings.NLP_AGENT_SANDBOX_ADAPTIVE_POOL_ENABLED else None
+    runtime = create_runtime_adapter(
+        backend=settings.NLP_AGENT_SANDBOX_RUNTIME_BACKEND,
+        image=image,
+        kernel_image=settings.NLP_AGENT_SANDBOX_FIRECRACKER_KERNEL_IMAGE.strip() or None,
+        rootfs_image=settings.NLP_AGENT_SANDBOX_FIRECRACKER_ROOTFS_IMAGE.strip() or None,
+    )
     manager = WarmPoolManager(
         session_factory=create_session_factory(engine),
-        docker=DockerRuntimeAdapter(DockerRuntimeConfig(image=image)),
+        docker=runtime,
         resource_profile_id="python-base",
         ready_target=target,
         adaptive_policy=(
