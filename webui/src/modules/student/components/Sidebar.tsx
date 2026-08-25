@@ -70,6 +70,15 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
     ];
   }, [preferences.categories, preferences.sessions, query, showArchived, t, visible]);
   useEffect(() => {
+  const hasArchivedSessions = sessions.some(
+    (session) => preferences.sessions[session.session_id]?.archived,
+  );
+
+  if (showArchived && !hasArchivedSessions) {
+    setShowArchived(false);
+  }
+}, [preferences.sessions, sessions, showArchived]);
+  useEffect(() => {
     const closeOpenMenus = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
