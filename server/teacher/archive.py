@@ -7,12 +7,14 @@ decides which existing catalogue points the package is allowed to update.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import posixpath
 import re
 import stat
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import quote
@@ -137,21 +139,50 @@ def _manifest_pages(manifest: object) -> tuple[str, int, list[dict[str, object]]
     return title.strip(), 1, pages
 
 
-def _rewrite_local_images(content: str, *, file_name: str, files: set[str], workspace_id: str) -> tuple[str, list[str]]:
+def _asset_namespace(knowledge_point_id: str) -> str:
+    return hashlib.sha256(knowledge_point_id.encode("utf-8")).hexdigest()[:24]
+
+
+def _scoped_asset_path(knowledge_point_id: str, source_path: str) -> str:
+    return f"assets/pages/{_asset_namespace(knowledge_point_id)}/{source_path.removeprefix('assets/')}"
+
+
+def _rewrite_local_images(
+    content: str,
+    *,
+    file_name: str,
+    files: set[str],
+    workspace_id: str,
+    knowledge_point_id: str,
+) -> tuple[str, list[str], set[str]]:
     parent = posixpath.dirname(file_name)
     warnings: list[str] = []
+    referenced_assets: set[str] = set()
 
     def replace(match: re.Match[str]) -> str:
         raw_url = match.group(2) or match.group(3) or ""
         if raw_url.startswith(("/", "#", "http:", "https:", "//", "data:", "javascript:")):
             return match.group(0)
         asset_path = posixpath.normpath(posixpath.join(parent, raw_url))
+        if asset_path not in files and raw_url.startswith("assets/") and raw_url in files:
+            asset_path = raw_url
+        if asset_path not in files and not raw_url.startswith("../") and f"assets/{raw_url}" in files:
+            asset_path = f"assets/{raw_url}"
         if not asset_path.startswith("assets/") or asset_path not in files:
             raise ValueError(f"教材图片资源不存在或不在 assets/ 目录：{raw_url}")
-        api_url = f"/api/v1/learning/book/{quote(workspace_id, safe='')}/assets/{quote(asset_path, safe='/')}"
+        referenced_assets.add(asset_path)
+        stored_asset_path = _scoped_asset_path(knowledge_point_id, asset_path)
+        api_url = f"/api/v1/learning/book/{quote(workspace_id, safe='')}/assets/{quote(stored_asset_path, safe='/')}"
         return f"{match.group(1)}{api_url}{match.group(4)}"
 
-    return _IMAGE_RE.sub(replace, content), warnings
+    return _IMAGE_RE.sub(replace, content), warnings, referenced_assets
+
+
+def _read_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, *, label: str) -> bytes:
+    try:
+        return archive.read(info)
+    except (OSError, RuntimeError, EOFError, zlib.error, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+        raise ValueError(f"{label}无法读取") from error
 
 
 def parse_teacher_book_archive(file_name: str, archive_bytes: bytes, *, workspace_id: str) -> ParsedTeacherBookArchive:
@@ -187,30 +218,39 @@ def parse_teacher_book_archive(file_name: str, archive_bytes: bytes, *, workspac
     if "manifest.json" not in names:
         raise ValueError("教材压缩包根目录必须包含 manifest.json")
     try:
-        manifest = json.loads(archive.read(names["manifest.json"]).decode("utf-8-sig"))
+        manifest = json.loads(
+            _read_zip_entry(archive, names["manifest.json"], label="manifest.json ").decode("utf-8-sig")
+        )
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError) as error:
         raise ValueError("manifest.json 必须是 UTF-8 JSON") from error
     title, format_version, manifest_pages = _manifest_pages(manifest)
 
     contents: dict[str, bytes] = {}
-    assets: list[ArchiveAsset] = []
+    source_assets: dict[str, ArchiveAsset] = {}
     for name, info in names.items():
         if name == "manifest.json":
             continue
         suffix = PurePosixPath(name).suffix.lower()
+        if name.startswith("assets/"):
+            if suffix not in ALLOWED_ASSET_TYPES:
+                raise ValueError(f"教材压缩包包含不支持的文件：{name}")
+            if info.file_size > MAX_ASSET_BYTES:
+                raise ValueError(f"图片资源不能超过 5 MB：{name}")
+            source_assets[name] = ArchiveAsset(
+                name,
+                ALLOWED_ASSET_TYPES[suffix],
+                _read_zip_entry(archive, info, label=f"图片资源 {name} "),
+            )
+            continue
         if suffix == ".md":
             if info.file_size > MAX_MARKDOWN_BYTES:
                 raise ValueError(f"Markdown 文件不能超过 1 MB：{name}")
-            contents[name] = archive.read(info)
-            continue
-        if name.startswith("assets/") and suffix in ALLOWED_ASSET_TYPES:
-            if info.file_size > MAX_ASSET_BYTES:
-                raise ValueError(f"图片资源不能超过 5 MB：{name}")
-            assets.append(ArchiveAsset(name, ALLOWED_ASSET_TYPES[suffix], archive.read(info)))
+            contents[name] = _read_zip_entry(archive, info, label=f"Markdown 文件 {name} ")
             continue
         raise ValueError(f"教材压缩包包含不支持的文件：{name}")
 
     pages: list[ArchivePage] = []
+    page_assets: dict[tuple[str, str], ArchiveAsset] = {}
     for entry in manifest_pages:
         file_name = _safe_zip_path(str(entry["file"]))
         raw = contents.get(file_name)
@@ -221,12 +261,21 @@ def parse_teacher_book_archive(file_name: str, archive_bytes: bytes, *, workspac
         except UnicodeDecodeError as error:
             raise ValueError(f"Markdown 必须使用 UTF-8 编码：{file_name}") from error
         normalized = normalize_teacher_markdown(PurePosixPath(file_name).name, markdown)
-        rewritten, image_warnings = _rewrite_local_images(
+        rewritten, image_warnings, referenced_assets = _rewrite_local_images(
             normalized.content_markdown,
             file_name=file_name,
             files=set(names),
             workspace_id=workspace_id,
+            knowledge_point_id=str(entry["knowledge_point_id"]),
         )
+        for source_path in referenced_assets:
+            source_asset = source_assets[source_path]
+            stored_path = _scoped_asset_path(str(entry["knowledge_point_id"]), source_path)
+            page_assets[(str(entry["knowledge_point_id"]), source_path)] = ArchiveAsset(
+                stored_path,
+                source_asset.media_type,
+                source_asset.content,
+            )
         pages.append(
             ArchivePage(
                 topic_id=str(entry["topic_id"]),
@@ -241,4 +290,9 @@ def parse_teacher_book_archive(file_name: str, archive_bytes: bytes, *, workspac
                 warnings=[*normalized.warnings, *image_warnings],
             )
         )
-    return ParsedTeacherBookArchive(title=title, format_version=format_version, pages=pages, assets=assets)
+    return ParsedTeacherBookArchive(
+        title=title,
+        format_version=format_version,
+        pages=pages,
+        assets=list(page_assets.values()),
+    )

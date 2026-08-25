@@ -132,6 +132,15 @@ function isSameOriginMarkdownLink(href: string | undefined): href is string {
   }
 }
 
+function isSafeMarkdownImage(src: string | undefined): src is string {
+  if (!src || src.startsWith("#") || /^data:/i.test(src)) return false;
+  try {
+    return new URL(src, window.location.href).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 /** Internal protocol metadata is parsed by the gateway and must never be shown or copied as lesson content. */
 export function stripInternalChatMetadata(content: string): string {
   return content.replace(/\s*<!--\s*guided-result\s*:\s*(?:\{[\s\S]*?\}\s*-->|[\s\S]*$)/gi, "").trimEnd();
@@ -164,6 +173,9 @@ export function MarkdownContent({ children, streaming = false, headingIds, codeA
           a: ({ children: value, href, ...props }) => isSameOriginMarkdownLink(href)
             ? <a {...props} href={href}>{value}</a>
             : <span className="external-link-removed">{value}</span>,
+          img: ({ src, alt, ...props }) => isSafeMarkdownImage(src)
+            ? <img {...props} src={src} alt={alt ?? ""} />
+            : <span className="external-link-removed">{alt || "图片资源不可用"}</span>,
         }}
       >
         {normalizeLatexDelimiters(stripInternalChatMetadata(children) || (streaming ? "" : "暂无内容"))}

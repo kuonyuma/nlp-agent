@@ -5,7 +5,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { api } from "@/platform/http/api";
 import type { LearningBookNavigationItem, LearningBookPage } from "@/shared/types";
 
-import { indexMarkdownHeadings } from "./knowledgeBook";
+import { indexMarkdownHeadings, readKnowledgeBookUrl, replaceKnowledgeBookUrl } from "./knowledgeBook";
 import { MarkdownContent } from "./MarkdownContent";
 
 interface TopicGroup {
@@ -81,11 +81,6 @@ function readBookViewState(workspaceId: string): BookViewState {
   }
 }
 
-function readBookDeepLink(): { pointId: string | null; heading: string | null } {
-  const params = new URLSearchParams(window.location.search);
-  return { pointId: params.get("bookPoint"), heading: params.get("bookHeading") };
-}
-
 function groupNavigation(items: LearningBookNavigationItem[]): TopicGroup[] {
   const groups = new Map<string, TopicGroup>();
   for (const item of items) {
@@ -97,6 +92,10 @@ function groupNavigation(items: LearningBookNavigationItem[]): TopicGroup[] {
     ...group,
     items: [...group.items].sort((left, right) => left.sort_order - right.sort_order || left.title.localeCompare(right.title, "zh-CN")),
   }));
+}
+
+function orderNavigation(items: LearningBookNavigationItem[]): LearningBookNavigationItem[] {
+  return groupNavigation(items).flatMap((group) => group.items);
 }
 
 function scrollToHeading(id: string) {
@@ -122,7 +121,7 @@ function keepFocusInDrawer(event: ReactKeyboardEvent<HTMLElement>) {
 
 export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: { workspaceId: string; onAskNova?: (prompt: string) => void; onOpenInSandbox?: (code: string, language: string) => void }) {
   const [initialViewState] = useState(() => readBookViewState(workspaceId));
-  const [initialDeepLink] = useState(readBookDeepLink);
+  const [initialDeepLink] = useState(() => readKnowledgeBookUrl(window.location.search));
   const [navigation, setNavigation] = useState<LearningBookNavigationItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialDeepLink.pointId ?? initialViewState.selectedId);
   const [page, setPage] = useState<LearningBookPage | null>(null);
@@ -151,6 +150,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   const scrollPositionsRef = useRef(initialViewState.scrollPositions);
   const scrollPersistTimer = useRef<number | null>(null);
   const topicGroups = useMemo(() => groupNavigation(navigation), [navigation]);
+  const orderedNavigation = useMemo(() => orderNavigation(navigation), [navigation]);
   const visiblePage = page?.knowledge_point_id === selectedId ? page : null;
   const headingIndex = useMemo(() => indexMarkdownHeadings(visiblePage?.content_markdown ?? ""), [visiblePage?.content_markdown]);
   const filteredTopicGroups = useMemo(() => {
@@ -199,10 +199,11 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     try {
       const response = await api.getLearningBookNavigation(workspaceId);
       setNavigation(response.items);
-      setSelectedId((current) => current && response.items.some((item) => item.knowledge_point_id === current) ? current : response.items[0]?.knowledge_point_id ?? null);
+      const orderedItems = orderNavigation(response.items);
+      setSelectedId((current) => current && response.items.some((item) => item.knowledge_point_id === current) ? current : orderedItems[0]?.knowledge_point_id ?? null);
       setExpandedTopics((current) => {
         const next = new Set(current);
-        if (!next.size && response.items[0]) next.add(response.items[0].topic_id);
+        if (!next.size && orderedItems[0]) next.add(orderedItems[0].topic_id);
         return next;
       });
     } catch (cause) {
@@ -218,11 +219,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   }, [loadNavigation]);
 
   useEffect(() => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("tool", "knowledge-book");
-    if (selectedId) url.searchParams.set("bookPoint", selectedId);
-    else url.searchParams.delete("bookPoint");
-    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    replaceKnowledgeBookUrl({ pointId: selectedId });
   }, [selectedId]);
 
   useEffect(() => {
@@ -272,12 +269,12 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   }, [loadingPage, visiblePage]);
 
   useEffect(() => {
-    if (!visiblePage || loadingPage || !initialDeepLink.heading || !headingIndex.headings.length) return undefined;
-    const target = headingIndex.headings.find((heading) => heading.id === initialDeepLink.heading || heading.text === initialDeepLink.heading);
+    if (!visiblePage || loadingPage || !initialDeepLink.headingId || (initialDeepLink.pointId && initialDeepLink.pointId !== visiblePage.knowledge_point_id) || !headingIndex.headings.length) return undefined;
+    const target = headingIndex.headings.find((heading) => heading.id === initialDeepLink.headingId || heading.text === initialDeepLink.headingId);
     if (!target) return undefined;
     const timer = window.setTimeout(() => scrollToHeading(target.id), 0);
     return () => window.clearTimeout(timer);
-  }, [headingIndex, initialDeepLink.heading, loadingPage, visiblePage]);
+  }, [headingIndex, initialDeepLink.headingId, initialDeepLink.pointId, loadingPage, visiblePage]);
 
   useEffect(() => {
     if (!leftOpen && !rightOpen && !selectionPrompt) return undefined;
@@ -322,7 +319,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     return () => window.clearTimeout(timer);
   }, [rightOpen]);
 
-  const selectedIndex = navigation.findIndex((item) => item.knowledge_point_id === selectedId);
+  const selectedIndex = orderedNavigation.findIndex((item) => item.knowledge_point_id === selectedId);
   const updateSelectionPrompt = () => {
     window.setTimeout(() => {
       if (!onAskNova || !visiblePage) return;
@@ -365,11 +362,11 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     setRightOpen(false);
     setSelectionPrompt(null);
     window.getSelection()?.removeAllRanges();
-    const url = new URL(window.location.href);
-    url.searchParams.set("tool", "knowledge-book");
-    url.searchParams.set("bookPoint", id);
-    url.searchParams.delete("bookHeading");
-    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    replaceKnowledgeBookUrl({ pointId: id, headingId: null });
+  };
+  const selectHeading = (heading: { id: string; text: string }) => {
+    replaceKnowledgeBookUrl({ pointId: selectedId, headingId: heading.id });
+    scrollToHeading(heading.id);
   };
   const askSelection = () => {
     if (!onAskNova || !selectionPrompt || !visiblePage) return;
@@ -405,10 +402,10 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
         <div className="knowledge-book-page-scroll" ref={contentRef} onScroll={handlePageScroll}>
           {loadingPage ? <div className="knowledge-book-state"><span className="spin">⟳</span><p>正在打开知识点……</p></div> : visiblePage ? <article ref={articleRef} className="knowledge-book-article" onPointerUp={updateSelectionPrompt} onKeyUp={updateSelectionPrompt}>
             <header><p>{visiblePage.topic_name}</p><h1 ref={pageTitleRef} tabIndex={-1}>{visiblePage.title}</h1><small>教师教材 · 第 {selectedIndex + 1} 节</small></header>
-            <MarkdownContent headingIds={headingIndex.headingIds} codeActions={onAskNova || onOpenInSandbox ? { onAskNova: onAskNova ? (code, language) => onAskNova(buildCodePrompt(visiblePage, code, language, headingIndex.headings.find((item) => item.id === activeHeadingId)?.text)) : undefined, onOpenInSandbox } : undefined}>{visiblePage.content_markdown}</MarkdownContent>
+            <MarkdownContent headingIds={headingIndex.headingIds} codeActions={{ onAskNova: onAskNova ? (code, language) => onAskNova(buildCodePrompt(visiblePage, code, language, headingIndex.headings.find((item) => item.id === activeHeadingId)?.text)) : undefined, onOpenInSandbox }}>{visiblePage.content_markdown}</MarkdownContent>
             <footer className="knowledge-book-page-nav">
-              <button type="button" disabled={selectedIndex <= 0} onClick={() => selectKnowledgePoint(navigation[selectedIndex - 1].knowledge_point_id)}>上一节</button>
-              <button type="button" disabled={selectedIndex < 0 || selectedIndex >= navigation.length - 1} onClick={() => selectKnowledgePoint(navigation[selectedIndex + 1].knowledge_point_id)}>下一节</button>
+              <button type="button" disabled={selectedIndex <= 0} onClick={() => selectKnowledgePoint(orderedNavigation[selectedIndex - 1].knowledge_point_id)}>上一节</button>
+              <button type="button" disabled={selectedIndex < 0 || selectedIndex >= orderedNavigation.length - 1} onClick={() => selectKnowledgePoint(orderedNavigation[selectedIndex + 1].knowledge_point_id)}>下一节</button>
             </footer>
           </article> : <div className="knowledge-book-state"><Menu size={26} /><p>{loadingNavigation ? "正在加载教材……" : "从左侧目录选择一个知识点开始阅读。"}</p></div>}
         </div>
@@ -416,7 +413,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
       <aside ref={rightDrawerRef} onKeyDown={keepFocusInDrawer} className={["knowledge-book-toc", rightOpen && "drawer-open", rightCollapsed && "collapsed"].filter(Boolean).join(" ")} aria-label="本页目录">
         <button type="button" className="knowledge-book-collapsed-toggle" aria-label="展开本页目录" onClick={() => setRightCollapsed(false)}><PanelRightClose size={16} /></button>
         <div className="knowledge-book-sidebar-heading"><strong>本页目录</strong><button type="button" aria-label="收起本页目录" onClick={() => { setRightOpen(false); setRightCollapsed(true); }}><X size={15} /></button></div>
-        {headingIndex.headings.length ? <nav>{headingIndex.headings.map((heading) => <button type="button" key={heading.id} className={activeHeadingId === heading.id ? "active" : ""} style={{ paddingLeft: `${12 + (heading.level - 2) * 12}px` }} onClick={() => scrollToHeading(heading.id)}>{heading.text}</button>)}</nav> : <p className="knowledge-book-muted">本页暂无小标题。</p>}
+        {headingIndex.headings.length ? <nav>{headingIndex.headings.map((heading) => <button type="button" key={heading.id} className={activeHeadingId === heading.id ? "active" : ""} style={{ paddingLeft: `${12 + (heading.level - 2) * 12}px` }} onClick={() => selectHeading(heading)}>{heading.text}</button>)}</nav> : <p className="knowledge-book-muted">本页暂无小标题。</p>}
       </aside>
     </div>
     {selectionPrompt && onAskNova && <button ref={selectionActionRef} type="button" className="knowledge-book-selection-action" style={{ top: `${selectionPrompt.top}px`, left: `${selectionPrompt.left}px` }} onMouseDown={(event) => event.preventDefault()} onClick={askSelection}>向 Nova 提问</button>}

@@ -28,8 +28,8 @@ def upgrade() -> None:
         sa.Column("published_content", LONGBLOB(), nullable=True),
         sa.Column("size_bytes", BIGINT(unsigned=True), nullable=False),
         sa.Column("sha256", sa.String(64, collation="ascii_bin"), nullable=False),
-        sa.Column("created_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("utc_timestamp(6)")),
-        sa.Column("updated_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("utc_timestamp(6)")),
+        sa.Column("created_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("UTC_TIMESTAMP(6)")),
+        sa.Column("updated_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("UTC_TIMESTAMP(6)")),
         sa.PrimaryKeyConstraint("workspace_id", "asset_path", name="pk_nlp_knowledge_book_assets"),
         sa.ForeignKeyConstraint(
             ["workspace_id"],

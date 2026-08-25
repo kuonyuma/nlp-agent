@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { indexMarkdownHeadings } from "./knowledgeBook";
+import { indexMarkdownHeadings, readKnowledgeBookUrl } from "./knowledgeBook";
 
 describe("knowledge book Markdown headings", () => {
   it("ignores fenced code and creates duplicate-safe anchors", () => {
@@ -12,5 +12,13 @@ describe("knowledge book Markdown headings", () => {
 
   it("falls back to a readable section id for symbol-only headings", () => {
     expect(indexMarkdownHeadings("## !!!").headings[0]).toMatchObject({ text: "!!!", id: "section" });
+  });
+
+  it("reads a shareable reader URL without changing the active chat context", () => {
+    expect(readKnowledgeBookUrl("?tool=knowledge-book&bookPoint=softmax&bookHeading=核心概念")).toEqual({
+      tool: "knowledge-book",
+      pointId: "softmax",
+      headingId: "核心概念",
+    });
   });
 });

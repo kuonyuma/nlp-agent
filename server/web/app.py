@@ -23,6 +23,7 @@ from core.authorization_audit import begin as begin_authorization_audit, end as 
 from gateway.contracts import (
     GatewayNotStartedError,
     InjectMessageRequest,
+    KnowledgeBookRevisionConflictError,
     ResourceNotFoundError,
     SubmitTurnRequest,
     TurnConflictError,
@@ -1267,6 +1268,8 @@ def create_app(
             return await teacher_service.update_teacher_book_page(
                 principal, request.app.state.gateway, workspace_id, knowledge_point_id, body
             )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_page_conflict", title="教材页面版本冲突", detail=str(error))
         except ValueError as error:
             return _problem(request, status_code=422, code="invalid_book_page", title="教材页面无效", detail=str(error))
 
@@ -1283,6 +1286,8 @@ def create_app(
             return await teacher_service.publish_teacher_book_page(
                 principal, request.app.state.gateway, workspace_id, knowledge_point_id, body
             )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_page_conflict", title="教材页面版本冲突", detail=str(error))
         except ValueError as error:
             return _problem(request, status_code=422, code="invalid_book_page", title="教材页面无法发布", detail=str(error))
 
@@ -1311,6 +1316,8 @@ def create_app(
             return await teacher_service.apply_teacher_book_import(
                 principal, request.app.state.gateway, workspace_id, body
             )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_page_conflict", title="教材页面版本冲突", detail=str(error))
         except ValueError as error:
             return _problem(request, status_code=422, code="invalid_book_import", title="教材导入文件无效", detail=str(error))
 
@@ -1341,13 +1348,14 @@ def create_app(
             return await teacher_service.apply_teacher_book_archive_import(
                 principal, request.app.state.gateway, workspace_id, body
             )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_import_conflict", title="教材批量导入版本冲突", detail=str(error))
         except ValueError as error:
-            conflict = "版本冲突" in str(error)
             return _problem(
                 request,
-                status_code=409 if conflict else 422,
-                code="book_import_conflict" if conflict else "invalid_book_archive",
-                title="教材批量导入版本冲突" if conflict else "教材批量包无效",
+                status_code=422,
+                code="invalid_book_archive",
+                title="教材批量包无效",
                 detail=str(error),
             )
 

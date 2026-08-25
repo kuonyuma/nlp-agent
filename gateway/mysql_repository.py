@@ -17,7 +17,14 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection
 
 from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
-from gateway.contracts import GatewayEvent, GatewayEventType, TeachingConfigurationError, TurnRecord, TurnStatus
+from gateway.contracts import (
+    GatewayEvent,
+    GatewayEventType,
+    KnowledgeBookRevisionConflictError,
+    TeachingConfigurationError,
+    TurnRecord,
+    TurnStatus,
+)
 
 
 def _now() -> datetime:
@@ -632,7 +639,7 @@ class MySQLGatewayRepository:
     def _check_knowledge_page_revision(current: dict[str, Any] | None, expected_revision: int | None) -> int:
         revision = int(current["revision"]) if current is not None else 0
         if expected_revision is not None and expected_revision != revision:
-            raise ValueError(f"知识点教材版本冲突：当前版本为 {revision}")
+            raise KnowledgeBookRevisionConflictError(f"知识点教材版本冲突：当前版本为 {revision}")
         return revision
 
     def update_knowledge_page(

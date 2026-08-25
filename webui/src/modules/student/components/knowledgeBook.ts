@@ -9,6 +9,35 @@ export interface MarkdownHeadingIndex {
   headingIds: string[];
 }
 
+export interface KnowledgeBookUrlState {
+  tool: string | null;
+  pointId: string | null;
+  headingId: string | null;
+}
+
+export function readKnowledgeBookUrl(search: string): KnowledgeBookUrlState {
+  const params = new URLSearchParams(search);
+  return {
+    tool: params.get("tool"),
+    pointId: params.get("bookPoint"),
+    headingId: params.get("bookHeading"),
+  };
+}
+
+export function replaceKnowledgeBookUrl({ pointId, headingId }: { pointId?: string | null; headingId?: string | null }): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set("tool", "knowledge-book");
+  if (pointId !== undefined) {
+    if (pointId) url.searchParams.set("bookPoint", pointId);
+    else url.searchParams.delete("bookPoint");
+  }
+  if (headingId !== undefined) {
+    if (headingId) url.searchParams.set("bookHeading", headingId);
+    else url.searchParams.delete("bookHeading");
+  }
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 function stripHeadingMarkup(value: string): string {
   return value
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")

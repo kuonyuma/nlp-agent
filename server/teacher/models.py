@@ -182,9 +182,16 @@ class TeacherBookImportPreviewRequest(StrictTeacherModel):
     content_markdown: str = Field(max_length=200_000)
 
 
+class TeacherBookAssetInput(StrictTeacherModel):
+    asset_path: str = Field(min_length=1, max_length=256)
+    media_type: str = Field(min_length=1, max_length=64)
+    content_base64: str = Field(min_length=1, max_length=7_000_000)
+
+
 class TeacherBookImportApplyRequest(TeacherBookImportPreviewRequest):
     knowledge_point_id: str = Field(min_length=1, max_length=64)
     expected_revision: int = Field(default=0, ge=0)
+    assets: list[TeacherBookAssetInput] = Field(default_factory=list, max_length=50)
 
 
 class TeacherBookImportPreview(StrictTeacherModel):
@@ -223,4 +230,4 @@ class TeacherBookArchiveImportPreview(StrictTeacherModel):
 
 
 class TeacherBookArchiveImportApplyRequest(TeacherBookArchiveImportPreviewRequest):
-    expected_revisions: dict[str, int] = Field(default_factory=dict, max_length=1000)
+    expected_revisions: dict[str, int] = Field(max_length=1000)

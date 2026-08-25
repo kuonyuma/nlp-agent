@@ -89,4 +89,11 @@ describe("MarkdownContent LaTeX delimiters", () => {
     await user.click(screen.getByRole("button", { name: "在沙箱中打开" }));
     expect(openInSandbox).toHaveBeenCalledWith("print('hello')", "python");
   });
+
+  it("keeps the copy action when Nova actions are unavailable", () => {
+    render(<MarkdownContent codeActions={{ }}>{"```python\nprint('hello')\n```"}</MarkdownContent>);
+
+    expect(screen.getByRole("button", { name: "复制 python 代码" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "问 Nova" })).not.toBeInTheDocument();
+  });
 });

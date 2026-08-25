@@ -4,11 +4,19 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import posixpath
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.identity import AuthenticatedPrincipal
 from core.rbac import Permission, authorization_service
+from server.teacher.archive import (
+    ALLOWED_ASSET_TYPES,
+    MAX_ASSET_BYTES,
+    _rewrite_local_images,
+    _safe_zip_path,
+    _scoped_asset_path,
+)
 from server.teacher.analytics import build_analytics
 from server.teacher.models import (
     ExerciseBlueprint,
@@ -179,7 +187,7 @@ class TeacherService:
                         knowledge_point_id=point.id,
                         title=point.name,
                         sort_order=point.sort_order,
-                        revision=int(row["revision"]),
+                        revision=int(row["published_revision"]),
                     ).model_dump(mode="json")
                 )
         return {"workspace_id": workspace_id, "items": items}
@@ -260,10 +268,52 @@ class TeacherService:
         )
         topic, point = self._catalog_point(catalog, body.knowledge_point_id)
         normalized = normalize_teacher_markdown(body.file_name, body.content_markdown)
-        row = await gateway.update_knowledge_page(
-            principal, workspace_id, body.knowledge_point_id, normalized.content_markdown,
-            expected_revision=body.expected_revision,
+        uploaded_assets: dict[str, tuple[str, bytes]] = {}
+        for item in body.assets:
+            asset_path = _safe_zip_path(item.asset_path)
+            if not asset_path.startswith("assets/"):
+                raise ValueError("单篇 Markdown 的图片资源必须位于 assets/ 目录")
+            suffix = posixpath.splitext(asset_path)[1].lower()
+            expected_media_type = ALLOWED_ASSET_TYPES.get(suffix)
+            if expected_media_type is None or item.media_type != expected_media_type:
+                raise ValueError(f"不支持的教材图片资源：{asset_path}")
+            if asset_path in uploaded_assets:
+                raise ValueError(f"教材图片资源路径重复：{asset_path}")
+            try:
+                content = base64.b64decode(item.content_base64, validate=True)
+            except (binascii.Error, ValueError) as error:
+                raise ValueError(f"教材图片资源编码无效：{asset_path}") from error
+            if not content or len(content) > MAX_ASSET_BYTES:
+                raise ValueError(f"图片资源不能超过 5 MB：{asset_path}")
+            uploaded_assets[asset_path] = (item.media_type, content)
+
+        rewritten, _image_warnings, referenced_assets = _rewrite_local_images(
+            normalized.content_markdown,
+            file_name="page.md",
+            files=set(uploaded_assets),
+            workspace_id=workspace_id,
+            knowledge_point_id=body.knowledge_point_id,
         )
+        assets = [
+            {
+                "asset_path": _scoped_asset_path(body.knowledge_point_id, source_path),
+                "media_type": uploaded_assets[source_path][0],
+                "content": uploaded_assets[source_path][1],
+                "sha256": hashlib.sha256(uploaded_assets[source_path][1]).hexdigest(),
+            }
+            for source_path in referenced_assets
+        ]
+        rows = await gateway.apply_knowledge_book_import(
+            principal,
+            workspace_id,
+            [{
+                "knowledge_point_id": body.knowledge_point_id,
+                "expected_revision": body.expected_revision,
+                "content_markdown": rewritten,
+            }],
+            assets,
+        )
+        row = rows[0]
         return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
 
     @staticmethod
@@ -381,10 +431,17 @@ class TeacherService:
             principal, gateway, workspace_id, body.file_name, body.archive_base64
         )
         expected_by_point = body.expected_revisions
+        missing_revisions = [
+            item.knowledge_point_id
+            for item in preview.items
+            if item.action != "unchanged" and item.knowledge_point_id not in expected_by_point
+        ]
+        if missing_revisions:
+            raise ValueError(f"教材批量导入缺少版本号：{', '.join(missing_revisions)}")
         pages = [
             {
                 "knowledge_point_id": item.knowledge_point_id,
-                "expected_revision": int(expected_by_point.get(item.knowledge_point_id, item.expected_revision)),
+                "expected_revision": int(expected_by_point[item.knowledge_point_id]),
                 "content_markdown": item.content_markdown,
             }
             for item in preview.items

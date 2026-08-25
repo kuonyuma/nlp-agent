@@ -99,4 +99,30 @@ describe("KnowledgeBookPanel", () => {
     expect(screen.getAllByRole("button", { name: "句法分析" }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "词法分析" })).not.toBeInTheDocument();
   });
+
+  it("writes the selected heading into the shareable URL", async () => {
+    const user = userEvent.setup();
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    await screen.findByRole("heading", { name: "词法分析" });
+    await user.click(screen.getByRole("button", { name: "核心概念" }));
+
+    expect(new URLSearchParams(window.location.search).get("bookHeading")).toBe("核心概念");
+  });
+
+  it("uses catalog sort order for previous and next navigation", async () => {
+    const user = userEvent.setup();
+    const unsortedNavigation = [
+      { ...navigation[0], sort_order: 2 },
+      { ...navigation[1], sort_order: 1 },
+    ];
+    vi.mocked(api.getLearningBookNavigation).mockResolvedValue({ workspace_id: "workspace-1", items: unsortedNavigation });
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    await screen.findByRole("heading", { name: "句法分析" });
+    expect(screen.getByRole("button", { name: "上一节" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "下一节" }));
+
+    await waitFor(() => expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-1"));
+  });
 });

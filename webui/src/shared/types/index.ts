@@ -106,6 +106,11 @@ export interface TeacherBookImportPreview {
   removed_frameworks: string[];
   warnings: string[];
 }
+export interface TeacherBookAssetInput {
+  asset_path: string;
+  media_type: string;
+  content_base64: string;
+}
 
 export interface TeacherBookArchiveItemPreview {
   topic_id: string;

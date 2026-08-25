@@ -17,6 +17,7 @@ from urllib.parse import unquote
 from gateway.contracts import (
     GatewayEvent,
     GatewayEventType,
+    KnowledgeBookRevisionConflictError,
     TeachingConfigurationError,
     GuidedSessionRef,
     TurnRecord,
@@ -832,7 +833,7 @@ class GatewayRepository:
     def _check_knowledge_page_revision(current: dict[str, Any] | None, expected_revision: int | None) -> int:
         revision = int(current["revision"]) if current is not None else 0
         if expected_revision is not None and expected_revision != revision:
-            raise ValueError(f"知识点教材版本冲突：当前版本为 {revision}")
+            raise KnowledgeBookRevisionConflictError(f"知识点教材版本冲突：当前版本为 {revision}")
         return revision
 
     def update_knowledge_page(

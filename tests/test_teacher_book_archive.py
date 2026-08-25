@@ -6,6 +6,7 @@ import pytest
 
 from gateway.repository import GatewayRepository
 from server.teacher.archive import parse_teacher_book_archive
+from server.teacher.content import normalize_teacher_markdown
 
 
 def make_archive(files: dict[str, bytes]) -> bytes:
@@ -16,11 +17,12 @@ def make_archive(files: dict[str, bytes]) -> bytes:
     return stream.getvalue()
 
 
-def manifest(file_name: str = "topics/basic/attention.md") -> bytes:
+def manifest(file_name: str = "topics/basic/attention.md", *, points: list[dict[str, str]] | None = None) -> bytes:
+    knowledge_points = points or [{"id": "attention", "name": "注意力", "file": file_name}]
     return json.dumps({
         "format_version": 1,
         "title": "Nova 教材",
-        "topics": [{"id": "basic", "name": "基础", "knowledge_points": [{"id": "attention", "name": "注意力", "file": file_name}]}],
+        "topics": [{"id": "basic", "name": "基础", "knowledge_points": knowledge_points}],
     }, ensure_ascii=False).encode("utf-8")
 
 
@@ -44,8 +46,31 @@ def test_archive_parser_filters_frameworks_and_rewrites_local_images():
     assert parsed.pages[0].knowledge_point_id == "attention"
     assert "tf.nn.softmax" not in parsed.pages[0].content_markdown
     assert "torch.softmax" in parsed.pages[0].content_markdown
-    assert "/api/v1/learning/book/workspace-1/assets/assets/attention.png" in parsed.pages[0].content_markdown
+    assert "/api/v1/learning/book/workspace-1/assets/assets/pages/" in parsed.pages[0].content_markdown
+    assert parsed.assets[0].path.startswith("assets/pages/")
     assert parsed.assets[0].media_type == "image/png"
+
+
+def test_archive_parser_scopes_same_asset_name_to_each_knowledge_point():
+    parsed = parse_teacher_book_archive(
+        "nova-book.zip",
+        make_archive(
+            {
+                "manifest.json": manifest(points=[
+                    {"id": "attention", "name": "注意力", "file": "topics/basic/attention.md"},
+                    {"id": "softmax", "name": "Softmax", "file": "topics/basic/softmax.md"},
+                ]),
+                "topics/basic/attention.md": b"# attention\n\n![image](../../assets/shared.png)",
+                "topics/basic/softmax.md": b"# softmax\n\n![image](../../assets/shared.png)",
+                "assets/shared.png": b"png-bytes",
+            }
+        ),
+        workspace_id="workspace-1",
+    )
+
+    assert len(parsed.assets) == 2
+    assert len({asset.path for asset in parsed.assets}) == 2
+    assert parsed.pages[0].content_markdown != parsed.pages[1].content_markdown
 
 
 @pytest.mark.parametrize(
@@ -79,6 +104,28 @@ def test_archive_parser_rejects_unsupported_svg_resource():
             ),
             workspace_id="workspace-1",
         )
+
+
+def test_teacher_markdown_rejects_external_reference_resources():
+    with pytest.raises(ValueError, match="外部链接"):
+        normalize_teacher_markdown(
+            "attention.md",
+            "![外部图片][remote]\n\n[remote]: https://example.com/image.png",
+        )
+
+
+def test_archive_parser_reports_corrupt_entry_as_validation_error():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("manifest.json", manifest())
+        archive.writestr("topics/basic/attention.md", b"# attention")
+    corrupted = bytearray(stream.getvalue())
+    offset = corrupted.find(b"# attention")
+    assert offset >= 0
+    corrupted[offset] ^= 0x01
+
+    with pytest.raises(ValueError, match="无法读取"):
+        parse_teacher_book_archive("nova-book.zip", bytes(corrupted), workspace_id="workspace-1")
 
 
 def test_repository_batch_import_is_atomic_and_persists_assets(tmp_path):

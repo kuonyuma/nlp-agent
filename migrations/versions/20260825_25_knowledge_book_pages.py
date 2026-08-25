@@ -33,8 +33,8 @@ def upgrade() -> None:
         sa.Column("published_markdown", MEDIUMTEXT(), nullable=True),
         sa.Column("revision", BIGINT(unsigned=True), nullable=False, server_default="0"),
         sa.Column("published_revision", BIGINT(unsigned=True), nullable=True),
-        sa.Column("created_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("utc_timestamp(6)")),
-        sa.Column("updated_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("utc_timestamp(6)")),
+        sa.Column("created_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("UTC_TIMESTAMP(6)")),
+        sa.Column("updated_at", DATETIME(fsp=6), nullable=False, server_default=sa.text("UTC_TIMESTAMP(6)")),
         sa.UniqueConstraint(
             "workspace_id",
             "knowledge_point_id",

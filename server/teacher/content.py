@@ -15,8 +15,12 @@ _UNSAFE_MARKUP_RE = re.compile(
     re.IGNORECASE,
 )
 _EXTERNAL_RESOURCE_RE = re.compile(
-    r"!?\[[^\]]*\]\(\s*(?:https?:|//|data:|javascript:)",
+    r"!?\[[^\]]*\]\(\s*<?(?:https?:|//|data:|javascript:)",
     re.IGNORECASE,
+)
+_EXTERNAL_REFERENCE_RE = re.compile(
+    r"^\s{0,3}\[[^\]]+\]:\s*<?(?:https?:|//|data:|javascript:)",
+    re.IGNORECASE | re.MULTILINE,
 )
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})[ \t]+")
 MAX_MARKDOWN_BYTES = 1 * 1024 * 1024
@@ -118,7 +122,7 @@ def normalize_teacher_markdown(file_name: str, content_markdown: str) -> Teacher
         raise ValueError("教材导入只接受不含路径的 .md 文件")
     if _UNSAFE_MARKUP_RE.search(content_markdown):
         raise ValueError("教材 Markdown 不支持原始 HTML、脚本、嵌入或危险链接标记")
-    if _EXTERNAL_RESOURCE_RE.search(content_markdown):
+    if _EXTERNAL_RESOURCE_RE.search(content_markdown) or _EXTERNAL_REFERENCE_RE.search(content_markdown):
         raise ValueError("教材 Markdown 不支持外部链接或外部图片资源")
     if len(content_markdown.encode("utf-8")) > MAX_MARKDOWN_BYTES:
         raise ValueError("教材 Markdown 单文件不能超过 1 MB")
