@@ -35,6 +35,9 @@ async def test_database_scratch_does_not_require_interactive_lease() -> None:
         async def __aexit__(self, *_args):
             return False
 
+        def begin_nested(self):
+            return self
+
         async def get(self, model, identifier, **_kwargs):
             if model is SessionModel:
                 return SimpleNamespace(

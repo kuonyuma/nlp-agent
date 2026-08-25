@@ -24,6 +24,8 @@ from .contracts import SandboxScope
 
 REQUEST_STREAM = "nova:sandbox:manager:rpc:requests"
 RESPONSE_PREFIX = "nova:sandbox:manager:rpc:responses:"
+REQUEST_TTL_SECONDS = 60
+REQUEST_CLOCK_SKEW_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +97,14 @@ class RedisSandboxManagerRpcClient:
     async def _request(self, method: str, payload: dict[str, object]) -> dict[str, object]:
         request_id = uuid4().hex
         response_stream = f"{RESPONSE_PREFIX}{request_id}"
-        body = _json(payload)
+        issued_at = time.time()
+        body = _json(
+            {
+                **payload,
+                "issued_at": issued_at,
+                "expires_at": issued_at + REQUEST_TTL_SECONDS,
+            }
+        )
         await self._client.xadd(
             self._request_stream,
             {
@@ -266,6 +275,17 @@ class RedisSandboxManagerRpcServer:
             payload = json.loads(body)
             if not isinstance(payload, dict):
                 raise ValueError("Sandbox Manager RPC payload must be an object")
+            now = time.time()
+            issued_at = payload.get("issued_at")
+            expires_at = payload.get("expires_at")
+            if (
+                not isinstance(issued_at, (int, float))
+                or not isinstance(expires_at, (int, float))
+                or issued_at > now + REQUEST_CLOCK_SKEW_SECONDS
+                or expires_at <= now
+                or expires_at - issued_at > REQUEST_TTL_SECONDS + REQUEST_CLOCK_SKEW_SECONDS
+            ):
+                raise PermissionError("expired or invalid Sandbox Manager RPC request")
             result = await self._dispatch(method, payload)
             ok, encoded, error = "1", _json(result), ""
         except Exception as exc:

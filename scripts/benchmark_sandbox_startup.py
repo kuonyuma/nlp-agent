@@ -9,16 +9,138 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
+import os
 from pathlib import Path
 import sys
 from time import perf_counter
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+from server.sandbox.contracts import SandboxScope
+from server.sandbox.manager import WarmPoolManager
 from server.sandbox.optimization import PreloadCompatibility, check_preload_compatibility
+
+
+class ManagerClaimProbe:
+    """Real MySQL/Manager claim seam used by the Linux benchmark job."""
+
+    def __init__(self, *, engine, factory, manager, scope: SandboxScope, lease_id: str) -> None:
+        self.engine = engine
+        self.factory = factory
+        self.manager = manager
+        self.scope = scope
+        self.lease_id = lease_id
+
+    async def register_runtime(self, external_runtime_id: str) -> str:
+        from server.infrastructure.mysql.models import SandboxRuntimeInstanceModel
+        from server.sandbox.warm_pool import RuntimeState
+
+        runtime_id = str(uuid4())
+        async with self.factory.begin() as session:
+            session.add(
+                SandboxRuntimeInstanceModel(
+                    id=runtime_id,
+                    external_runtime_id=external_runtime_id,
+                    runtime_kind="docker",
+                    resource_profile_id="python-base",
+                    state=RuntimeState.READY_UNBOUND,
+                    generation=self.scope.generation,
+                )
+            )
+        return runtime_id
+
+    async def close(self) -> None:
+        await self.engine.dispose()
+
+
+async def create_manager_claim_probe(adapter: DockerRuntimeAdapter) -> ManagerClaimProbe:
+    from sqlalchemy import select
+
+    from server.infrastructure.mysql import DatabaseConfig, create_engine, create_session_factory
+    from server.infrastructure.mysql.models import (
+        SandboxEnvironmentModel,
+        SandboxLeaseModel,
+        SessionModel,
+        WorkspaceMemberModel,
+    )
+    from server.user.schemas import UserCreate
+    from server.user.service import UserService
+
+    database_url = os.getenv("NLP_AGENT_DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("NLP_AGENT_DATABASE_URL is required for real Manager claim benchmarks")
+    engine = create_engine(DatabaseConfig(database_url, pool_size=2, max_overflow=0))
+    factory = create_session_factory(engine)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    async with factory.begin() as session:
+        user = await UserService(session).create_user(
+            UserCreate(
+                username=f"benchmark{uuid4().hex[:12]}",
+                display_name="Sandbox benchmark",
+                password="InitialPw0rd1",
+            )
+        )
+        workspace_id = await session.scalar(
+            select(WorkspaceMemberModel.workspace_id).where(WorkspaceMemberModel.user_id == user.id)
+        )
+        session_id = str(uuid4())
+        environment_id = str(uuid4())
+        lease_id = str(uuid4())
+        session.add(
+            SessionModel(
+                id=session_id,
+                user_id=user.id,
+                workspace_id=workspace_id,
+                token_hash=f"benchmark-token-{session_id}",
+                csrf_hash=f"benchmark-csrf-{session_id}",
+                authorization_version=user.authorization_version,
+                expires_at=now.replace(microsecond=0) + timedelta(hours=1),
+            )
+        )
+        session.add(
+            SandboxEnvironmentModel(
+                id=environment_id,
+                owner_user_id=user.id,
+                resource_profile_id="python-base",
+                generation=1,
+            )
+        )
+        session.add(
+            SandboxLeaseModel(
+                id=lease_id,
+                environment_id=environment_id,
+                user_id=user.id,
+                auth_session_id=session_id,
+                workspace_id=workspace_id,
+                generation=1,
+                state="active",
+                expires_at=now.replace(microsecond=0) + timedelta(hours=1),
+            )
+        )
+        await session.flush()
+    scope = SandboxScope(
+        owner_user_id=str(user.id),
+        auth_session_id=session_id,
+        workspace_id=str(workspace_id),
+        generation=1,
+        lease_expires_at=now.replace(tzinfo=UTC) + timedelta(hours=1),
+    )
+    return ManagerClaimProbe(
+        engine=engine,
+        factory=factory,
+        manager=WarmPoolManager(
+            session_factory=factory,
+            docker=adapter,
+            resource_profile_id="python-base",
+            ready_target=0,
+        ),
+        scope=scope,
+        lease_id=lease_id,
+    )
 
 
 def preload_probe_source(modules: tuple[str, ...]) -> str:
@@ -52,8 +174,10 @@ async def benchmark(
     runtime_version: str = "nova-runtime",
     matrix_path: Path | None = None,
     update_matrix: bool = False,
+    measure_manager_claim: bool = False,
 ) -> dict[str, object]:
     adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image=image))
+    claim_probe = await create_manager_claim_probe(adapter) if measure_manager_claim else None
     samples: list[dict[str, object]] = []
     image_started = perf_counter()
     image_cached = await adapter.image_cached()
@@ -68,6 +192,7 @@ async def benchmark(
             probe = {"python_version": "unknown", "modules": {}}
         stages: dict[str, float | str] = {}
         warm_runtime_id: str | None = None
+        runtime_row_id: str | None = None
         try:
             stage_started = perf_counter()
             warm_runtime_id = await adapter.create_l1(name=f"nova-benchmark-{index + 1}")
@@ -85,18 +210,32 @@ async def benchmark(
             stages["kernel_ready_ms"] = round((perf_counter() - stage_started) * 1000, 2)
             if not ready:
                 raise TimeoutError("benchmark kernel did not become ready")
-            stage_started = perf_counter()
-            # In production this interval is the DB claim + ticket handoff;
-            # the benchmark records the isolated runtime handoff separately.
-            claimed_runtime_id = warm_runtime_id
-            stages["claim_ms"] = round((perf_counter() - stage_started) * 1000, 2)
-            stage_started = perf_counter()
-            first_output = await adapter.execute(
-                claimed_runtime_id,
-                source=preload_probe_source(modules),
-                timeout_seconds=15,
-                output_limit_bytes=1_000_000,
-            )
+            if claim_probe is not None:
+                runtime_row_id = await claim_probe.register_runtime(warm_runtime_id)
+                stage_started = perf_counter()
+                claim = await claim_probe.manager.claim(
+                    claim_probe.scope, lease_id=claim_probe.lease_id
+                )
+                stages["claim_ms"] = round((perf_counter() - stage_started) * 1000, 2)
+                if claim is None:
+                    raise RuntimeError("Manager claim returned no runtime")
+                stage_started = perf_counter()
+                first_output = await claim_probe.manager.execute_claimed(
+                    claim_probe.scope,
+                    lease_id=claim_probe.lease_id,
+                    runtime_id=str(claim.runtime.id),
+                    generation=claim.runtime.generation,
+                    nonce=claim.nonce,
+                    source=preload_probe_source(modules),
+                )
+            else:
+                stage_started = perf_counter()
+                first_output = await adapter.execute(
+                    warm_runtime_id,
+                    source=preload_probe_source(modules),
+                    timeout_seconds=15,
+                    output_limit_bytes=1_000_000,
+                )
             stages["first_output_ms"] = round((perf_counter() - stage_started) * 1000, 2)
             try:
                 probe = json.loads(str(first_output.get("stdout") or "").strip().splitlines()[-1])
@@ -105,6 +244,11 @@ async def benchmark(
         except Exception as error:
             stages["error"] = f"{type(error).__name__}: {error}"[:200]
         finally:
+            if claim_probe is not None and runtime_row_id is not None:
+                try:
+                    await claim_probe.manager.destroy_runtime(runtime_row_id, reason="benchmark.complete")
+                except Exception:
+                    pass
             if warm_runtime_id:
                 try:
                     await adapter.destroy(warm_runtime_id)
@@ -120,6 +264,8 @@ async def benchmark(
                 "stages": stages,
             }
         )
+    if claim_probe is not None:
+        await claim_probe.close()
     python_version = str(samples[-1].get("python_version", "unknown")) if samples else "unknown"
     compatibility = check_preload_compatibility(
         PreloadCompatibility(profile_id, image, python_version, runtime_version, modules),
@@ -134,6 +280,7 @@ async def benchmark(
         "image_cached_ms": image_cached_ms,
         "preload_modules": list(modules),
         "compatibility": compatibility.as_dict(),
+        "claim_measurement": "manager" if measure_manager_claim else "docker-only",
         "iterations": samples,
         "stage_percentiles_ms": {
             stage: {
@@ -192,6 +339,11 @@ def main() -> None:
     parser.add_argument("--runtime-version", default="nova-runtime")
     parser.add_argument("--matrix-path", type=Path)
     parser.add_argument("--update-matrix", action="store_true")
+    parser.add_argument(
+        "--measure-manager-claim",
+        action="store_true",
+        help="measure the real MySQL + Sandbox Manager claim path (requires NLP_AGENT_DATABASE_URL)",
+    )
     args = parser.parse_args()
     result = asyncio.run(
         benchmark(
@@ -202,6 +354,7 @@ def main() -> None:
             runtime_version=args.runtime_version,
             matrix_path=args.matrix_path,
             update_matrix=args.update_matrix,
+            measure_manager_claim=args.measure_manager_claim,
         )
     )
     print(json.dumps(result, indent=2))

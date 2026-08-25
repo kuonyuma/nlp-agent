@@ -188,14 +188,11 @@ class SandboxModelToolService:
             async with self.session_factory.begin() as session:
                 environment_id = authorized.environment_id
                 if environment_id is None:
-                    environment = SandboxEnvironmentModel(
-                        id=str(uuid4()),
-                        owner_user_id=authorized.context.user_id,
-                        resource_profile_id="python-base",
-                        generation=authorized.scope.generation,
+                    from .service import sandbox_lifecycle_service
+
+                    environment = await sandbox_lifecycle_service.ensure_environment(
+                        session, authorized.scope
                     )
-                    session.add(environment)
-                    await session.flush()
                     environment_id = str(environment.id)
                 session.add(
                     SandboxExecutionModel(

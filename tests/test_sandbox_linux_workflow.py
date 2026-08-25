@@ -18,6 +18,8 @@ def test_linux_smoke_uses_the_registered_gvisor_runtime() -> None:
     assert "NLP_AGENT_DOCKER_RUNTIME: runsc" not in auth_lifecycle
     assert "sandbox-manager-runsc" in workflow
     assert "docker run --detach --name nova-ci-mysql" in workflow
+    assert "--measure-manager-claim" in workflow
+    assert "sandbox-manager-claim-benchmark" in workflow
     assert "feature/sandbox-phase3-develop" in workflow
     assert "pip install -e ." not in workflow
     assert "pip install -r requirements.txt" in workflow

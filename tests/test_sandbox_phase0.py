@@ -329,3 +329,49 @@ async def test_concurrent_lease_claims_create_one_environment(mysql_session_fact
     async with mysql_session_factory() as session:
         environments = list((await session.scalars(select(SandboxEnvironmentModel).where(SandboxEnvironmentModel.owner_user_id == user.id))).all())
     assert len(environments) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_model_scratch_creates_one_environment(mysql_session_factory) -> None:
+    """Scratch may create the logical environment, but creation must be idempotent."""
+    from server.sandbox.model_tools import SandboxModelToolService
+    from server.web.database_auth import DatabaseSessionAuth
+
+    async with mysql_session_factory() as session:
+        user = await UserService(session).create_user(
+            data=UserCreate(
+                username=f"scratchparallel{uuid4().hex[:10]}",
+                display_name="Scratch parallel",
+                password="InitialPw0rd1",
+            )
+        )
+        await session.commit()
+    auth = DatabaseSessionAuth(allowed_origins=["http://testserver"])
+    _, claims = await auth.login(
+        mysql_session_factory, user.username, "InitialPw0rd1", client_key="scratch-parallel"
+    )
+    config = {
+        "configurable": {
+            "thread_id": claims.session_id,
+            "user_id": str(user.id),
+            "workspace_id": str(claims.workspace_id),
+        }
+    }
+    service = SandboxModelToolService(mode="inmemory", session_factory=mysql_session_factory)
+    results = await asyncio.gather(
+        service.run_scratch(source="print(1)", config=config),
+        service.run_scratch(source="print(2)", config=config),
+    )
+    await service.close()
+    assert all(result["ok"] for result in results)
+    async with mysql_session_factory() as session:
+        environments = list(
+            (
+                await session.scalars(
+                    select(SandboxEnvironmentModel).where(
+                        SandboxEnvironmentModel.owner_user_id == user.id
+                    )
+                )
+            ).all()
+        )
+    assert len(environments) == 1

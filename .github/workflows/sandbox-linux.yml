@@ -143,8 +143,25 @@ jobs:
             sleep 2
           done
       - run: alembic upgrade head
+      - name: Build pinned runtime for Manager claim benchmark
+        run: docker build --tag nova-sandbox-runtime:manager-ci sandbox-runtime
+      - name: Benchmark real Manager claim path
+        run: |
+          IMAGE_ID=$(docker image inspect nova-sandbox-runtime:manager-ci --format '{{.Id}}')
+          python scripts/benchmark_sandbox_startup.py \
+            --image "nova-sandbox-runtime:manager-ci@${IMAGE_ID}" \
+            --iterations 3 \
+            --matrix-path configs/sandbox_preload_matrix.json \
+            --update-matrix \
+            --measure-manager-claim | tee sandbox-manager-claim-benchmark.json
       - name: Verify Docker reconcile destroys orphan runtimes
         run: pytest tests/test_sandbox_manager_docker_integration.py -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-manager-claim-benchmark
+          path: |
+            sandbox-manager-claim-benchmark.json
+            configs/sandbox_preload_matrix.json
       - name: Remove MySQL test container
         if: always()
         run: docker rm --force nova-ci-mysql || true
