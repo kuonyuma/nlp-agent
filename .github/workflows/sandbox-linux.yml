@@ -18,18 +18,31 @@ jobs:
         run: |
           ARCH=$(uname -m)
           URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
-          curl -fsSLO ${URL}/runsc
-          curl -fsSLO ${URL}/runsc.sha512
-          sha512sum -c runsc.sha512
-          chmod +x runsc
-          sudo mv runsc /usr/local/bin/runsc
+          curl -fsSLO ${URL}/gvisor.tar.bz2
+          curl -fsSLO ${URL}/gvisor.tar.bz2.sha512
+          sha512sum -c gvisor.tar.bz2.sha512
+          sudo tar -xjf gvisor.tar.bz2 -C /usr/local/bin
+          sudo chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
           sudo runsc install
+          sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'
       - run: docker build --tag nova-sandbox-runtime:ci sandbox-runtime
+      - name: Verify gVisor container isolation
+        run: RUN_SANDBOX_DOCKER_INTEGRATION=1 NLP_AGENT_SANDBOX_INTEGRATION_IMAGE=nova-sandbox-runtime:ci pytest tests/test_sandbox_security_integration.py -q
       - name: Smoke-test hardened Kernel on Linux
         run: |
           docker run --detach --rm --name nova-ci --runtime runsc --read-only --network none --cap-drop ALL --security-opt no-new-privileges=true --memory 768m --cpus 1 --pids-limit 128 --tmpfs /workspace:rw,nosuid,nodev,size=256m --tmpfs /tmp:rw,nosuid,nodev,size=256m --tmpfs /run/nova:rw,nosuid,nodev,uid=10001,gid=10001,mode=700,size=16m --user 10001:10001 nova-sandbox-runtime:ci
-          until docker exec nova-ci python /opt/nova-runtime/nova_runtime.py health; do sleep 1; done
+          for attempt in $(seq 1 60); do
+            if docker exec nova-ci python /opt/nova-runtime/nova_runtime.py health; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs nova-ci || true
+              docker rm --force nova-ci || true
+              exit 1
+            fi
+            sleep 1
+          done
           echo '{"source":"print(42)"}' | docker exec --interactive nova-ci python /opt/nova-runtime/nova_runtime.py execute --timeout-seconds 10 --output-limit-bytes 1024
           docker rm --force nova-ci
       - name: Record Linux image metadata

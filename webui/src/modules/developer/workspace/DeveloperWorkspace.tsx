@@ -15,7 +15,7 @@ import { AuditLogPageV2 } from "@/modules/admin/AuditLogPageV2";
 import { AgentSessionListPageV2 } from "@/modules/admin/AgentSessionListPageV2";
 import { monitorUrl } from "@/monitor/monitor-helpers";
 
-export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "settings" | "users" | "roles" | "menus" | "audit" | "sessions";
+export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "settings" | "sandbox" | "users" | "roles" | "menus" | "audit" | "sessions";
 
 const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge }> = [
   { page: "overview", label: "工作台", icon: Gauge },
@@ -27,6 +27,7 @@ const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge }> = [
   { page: "release-notes", label: "发布说明", icon: Newspaper },
   { page: "automations", label: "Apps 与自动化", icon: Clock3 },
   { page: "settings", label: "运行时设置", icon: Settings2 },
+  { page: "sandbox", label: "代码沙箱", icon: TerminalSquare },
   { page: "users", label: "用户管理", icon: Users },
   { page: "roles", label: "角色权限", icon: ShieldCheck },
   { page: "menus", label: "菜单管理", icon: LayoutList },
@@ -123,6 +124,17 @@ function RuntimeSettings({ snapshot }: { snapshot: DeveloperSnapshot }) {
   return <><Section title="网络与协议"><JsonBlock value={snapshot.web} /></Section><Section title="Workspace 本地数据权限"><div className="developer-list">{snapshot.workspace.roots.map((root) => <article key={root.name}><Database size={18} /><span><strong>{root.name}</strong><small>{root.path}</small></span><StatusPill ok={root.exists}>{root.exists ? "可用" : "未创建"}</StatusPill></article>)}</div></Section><Section title="敏感配置规则" hint="浏览器只能读取脱敏快照。"><div className="developer-callout"><ShieldCheck /><p>Provider 密钥、MCP headers/env、Cookie secret 和 Authorization 字段不会通过开发者 API 返回。配置写入继续由本地 YAML/.env 管理。</p></div></Section></>;
 }
 
+function SandboxManagement() {
+  const [states, setStates] = useState<Record<string, number> | null>(null);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try { setError(""); setStates((await api.getSandboxOverview()).runtime_states); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  }, []);
+  useEffect(() => { queueMicrotask(() => void load()); }, [load]);
+  return <Section title="Sandbox 容量" hint="只读管理面；容器生命周期仍由 Sandbox Manager 控制。"><button type="button" onClick={() => void load()}>刷新</button>{error && <p>{error}</p>}{states && <div className="developer-kpis">{Object.entries(states).map(([state, count]) => <article key={state}><TerminalSquare /><span>{state}</span><strong>{count}</strong></article>)}</div>}</Section>;
+}
+
 export function ReleaseNotes() {
   const [items, setItems] = useState<ReleaseNoteEntry[] | null>(null);
   const [error, setError] = useState("");
@@ -204,6 +216,7 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
     if (page === "release-notes") return <ReleaseNotes />;
     if (page === "automations") return <Automations snapshot={snapshot} />;
     if (page === "settings") return <RuntimeSettings snapshot={snapshot} />;
+    if (page === "sandbox") return <SandboxManagement />;
     if (page === "users") return <UserManagementPage />;
     if (page === "roles") return <RoleManagementPageV2 />;
     if (page === "menus") return <MenuManagementPageV2 />;

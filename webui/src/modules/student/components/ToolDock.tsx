@@ -2,6 +2,7 @@ import { BookOpenCheck, Code2, FileText, Globe2, Plus, Terminal, X } from "lucid
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { api } from "@/platform/http/api";
+import { SandboxArtifactFrame } from "./SandboxArtifactFrame";
 
 export type ToolDockTool = "files" | "learning" | "browser" | "terminal" | "sandbox";
 
@@ -37,6 +38,7 @@ function SandboxPhaseZeroPanel() {
   const [running, setRunning] = useState(false);
   const [runtimeTicket, setRuntimeTicket] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<Array<{ id: number; label: string; detail: string }>>([]);
+  const [artifactUrls, setArtifactUrls] = useState<string[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -56,7 +58,7 @@ function SandboxPhaseZeroPanel() {
       <button type="button" disabled={running} onClick={() => {
         setRunning(true); setTimeline((current) => [...current, { id: Date.now(), label: "开始执行", detail: "正在向隔离 Kernel 发送代码。" }]);
         void api.executeSandbox(source, runtimeTicket)
-          .then(async (value) => { if (value.ticket) setRuntimeTicket(value.ticket); setResult(value.stdout || value.stderr || "运行完成。"); if (value.execution_id) { const replay = await api.replaySandboxEvents(value.execution_id); setTimeline(replay.events.map((event) => ({ id: event.seq, label: event.type === "execution.output" ? "运行输出" : event.type === "execution.completed" ? "执行完成" : "开始执行", detail: event.payload.text ?? "运行状态已恢复。" }))); } else setTimeline((current) => [...current, { id: Date.now(), label: "执行完成", detail: value.stderr ? "运行返回错误输出。" : "已收到 Kernel 输出。" }]); })
+          .then(async (value) => { if (value.ticket) setRuntimeTicket(value.ticket); setResult(value.stdout || value.stderr || "运行完成。"); if (value.artifacts) setArtifactUrls((await Promise.all(value.artifacts.map((artifact) => api.getSandboxArtifactUrl(artifact.id).then((access) => access.url).catch(() => null)))).filter((url): url is string => Boolean(url))); if (value.execution_id) { const replay = await api.replaySandboxEvents(value.execution_id); setTimeline(replay.events.map((event) => ({ id: event.seq, label: event.type === "execution.output" ? "运行输出" : event.type === "execution.completed" ? "执行完成" : "开始执行", detail: event.payload.text ?? "运行状态已恢复。" }))); } else setTimeline((current) => [...current, { id: Date.now(), label: "执行完成", detail: value.stderr ? "运行返回错误输出。" : "已收到 Kernel 输出。" }]); })
           .catch(() => { setResult("当前运行环境不可用。"); setTimeline((current) => [...current, { id: Date.now(), label: "执行失败", detail: "请重新打开或重置运行环境。" }]); })
           .finally(() => setRunning(false));
       }}>{running ? "运行中…" : "运行代码"}</button>
@@ -65,6 +67,7 @@ function SandboxPhaseZeroPanel() {
       }}>重置运行环境</button>
     </div>
     {result && <pre>{result}</pre>}
+    {artifactUrls.length > 0 && <section aria-label="沙箱产物预览">{artifactUrls.map((url) => <SandboxArtifactFrame key={url} url={url} />)}</section>}
     <section className="sandbox-execution-timeline" aria-label="执行时间线"><strong>执行记录</strong>{timeline.slice(-5).reverse().map((event) => <div key={event.id}><i /><span><b>{event.label}</b><small>{event.detail}</small></span></div>)}</section>
   </section>;
 }
