@@ -25,7 +25,7 @@ from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeCon
 from server.sandbox.gateway import SandboxGateway
 from server.sandbox.manager import WarmPoolManager
 from server.sandbox.ticket import SandboxTicketSigner
-from server.sandbox.events import default_sandbox_event_store
+from server.sandbox.events import SandboxEventStore, default_sandbox_event_store
 from server.web.protocol import control_event
 
 from .contracts import SandboxScope
@@ -73,6 +73,8 @@ def _sandbox_gateway(request: Request) -> SandboxGateway:
         )
     if mode not in {"inmemory", "docker"}:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox runtime is not enabled.")
+    if mode == "docker" and isinstance(sandbox_events, SandboxEventStore):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis Stream event storage is required for Docker sandbox mode.")
     gateway = SandboxGateway(
         mode=mode, session_factory=factory, ticket_signer=SandboxTicketSigner(secret),
         manager=manager, inmemory=inmemory_runtime,

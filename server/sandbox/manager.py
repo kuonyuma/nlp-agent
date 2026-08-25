@@ -13,7 +13,7 @@ from uuid import uuid4
 from sqlalchemy import exists, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxLeaseModel, SandboxRuntimeInstanceModel
+from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxLeaseModel, SandboxRuntimeInstanceModel, SessionModel, UserModel
 
 from .contracts import SandboxScope
 from .docker_runtime import DockerRuntimeAdapter
@@ -211,10 +211,18 @@ class WarmPoolManager:
         """Lease expiry is authoritative even when an Outbox message was missed."""
         now = _utc_now()
         active_lease = exists(
-            select(SandboxLeaseModel.id).where(
+            select(SandboxLeaseModel.id)
+            .join(SessionModel, SessionModel.id == SandboxLeaseModel.auth_session_id)
+            .join(UserModel, UserModel.id == SandboxLeaseModel.user_id)
+            .where(
                 SandboxLeaseModel.environment_id == SandboxRuntimeInstanceModel.environment_id,
                 SandboxLeaseModel.state == "active",
                 SandboxLeaseModel.expires_at > now,
+                SessionModel.revoked_at.is_(None),
+                SessionModel.expires_at > now,
+                SessionModel.authorization_version == UserModel.authorization_version,
+                UserModel.status == "active",
+                UserModel.deleted_at.is_(None),
             )
         )
         async with self._session_factory() as session:

@@ -21,6 +21,9 @@ class RedisSandboxMetricsStore:
         member = json.dumps(sample, separators=(",", ":"), sort_keys=True)
         await self._client.zadd(self._key, {member: timestamp})
         await self._client.zremrangebyscore(self._key, 0, timestamp - self._retention_seconds)
+        trim = getattr(self._client, "zremrangebyrank", None)
+        if trim is not None:
+            await trim(self._key, 0, -(self._max_samples + 1))
         await self._client.expire(self._key, self._retention_seconds)
         rows = await self._client.zrange(self._key, -min(self._max_samples, 60), -1)
         samples: list[dict[str, object]] = []
@@ -46,7 +49,10 @@ def create_sandbox_metrics_store() -> RedisSandboxMetricsStore | None:
         return None
     from redis.asyncio import Redis
 
-    return RedisSandboxMetricsStore(Redis.from_url(redis_url, decode_responses=True))
+    return RedisSandboxMetricsStore(
+        Redis.from_url(redis_url, decode_responses=True),
+        retention_seconds=settings.NLP_AGENT_SANDBOX_METRICS_RETENTION_S,
+    )
 
 
 default_sandbox_metrics_store = create_sandbox_metrics_store()

@@ -104,7 +104,11 @@ def create_sandbox_event_store() -> SandboxEventStore | RedisSandboxEventStore:
         return SandboxEventStore()
     from redis.asyncio import Redis
 
-    return RedisSandboxEventStore(Redis.from_url(redis_url, decode_responses=True))
+    return RedisSandboxEventStore(
+        Redis.from_url(redis_url, decode_responses=True),
+        retention_seconds=settings.NLP_AGENT_SANDBOX_EVENT_RETENTION_S,
+        max_events=settings.NLP_AGENT_SANDBOX_EVENT_MAXLEN,
+    )
 
 
 default_sandbox_event_store = create_sandbox_event_store()
