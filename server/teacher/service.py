@@ -7,6 +7,7 @@ import hashlib
 import posixpath
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 from core.identity import AuthenticatedPrincipal
 from core.rbac import Permission, authorization_service
@@ -25,6 +26,7 @@ from server.teacher.models import (
     LearningBookPage,
     ReviewBlueprint,
     TeacherBookImportApplyRequest,
+    TeacherBookAssetInput,
     TeacherBookImportPreview,
     TeacherBookImportPreviewRequest,
     TeacherBookArchiveImportApplyRequest,
@@ -228,48 +230,41 @@ class TeacherService:
         parts = asset_path.split("/")
         if any(part in {"", ".", ".."} for part in parts):
             raise FileNotFoundError(asset_path)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        visible_point_ids = {
+            point.id
+            for topic in catalog.topics
+            if topic.status == "enabled"
+            for point in topic.knowledge_points
+            if point.status == "enabled"
+        }
+        asset_marker = f"/assets/{quote(asset_path, safe='/')}"
+        rows = await gateway.list_knowledge_pages(principal, workspace_id)
+        if not any(
+            str(row.get("knowledge_point_id")) in visible_point_ids
+            and row.get("published_markdown") is not None
+            and asset_marker in str(row["published_markdown"])
+            for row in rows
+        ):
+            raise FileNotFoundError(asset_path)
         asset = await gateway.get_knowledge_book_asset(principal, workspace_id, asset_path)
         if asset is None:
             raise FileNotFoundError(asset_path)
         return asset
 
-    async def update_teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str, body: UpdateTeacherBookPage) -> dict[str, Any]:
-        self.require_teacher(principal, workspace_id)
-        catalog = TeacherCatalog.model_validate(
-            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
-        )
-        topic, point = self._catalog_point(catalog, knowledge_point_id)
-        normalized = normalize_teacher_markdown("page.md", body.content_markdown)
-        row = await gateway.update_knowledge_page(
-            principal, workspace_id, knowledge_point_id, normalized.content_markdown,
-            expected_revision=body.expected_revision,
-        )
-        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
-
-    async def publish_teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str, body: PublishTeacherBookPage) -> dict[str, Any]:
-        self.require_teacher(principal, workspace_id)
-        catalog = TeacherCatalog.model_validate(
-            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
-        )
-        topic, point = self._catalog_point(catalog, knowledge_point_id)
-        row = await gateway.publish_knowledge_page(
-            principal, workspace_id, knowledge_point_id, expected_revision=body.expected_revision
-        )
-        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
-
-    async def preview_teacher_book_import(self, principal: AuthenticatedPrincipal, workspace_id: str, body: TeacherBookImportPreviewRequest) -> dict[str, Any]:
-        self.require_teacher(principal, workspace_id)
-        return normalize_teacher_markdown(body.file_name, body.content_markdown).model_dump(mode="json")
-
-    async def apply_teacher_book_import(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, body: TeacherBookImportApplyRequest) -> dict[str, Any]:
-        self.require_teacher(principal, workspace_id)
-        catalog = TeacherCatalog.model_validate(
-            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
-        )
-        topic, point = self._catalog_point(catalog, body.knowledge_point_id)
-        normalized = normalize_teacher_markdown(body.file_name, body.content_markdown)
+    @staticmethod
+    def _prepare_teacher_book_content(
+        workspace_id: str,
+        knowledge_point_id: str,
+        file_name: str,
+        content_markdown: str,
+        asset_inputs: list[TeacherBookAssetInput],
+    ) -> tuple[TeacherBookImportPreview, str, list[dict[str, Any]]]:
+        normalized = normalize_teacher_markdown(file_name, content_markdown)
         uploaded_assets: dict[str, tuple[str, bytes]] = {}
-        for item in body.assets:
+        for item in asset_inputs:
             asset_path = _safe_zip_path(item.asset_path)
             if not asset_path.startswith("assets/"):
                 raise ValueError("单篇 Markdown 的图片资源必须位于 assets/ 目录")
@@ -292,17 +287,75 @@ class TeacherService:
             file_name="page.md",
             files=set(uploaded_assets),
             workspace_id=workspace_id,
-            knowledge_point_id=body.knowledge_point_id,
+            knowledge_point_id=knowledge_point_id,
         )
         assets = [
             {
-                "asset_path": _scoped_asset_path(body.knowledge_point_id, source_path),
+                "asset_path": _scoped_asset_path(knowledge_point_id, source_path),
                 "media_type": uploaded_assets[source_path][0],
                 "content": uploaded_assets[source_path][1],
                 "sha256": hashlib.sha256(uploaded_assets[source_path][1]).hexdigest(),
             }
             for source_path in referenced_assets
         ]
+        return normalized, rewritten, assets
+
+    async def update_teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str, body: UpdateTeacherBookPage) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, knowledge_point_id)
+        normalized, rewritten, assets = self._prepare_teacher_book_content(
+            workspace_id,
+            knowledge_point_id,
+            "page.md",
+            body.content_markdown,
+            body.assets,
+        )
+        rows = await gateway.apply_knowledge_book_import(
+            principal,
+            workspace_id,
+            [{
+                "knowledge_point_id": knowledge_point_id,
+                "expected_revision": body.expected_revision,
+                "content_markdown": rewritten,
+            }],
+            assets,
+        )
+        return {
+            "page": self._teacher_book_page(workspace_id, topic, point, rows[0]),
+            "warnings": normalized.warnings,
+        }
+
+    async def publish_teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str, body: PublishTeacherBookPage) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, knowledge_point_id)
+        row = await gateway.publish_knowledge_page(
+            principal, workspace_id, knowledge_point_id, expected_revision=body.expected_revision
+        )
+        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
+
+    async def preview_teacher_book_import(self, principal: AuthenticatedPrincipal, workspace_id: str, body: TeacherBookImportPreviewRequest) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        return normalize_teacher_markdown(body.file_name, body.content_markdown).model_dump(mode="json")
+
+    async def apply_teacher_book_import(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, body: TeacherBookImportApplyRequest) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, body.knowledge_point_id)
+        normalized, rewritten, assets = self._prepare_teacher_book_content(
+            workspace_id,
+            body.knowledge_point_id,
+            body.file_name,
+            body.content_markdown,
+            body.assets,
+        )
         rows = await gateway.apply_knowledge_book_import(
             principal,
             workspace_id,
@@ -314,7 +367,10 @@ class TeacherService:
             assets,
         )
         row = rows[0]
-        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
+        return {
+            "page": self._teacher_book_page(workspace_id, topic, point, row),
+            "warnings": normalized.warnings,
+        }
 
     @staticmethod
     def _decode_archive(value: str) -> bytes:

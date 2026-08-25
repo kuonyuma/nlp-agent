@@ -114,6 +114,18 @@ def test_teacher_markdown_rejects_external_reference_resources():
         )
 
 
+def test_teacher_markdown_drops_an_entire_non_pytorch_code_fence():
+    normalized = normalize_teacher_markdown(
+        "attention.md",
+        "# 注意力\n\n```python\n#@tab tensorflow\n"
+        "tf.nn.softmax(x)\n```\n\n正文",
+    )
+
+    assert "tf.nn.softmax" not in normalized.content_markdown
+    assert "```" not in normalized.content_markdown
+    assert "tensorflow" in normalized.removed_frameworks
+
+
 def test_archive_parser_reports_corrupt_entry_as_validation_error():
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as archive:

@@ -41,6 +41,7 @@ export function TeacherBookEditor({ workspaceId }: Props) {
   const [importPreview, setImportPreview] = useState<TeacherBookImportPreview | null>(null);
   const [importName, setImportName] = useState("");
   const [importAssets, setImportAssets] = useState<TeacherBookAssetInput[]>([]);
+  const [editorAssets, setEditorAssets] = useState<TeacherBookAssetInput[]>([]);
   const [archivePreview, setArchivePreview] = useState<TeacherBookArchiveImportPreview | null>(null);
   const [archiveName, setArchiveName] = useState("");
   const [archiveBase64, setArchiveBase64] = useState("");
@@ -79,6 +80,7 @@ export function TeacherBookEditor({ workspaceId }: Props) {
       setContent(result.page.draft_markdown);
       setImportPreview(null);
       setImportAssets([]);
+      setEditorAssets([]);
       setArchivePreview(null);
       setMessage("");
     } catch (reason) {
@@ -102,10 +104,12 @@ export function TeacherBookEditor({ workspaceId }: Props) {
     setSaving(true);
     setMessage("");
     try {
-      const result = await api.updateTeacherBookPage(workspaceId, selectedId, content, page.revision);
+      const result = await api.updateTeacherBookPage(workspaceId, selectedId, content, page.revision, editorAssets);
       setPage(result.page);
       setContent(result.page.draft_markdown);
-      setMessage("草稿已保存。发布后学生才会看到新内容。");
+      setEditorAssets([]);
+      const warningMessage = result.warnings.length > 0 ? `提示：${result.warnings.join("；")}` : "";
+      setMessage(`草稿已保存。发布后学生才会看到新内容。${warningMessage ? ` ${warningMessage}` : ""}`);
       await loadNavigation();
     } catch (reason) {
       setMessage(`保存失败：${reason instanceof Error ? reason.message : String(reason)}`);
@@ -119,13 +123,19 @@ export function TeacherBookEditor({ workspaceId }: Props) {
     setSaving(true);
     setMessage("");
     try {
-      const draft = content === page.draft_markdown
-        ? page
-        : (await api.updateTeacherBookPage(workspaceId, selectedId, content, page.revision)).page;
+      let draft = page;
+      let warnings: string[] = [];
+      if (content !== page.draft_markdown || editorAssets.length > 0) {
+        const saved = await api.updateTeacherBookPage(workspaceId, selectedId, content, page.revision, editorAssets);
+        draft = saved.page;
+        warnings = saved.warnings;
+        setEditorAssets([]);
+      }
       const result = await api.publishTeacherBookPage(workspaceId, selectedId, draft.revision);
       setPage(result.page);
       setContent(result.page.draft_markdown);
-      setMessage("教材已发布，学生端现在可以读取这一版正文。");
+      const warningMessage = warnings.length > 0 ? `提示：${warnings.join("；")}` : "";
+      setMessage(`教材已发布，学生端现在可以读取这一版正文。${warningMessage ? ` ${warningMessage}` : ""}`);
       await loadNavigation();
     } catch (reason) {
       setMessage(`发布失败：${reason instanceof Error ? reason.message : String(reason)}`);
@@ -157,6 +167,26 @@ export function TeacherBookEditor({ workspaceId }: Props) {
     }
   };
 
+  const handleEditorAssets = async (files: File[]) => {
+    if (files.length === 0) return;
+    setMessage("");
+    try {
+      const assets = await Promise.all(files.map(async (file) => ({
+        asset_path: assetPathForFile(file),
+        media_type: file.type,
+        content_base64: await fileToBase64(file),
+      })));
+      setEditorAssets((current) => {
+        const byPath = new Map(current.map((asset) => [asset.asset_path, asset]));
+        assets.forEach((asset) => byPath.set(asset.asset_path, asset));
+        return Array.from(byPath.values());
+      });
+      setMessage(`已附加 ${assets.length} 个图片资源，保存草稿时会自动入库并重写 Markdown 图片地址。`);
+    } catch (reason) {
+      setMessage(`图片资源读取失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+  };
+
   const handleArchiveFile = async (file: File | undefined) => {
     if (!file) return;
     setMessage("");
@@ -180,6 +210,7 @@ export function TeacherBookEditor({ workspaceId }: Props) {
       setContent(result.page.draft_markdown);
       setImportPreview(null);
       setImportAssets([]);
+      setEditorAssets([]);
       setMessage("Markdown 已导入草稿，请检查预览后保存或发布。");
       await loadNavigation();
     } catch (reason) {
@@ -220,6 +251,7 @@ export function TeacherBookEditor({ workspaceId }: Props) {
       </section>
       <div className="teacher-book-toolbar">
         <label className="teacher-book-import"><Upload size={15} />导入 Markdown/图片<input type="file" multiple accept=".md,text/markdown,image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { void handleFile(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} /></label>
+        <label className="teacher-book-import"><Upload size={15} />附加编辑图片<input type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { void handleEditorAssets(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} /></label>
         <label className="teacher-book-import"><Upload size={15} />导入教材包<input type="file" accept=".zip,application/zip" onChange={(event) => { void handleArchiveFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
         <button type="button" onClick={() => void loadNavigation()} disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />刷新目录</button>
         {message && <span role="status">{message}</span>}
@@ -240,6 +272,7 @@ export function TeacherBookEditor({ workspaceId }: Props) {
         <main className="teacher-book-workspace">
           {page ? <>
             <header className="teacher-book-page-heading"><div><span className="teacher-eyebrow">{page.topic_name}</span><h3>{page.title}</h3><small>草稿版本 {page.revision}{page.published_revision != null ? ` · 已发布版本 ${page.published_revision}` : " · 尚未发布"}</small></div><div><button type="button" className={preview ? "active" : ""} onClick={() => setPreview((current) => !current)}><Eye size={15} />{preview ? "返回编辑" : "预览正文"}</button><button type="button" onClick={() => void save()} disabled={saving}><Save size={15} />保存草稿</button><button type="button" className="teacher-book-publish" onClick={() => void publish()} disabled={saving || !content.trim()}><Send size={15} />发布给学生</button></div></header>
+            {editorAssets.length > 0 && <small className="teacher-book-editor-assets">已附加 {editorAssets.length} 个图片资源，保存时会写入当前知识点的教材资源。</small>}
             {preview ? <div className="teacher-book-preview"><MarkdownContent>{content || "暂无内容"}</MarkdownContent></div> : <textarea className="teacher-book-textarea" aria-label="教材正文 Markdown" value={content} onChange={(event) => setContent(event.target.value)} placeholder="# 知识点标题\n\n在这里编写面向学生的长篇教材正文。代码块建议使用 ```python，并只保留 PyTorch 示例。" />}
           </> : <div className="teacher-state"><BookOpenText /><p>选择一个知识点开始编写教材。</p></div>}
         </main>

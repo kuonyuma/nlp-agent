@@ -624,6 +624,47 @@ def test_teacher_book_markdown_import_persists_local_images_for_students(web_app
         assert asset.content == b"png"
 
 
+def test_teacher_book_direct_save_accepts_images_reports_warnings_and_hides_disabled_assets(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        catalog = {
+            "topics": [{
+                "id": "basic", "name": "基础", "description": "", "status": "enabled",
+                "knowledge_points": [{"id": "attention", "name": "注意力", "status": "enabled", "sort_order": 0}],
+            }],
+            "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+        }
+        assert client.put("/api/v1/teacher/catalog/default", json=catalog, headers=write_headers(csrf)).status_code == 200
+        saved = client.put(
+            "/api/v1/teacher/book/default/pages/attention",
+            json={
+                "content_markdown": "# 注意力\n\n### 跳级标题\n\n![图](assets/direct.png)",
+                "expected_revision": 0,
+                "assets": [{"asset_path": "assets/direct.png", "media_type": "image/png", "content_base64": "cG5n"}],
+            },
+            headers=write_headers(csrf),
+        )
+        assert saved.status_code == 200
+        assert saved.json()["warnings"]
+        content = saved.json()["page"]["draft_markdown"]
+        assert "/assets/assets/pages/" in content
+        asset_path = content.split("/assets/")[-1].split(")", 1)[0]
+        assert client.post(
+            "/api/v1/teacher/book/default/pages/attention/publish",
+            json={"expected_revision": 1},
+            headers=write_headers(csrf),
+        ).status_code == 200
+        assert client.get(f"/api/v1/learning/book/default/assets/{asset_path}").status_code == 200
+
+        disabled_catalog = {
+            **catalog,
+            "topics": [{**catalog["topics"][0], "knowledge_points": [{**catalog["topics"][0]["knowledge_points"][0], "status": "disabled"}]}],
+        }
+        assert client.put("/api/v1/teacher/catalog/default", json=disabled_catalog, headers=write_headers(csrf)).status_code == 200
+        assert client.get(f"/api/v1/learning/book/default/assets/{asset_path}").status_code == 404
+
+
 def test_teacher_book_archive_preview_apply_and_asset_read_are_atomic(web_app):
     app, _engine = web_app
     with TestClient(app) as client:

@@ -58,6 +58,9 @@ def _filter_code_tabs(content: str) -> tuple[str, list[str]]:
     fence_char: str | None = None
     fence_length = 0
     active_tabs: set[str] | None = None
+    fence_output_start = 0
+    block_has_tabs = False
+    block_has_allowed_tabs = False
 
     for line in lines:
         fence_match = _FENCE_RE.match(line)
@@ -68,11 +71,16 @@ def _filter_code_tabs(content: str) -> tuple[str, list[str]]:
                 fence_char = marker[0]
                 fence_length = len(marker)
                 active_tabs = None
+                fence_output_start = len(output) - 1
+                block_has_tabs = False
+                block_has_allowed_tabs = False
             continue
 
         tab_match = _TAB_RE.match(line)
         if tab_match:
             active_tabs = _tab_names(tab_match.group(1))
+            block_has_tabs = True
+            block_has_allowed_tabs = block_has_allowed_tabs or bool(active_tabs & {"pytorch", "all"})
             removed.update(active_tabs - {"pytorch", "all"})
             continue
 
@@ -81,12 +89,21 @@ def _filter_code_tabs(content: str) -> tuple[str, list[str]]:
             and fence_match.group(1)[0] == fence_char
             and len(fence_match.group(1)) >= fence_length
         )
-        if active_tabs is None or active_tabs & {"pytorch", "all"} or closing:
-            output.append(line)
         if closing:
+            if block_has_tabs and not block_has_allowed_tabs:
+                del output[fence_output_start:]
+            else:
+                output.append(line)
             fence_char = None
             fence_length = 0
             active_tabs = None
+            block_has_tabs = False
+            block_has_allowed_tabs = False
+        elif active_tabs is None or active_tabs & {"pytorch", "all"}:
+            output.append(line)
+
+    if fence_char is not None and block_has_tabs and not block_has_allowed_tabs:
+        del output[fence_output_start:]
 
     return "".join(output), sorted(removed)
 
