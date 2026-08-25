@@ -1,4 +1,5 @@
-import { Children, lazy, Suspense, type ReactNode } from "react";
+import { Check, Copy, ExternalLink, MessageCircleQuestion } from "lucide-react";
+import { Children, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkBreaks from "remark-breaks";
@@ -19,6 +20,64 @@ const LazyCode = lazy(async () => {
     },
   };
 });
+
+export interface MarkdownCodeActions {
+  onAskNova?: (code: string, language: string) => void;
+  onOpenInSandbox?: (code: string, language: string) => void;
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "true");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("clipboard copy failed");
+}
+
+function LessonCodeBlock({ code, dark, language, actions }: { code: string; dark: boolean; language: string; actions?: MarkdownCodeActions }) {
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  useEffect(() => {
+    if (copyStatus === "idle") return undefined;
+    const timer = window.setTimeout(() => setCopyStatus("idle"), 1800);
+    return () => window.clearTimeout(timer);
+  }, [copyStatus]);
+
+  const copy = async () => {
+    try {
+      await copyText(code);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("error");
+    }
+  };
+
+  const supportsLessonActions = /^(?:python|pytorch|py)$/i.test(language);
+  const lessonActions = supportsLessonActions ? actions : undefined;
+  return <div className="code-shell">
+    <div className="code-toolbar">
+      <div className="code-label">{language}</div>
+      {lessonActions && <div className="code-actions">
+        <button type="button" aria-label={`${copyStatus === "copied" ? "已复制" : "复制"} ${language} 代码`} onClick={() => void copy()}>{copyStatus === "copied" ? <Check size={13} /> : <Copy size={13} />}{copyStatus === "copied" ? "已复制" : "复制"}</button>
+        {lessonActions.onAskNova && <button type="button" aria-label="问 Nova" onClick={() => lessonActions.onAskNova?.(code, language)}><MessageCircleQuestion size={13} />问 Nova</button>}
+        {lessonActions.onOpenInSandbox && <button type="button" aria-label="在沙箱中打开" onClick={() => lessonActions.onOpenInSandbox?.(code, language)}><ExternalLink size={13} />在沙箱中打开</button>}
+        <span className="sr-only" aria-live="polite">{copyStatus === "copied" ? `已复制 ${language} 代码` : copyStatus === "error" ? `复制 ${language} 代码失败` : ""}</span>
+        {copyStatus === "error" && <span className="code-action-status" role="status">复制失败</span>}
+      </div>}
+    </div>
+    <Suspense fallback={<pre><code>{code}</code></pre>}>
+      <LazyCode language={language} code={code} dark={dark} />
+    </Suspense>
+  </div>;
+}
 
 function headingText(children: ReactNode): string {
   return Children.toArray(children).join("");
@@ -78,7 +137,7 @@ export function stripInternalChatMetadata(content: string): string {
   return content.replace(/\s*<!--\s*guided-result\s*:\s*(?:\{[\s\S]*?\}\s*-->|[\s\S]*$)/gi, "").trimEnd();
 }
 
-export function MarkdownContent({ children, streaming = false, headingIds }: { children: string; streaming?: boolean; headingIds?: string[] }) {
+export function MarkdownContent({ children, streaming = false, headingIds, codeActions }: { children: string; streaming?: boolean; headingIds?: string[]; codeActions?: MarkdownCodeActions }) {
   const dark = document.documentElement.classList.contains("dark");
   let headingIndex = 0;
   const nextHeadingId = () => headingIds?.[headingIndex++];
@@ -100,14 +159,7 @@ export function MarkdownContent({ children, streaming = false, headingIds }: { c
             const match = /language-([\w-]+)/.exec(className ?? "");
             const content = String(value).replace(/\n$/, "");
             if (!match) return <code className={className} {...props}>{value}</code>;
-            return (
-              <div className="code-shell">
-                <div className="code-label">{match[1]}</div>
-                <Suspense fallback={<pre><code>{content}</code></pre>}>
-                  <LazyCode language={match[1]} code={content} dark={dark} />
-                </Suspense>
-              </div>
-            );
+            return <LessonCodeBlock language={match[1]} code={content} dark={dark} actions={codeActions} />;
           },
           a: ({ children: value, href, ...props }) => isSameOriginMarkdownLink(href)
             ? <a {...props} href={href}>{value}</a>

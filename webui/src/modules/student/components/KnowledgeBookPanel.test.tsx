@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LearningBookNavigationItem, LearningBookPage } from "@/shared/types";
@@ -62,5 +63,25 @@ describe("KnowledgeBookPanel", () => {
 
     expect(await screen.findByRole("heading", { name: "句法分析" })).toBeInTheDocument();
     expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-2");
+  });
+
+  it("offers an explicit Nova action for selected article text", async () => {
+    const user = userEvent.setup();
+    const askNova = vi.fn();
+    render(<KnowledgeBookPanel workspaceId="workspace-1" onAskNova={askNova} />);
+
+    const selectedText = await screen.findByText("词元是文本处理的基本单位。");
+    const range = document.createRange();
+    range.selectNodeContents(selectedText);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent.pointerUp(selectedText);
+
+    const askButton = await screen.findByRole("button", { name: "向 Nova 提问" });
+    await user.click(askButton);
+    expect(askNova).toHaveBeenCalledWith(expect.stringContaining("词元是文本处理的基本单位。"));
+    expect(askNova).toHaveBeenCalledWith(expect.stringContaining("的「核心概念」小节"));
+    expect(screen.queryByRole("button", { name: "向 Nova 提问" })).not.toBeInTheDocument();
   });
 });

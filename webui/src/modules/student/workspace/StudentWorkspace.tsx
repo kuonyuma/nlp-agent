@@ -18,7 +18,7 @@ import { useStudentWorkspace } from "@/modules/student/workspace/public";
 import { useSessionScrollRestoration } from "@/modules/student/workspace/hooks/useSessionScrollRestoration";
 import type { CourseTopic, TeacherCatalog } from "@/shared/types";
 
-export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: string) => void } = {}) {
+export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigateTo?: (path: string) => void; onOpenInSandbox?: (code: string, language: string) => void } = {}) {
   const workspace = useStudentWorkspace();
   const learningContext = workspace.preferences.context;
   const setLearningContext = workspace.setLearningContext;
@@ -151,7 +151,7 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
       onCloseTool={closeTool}
       onActiveToolChange={setActiveTool}
       learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
-      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} />}
+      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={(prompt) => { setToolDockExpanded(false); setToolMenuOpen(false); if (!workspace.isRunning && statusOnline) void workspace.send(prompt); }} onOpenInSandbox={onOpenInSandbox} />}
     />
     <div className="student-school-logo"><SchoolLogo /></div>
     <SettingsDialog open={settingsOpen} settings={workspace.settings} learningContext={workspace.preferences.context} roles={workspace.authSession?.roles} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} onReset={workspace.resetSettings} onLearningContextChange={workspace.setLearningContext} onOpenDeveloper={() => { if (onNavigateTo) onNavigateTo("/developer"); else location.href = "/developer"; }} onOpenTeacher={() => { if (onNavigateTo) onNavigateTo("/teacher"); else location.href = "/teacher"; }} />

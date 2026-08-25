@@ -22,6 +22,47 @@ interface BookViewState {
   rightCollapsed: boolean;
 }
 
+interface SelectionPrompt {
+  text: string;
+  heading?: string;
+  top: number;
+  left: number;
+}
+
+function quoteSelection(text: string): string {
+  return text.split(/\r?\n/).map((line) => `> ${line}`).join("\n");
+}
+
+function buildSelectionPrompt(page: LearningBookPage, text: string, heading: string | undefined): string {
+  return [
+    `我正在阅读「${page.topic_name} / ${page.title}」${heading ? `的「${heading}」小节` : ""}。`,
+    "",
+    "选中内容：",
+    quoteSelection(text),
+    "",
+    "请结合本节上下文解释这段内容，并指出我理解时最需要注意的地方。",
+  ].join("\n");
+}
+
+function buildCodePrompt(page: LearningBookPage, code: string, language: string, heading: string | undefined): string {
+  const maxCodeLength = 6000;
+  const excerpt = code.length > maxCodeLength ? `${code.slice(0, maxCodeLength)}\n……（代码过长，已截断）` : code;
+  return [`我正在阅读「${page.topic_name} / ${page.title}」${heading ? `的「${heading}」小节` : ""}中的代码示例。`, "", `语言：${language}`, "", "```" + language, excerpt, "```", "", "请解释这段代码的作用、关键步骤，以及它在本节知识点中的意义。"].join("\n");
+}
+
+function isExcludedSelectionNode(node: Node | null): boolean {
+  const element = node instanceof Element ? node : node?.parentElement;
+  return !!element?.closest("code,button,input,textarea,select,.knowledge-book-page-nav,.knowledge-book-toc");
+}
+
+function headingBeforeSelection(article: HTMLElement, range: Range): string | undefined {
+  let current: string | undefined;
+  for (const heading of article.querySelectorAll<HTMLElement>("h2,h3,h4")) {
+    if (heading.compareDocumentPosition(range.startContainer) & Node.DOCUMENT_POSITION_FOLLOWING) current = heading.textContent?.trim() || current;
+  }
+  return current;
+}
+
 function readBookViewState(workspaceId: string): BookViewState {
   const fallback: BookViewState = { selectedId: null, expandedTopics: [], scrollPositions: {}, leftCollapsed: false, rightCollapsed: false };
   try {
@@ -74,7 +115,7 @@ function keepFocusInDrawer(event: ReactKeyboardEvent<HTMLElement>) {
   }
 }
 
-export function KnowledgeBookPanel({ workspaceId }: { workspaceId: string }) {
+export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: { workspaceId: string; onAskNova?: (prompt: string) => void; onOpenInSandbox?: (code: string, language: string) => void }) {
   const [initialViewState] = useState(() => readBookViewState(workspaceId));
   const [navigation, setNavigation] = useState<LearningBookNavigationItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialViewState.selectedId);
@@ -89,7 +130,10 @@ export function KnowledgeBookPanel({ workspaceId }: { workspaceId: string }) {
   const [rightCollapsed, setRightCollapsed] = useState(initialViewState.rightCollapsed);
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(() => new Set(initialViewState.expandedTopics));
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
+  const [selectionPrompt, setSelectionPrompt] = useState<SelectionPrompt | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const articleRef = useRef<HTMLElement>(null);
+  const selectionActionRef = useRef<HTMLButtonElement>(null);
   const pageTitleRef = useRef<HTMLHeadingElement>(null);
   const leftDrawerRef = useRef<HTMLElement>(null);
   const rightDrawerRef = useRef<HTMLElement>(null);
@@ -203,15 +247,27 @@ export function KnowledgeBookPanel({ workspaceId }: { workspaceId: string }) {
   }, [loadingPage, visiblePage]);
 
   useEffect(() => {
-    if (!leftOpen && !rightOpen) return undefined;
+    if (!leftOpen && !rightOpen && !selectionPrompt) return undefined;
     const closeDrawers = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setLeftOpen(false);
       setRightOpen(false);
+      setSelectionPrompt(null);
     };
     window.addEventListener("keydown", closeDrawers);
     return () => window.removeEventListener("keydown", closeDrawers);
-  }, [leftOpen, rightOpen]);
+  }, [leftOpen, rightOpen, selectionPrompt]);
+
+  useEffect(() => {
+    if (!selectionPrompt) return undefined;
+    const clearSelectionPrompt = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && (selectionActionRef.current?.contains(target) || articleRef.current?.contains(target))) return;
+      setSelectionPrompt(null);
+    };
+    document.addEventListener("pointerdown", clearSelectionPrompt);
+    return () => document.removeEventListener("pointerdown", clearSelectionPrompt);
+  }, [selectionPrompt]);
 
   useEffect(() => {
     const wasOpen = previousLeftOpen.current;
@@ -234,10 +290,54 @@ export function KnowledgeBookPanel({ workspaceId }: { workspaceId: string }) {
   }, [rightOpen]);
 
   const selectedIndex = navigation.findIndex((item) => item.knowledge_point_id === selectedId);
+  const updateSelectionPrompt = () => {
+    window.setTimeout(() => {
+      if (!onAskNova || !visiblePage) return;
+      const selection = window.getSelection();
+      const article = articleRef.current;
+      if (!selection || !article || selection.rangeCount === 0 || selection.isCollapsed) {
+        setSelectionPrompt(null);
+        return;
+      }
+      const range = selection.getRangeAt(0);
+      if (!article.contains(selection.anchorNode) || !article.contains(selection.focusNode) || isExcludedSelectionNode(selection.anchorNode) || isExcludedSelectionNode(selection.focusNode)) {
+        setSelectionPrompt(null);
+        return;
+      }
+      const selectedFragment = range.cloneContents();
+      if (selectedFragment.querySelector("code,button,input,textarea,select")) {
+        setSelectionPrompt(null);
+        return;
+      }
+      const text = selection.toString().trim();
+      if (text.length < 2 || text.length > 1500) {
+        setSelectionPrompt(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      const viewportWidth = window.innerWidth || 640;
+      const viewportHeight = window.innerHeight || 640;
+      const buttonHeight = 36;
+      const gap = 8;
+      const aboveTop = rect.top - buttonHeight - gap;
+      const top = aboveTop >= 8 ? aboveTop : Math.min(Math.max(8, viewportHeight - buttonHeight - 8), rect.bottom + gap);
+      const buttonHalfWidth = 74;
+      setSelectionPrompt({ text, heading: headingBeforeSelection(article, range), top, left: Math.min(Math.max(buttonHalfWidth + 8, rect.left + rect.width / 2), viewportWidth - buttonHalfWidth - 8) });
+    }, 0);
+  };
+
   const selectKnowledgePoint = (id: string) => {
     setSelectedId(id);
     setLeftOpen(false);
     setRightOpen(false);
+    setSelectionPrompt(null);
+    window.getSelection()?.removeAllRanges();
+  };
+  const askSelection = () => {
+    if (!onAskNova || !selectionPrompt || !visiblePage) return;
+    onAskNova(buildSelectionPrompt(visiblePage, selectionPrompt.text, selectionPrompt.heading));
+    setSelectionPrompt(null);
+    window.getSelection()?.removeAllRanges();
   };
 
   return <section className="knowledge-book-panel" aria-label="知识教材">
@@ -264,9 +364,9 @@ export function KnowledgeBookPanel({ workspaceId }: { workspaceId: string }) {
       <main className="knowledge-book-main">
         {error && <div className="knowledge-book-error" role="alert"><span>{error}</span><button type="button" onClick={() => selectedId ? setPageReloadToken((value) => value + 1) : void loadNavigation()}>重试</button></div>}
         <div className="knowledge-book-page-scroll" ref={contentRef} onScroll={handlePageScroll}>
-          {loadingPage ? <div className="knowledge-book-state"><span className="spin">⟳</span><p>正在打开知识点……</p></div> : visiblePage ? <article className="knowledge-book-article">
+          {loadingPage ? <div className="knowledge-book-state"><span className="spin">⟳</span><p>正在打开知识点……</p></div> : visiblePage ? <article ref={articleRef} className="knowledge-book-article" onPointerUp={updateSelectionPrompt} onKeyUp={updateSelectionPrompt}>
             <header><p>{visiblePage.topic_name}</p><h1 ref={pageTitleRef} tabIndex={-1}>{visiblePage.title}</h1><small>教师教材 · 第 {selectedIndex + 1} 节</small></header>
-            <MarkdownContent headingIds={headingIndex.headingIds}>{visiblePage.content_markdown}</MarkdownContent>
+            <MarkdownContent headingIds={headingIndex.headingIds} codeActions={onAskNova || onOpenInSandbox ? { onAskNova: onAskNova ? (code, language) => onAskNova(buildCodePrompt(visiblePage, code, language, headingIndex.headings.find((item) => item.id === activeHeadingId)?.text)) : undefined, onOpenInSandbox } : undefined}>{visiblePage.content_markdown}</MarkdownContent>
             <footer className="knowledge-book-page-nav">
               <button type="button" disabled={selectedIndex <= 0} onClick={() => selectKnowledgePoint(navigation[selectedIndex - 1].knowledge_point_id)}>上一节</button>
               <button type="button" disabled={selectedIndex < 0 || selectedIndex >= navigation.length - 1} onClick={() => selectKnowledgePoint(navigation[selectedIndex + 1].knowledge_point_id)}>下一节</button>
@@ -280,5 +380,6 @@ export function KnowledgeBookPanel({ workspaceId }: { workspaceId: string }) {
         {headingIndex.headings.length ? <nav>{headingIndex.headings.map((heading) => <button type="button" key={heading.id} className={activeHeadingId === heading.id ? "active" : ""} style={{ paddingLeft: `${12 + (heading.level - 2) * 12}px` }} onClick={() => scrollToHeading(heading.id)}>{heading.text}</button>)}</nav> : <p className="knowledge-book-muted">本页暂无小标题。</p>}
       </aside>
     </div>
+    {selectionPrompt && onAskNova && <button ref={selectionActionRef} type="button" className="knowledge-book-selection-action" style={{ top: `${selectionPrompt.top}px`, left: `${selectionPrompt.left}px` }} onMouseDown={(event) => event.preventDefault()} onClick={askSelection}>向 Nova 提问</button>}
   </section>;
 }
