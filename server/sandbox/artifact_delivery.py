@@ -6,7 +6,14 @@ import os
 
 from fastapi import Response
 
-from .artifacts import ArtifactAccessSigner, artifact_access_url, artifact_security_headers, resolve_artifact_path, validate_artifact_origin
+from .artifacts import (
+    ArtifactAccessSigner,
+    artifact_access_url,
+    artifact_expired,
+    artifact_security_headers,
+    resolve_artifact_path,
+    validate_artifact_origin,
+)
 
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 
@@ -16,6 +23,7 @@ class ArtifactMetadata(Protocol):
     owner_user_id: str
     locator: str
     mime_type: str
+    expires_at: object | None
 
 
 def _read_artifact_bytes(store_root: Path, locator: str) -> bytes:
@@ -57,6 +65,8 @@ def build_artifact_response(
     store_root: Path,
     application_origin: str | None = None,
 ) -> Response:
+    if artifact_expired(getattr(artifact, "expires_at", None)):
+        raise PermissionError("sandbox artifact expired")
     signer.verify(ticket, artifact_id=artifact.id, owner_user_id=artifact.owner_user_id)
     frame_ancestors = "'none'"
     if application_origin:

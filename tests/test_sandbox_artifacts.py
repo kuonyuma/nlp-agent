@@ -142,6 +142,32 @@ def test_artifact_response_verifies_ticket_and_adds_html_isolation_headers(tmp_p
     assert "sandbox" in response.headers["content-security-policy"]
 
 
+def test_artifact_response_rechecks_metadata_ttl(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from server.sandbox.artifacts import ArtifactAccessSigner
+    from server.sandbox.artifact_delivery import build_artifact_response
+
+    artifact = tmp_path / "output.html"
+    artifact.write_text("<h1>expired</h1>", encoding="utf-8")
+    metadata = SimpleNamespace(
+        id="artifact-expired",
+        owner_user_id="user-a",
+        locator="output.html",
+        mime_type="text/html",
+        expires_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    ticket = ArtifactAccessSigner("test-secret").issue(
+        artifact_id="artifact-expired", owner_user_id="user-a"
+    )
+    with pytest.raises(PermissionError, match="expired"):
+        build_artifact_response(
+            metadata,
+            ticket=ticket,
+            signer=ArtifactAccessSigner("test-secret"),
+            store_root=tmp_path,
+        )
+
+
 def test_artifact_response_allows_only_configured_application_frame(tmp_path: Path) -> None:
     from server.sandbox.artifacts import ArtifactAccessSigner
     from server.sandbox.artifact_delivery import build_artifact_response

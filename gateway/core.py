@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from core.identity import AccessDeniedError, AuthenticatedPrincipal
-from core.rbac import Permission, ResourceRef, authorization_service
+from core.rbac import (
+    Permission,
+    ResourceRef,
+    authorization_service,
+    required_permission_for_high_risk_tool,
+)
 from core.session_context import SessionContext
 from core.learning import LearningContext, TeachingMaterials, default_progress
 from gateway.contracts import (
@@ -789,7 +794,13 @@ class BackendGateway:
         reason: str,
         ttl_s: float = 300,
     ) -> dict[str, Any]:
-        await self.sessions.resolve(principal, session_id)
+        context = await self.sessions.resolve(principal, session_id)
+        permission = required_permission_for_high_risk_tool(tool_name)
+        authorization_service.require(
+            principal,
+            permission,
+            workspace_id=context.workspace_id,
+        )
         from core.tool_registry import physical_tool_manager
 
         grant = physical_tool_manager.grant_high_risk_tool(

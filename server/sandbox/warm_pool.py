@@ -96,7 +96,12 @@ class WarmPoolService:
             .with_for_update()
         )
         if existing is not None:
-            return RuntimeClaim(runtime=existing, nonce=None)
+            # A claim is one-shot.  Rotate the nonce when a second command
+            # reuses the same assigned runtime so callers never fall back to a
+            # stale ticket or a plaintext secret.
+            nonce = str(uuid4())
+            existing.claim_nonce_hash = claim_nonce_hash(nonce)
+            return RuntimeClaim(runtime=existing, nonce=nonce)
         runtime = await session.scalar(
             select(SandboxRuntimeInstanceModel)
             .where(

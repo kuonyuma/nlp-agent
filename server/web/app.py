@@ -78,6 +78,7 @@ from server.teacher.service import teacher_service
 from server.rbac.service import rbac_service
 from server.infrastructure.mysql.models import UserModel
 from server.sandbox.service import sandbox_lifecycle_service
+from server.sandbox.artifact_retention import purge_expired_artifacts
 from server.release_notes.service import (
     ReleaseNoteConflictError,
     ReleaseNoteNotFoundError,
@@ -185,6 +186,15 @@ def create_app(
                 gateway.authorization_session_factory
             )
         app.state.gateway = gateway
+        # Bind model-facing Sandbox tools to the same authenticated DB session
+        # factory as the HTTP gateway.  The module-level tool objects remain
+        # stable for LangChain catalogs while their service is request-safe.
+        from server.sandbox.model_tools import configure_model_sandbox_service
+
+        configure_model_sandbox_service(
+            mode=settings.NLP_AGENT_SANDBOX_RUNTIME_MODE,
+            session_factory=gateway.authorization_session_factory,
+        )
         await gateway.start()
         redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
         authorization_channel = str(settings.gateway_runtime.get("redis_authorization_channel", "nlp-agent:authorization"))
@@ -225,6 +235,9 @@ def create_app(
             try:
                 while True:
                     await sandbox_lifecycle_service.reconcile_expired_leases(factory)
+                    store_root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
+                    if store_root:
+                        await purge_expired_artifacts(factory, store_root=Path(store_root))
                     await asyncio.sleep(sandbox_reconcile_interval_s)
             except asyncio.CancelledError:
                 raise

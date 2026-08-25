@@ -22,8 +22,14 @@ class RedisSandboxMetricsStore:
         await self._client.zadd(self._key, {member: timestamp})
         await self._client.zremrangebyscore(self._key, 0, timestamp - self._retention_seconds)
         trim = getattr(self._client, "zremrangebyrank", None)
-        if trim is not None:
-            await trim(self._key, 0, -(self._max_samples + 1))
+        card = getattr(self._client, "zcard", None)
+        if trim is not None and card is not None:
+            count = int(await card(self._key))
+            if count > self._max_samples:
+                # Redis rank endpoints are inclusive.  Remove precisely the
+                # oldest excess rows; using a negative end rank can delete the
+                # entire sorted set when it is smaller than max_samples.
+                await trim(self._key, 0, count - self._max_samples - 1)
         await self._client.expire(self._key, self._retention_seconds)
         rows = await self._client.zrange(self._key, -min(self._max_samples, 60), -1)
         samples: list[dict[str, object]] = []

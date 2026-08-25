@@ -24,6 +24,7 @@ from configs.settings import settings
 from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 from server.sandbox.gateway import SandboxGateway
 from server.sandbox.manager import WarmPoolManager
+from server.sandbox.optimization import AdaptivePoolPolicy
 from server.sandbox.ticket import SandboxTicketSigner
 from server.sandbox.events import SandboxEventStore, default_sandbox_event_store
 from server.web.protocol import control_event
@@ -70,6 +71,15 @@ def _sandbox_gateway(request: Request) -> SandboxGateway:
             docker=DockerRuntimeAdapter(DockerRuntimeConfig(image=image)),
             resource_profile_id="python-base",
             ready_target=max(1, settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET),
+            adaptive_policy=(
+                AdaptivePoolPolicy(
+                    ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
+                    ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
+                    burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
+                )
+                if settings.NLP_AGENT_SANDBOX_ADAPTIVE_POOL_ENABLED
+                else None
+            ),
         )
     if mode not in {"inmemory", "docker"}:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox runtime is not enabled.")

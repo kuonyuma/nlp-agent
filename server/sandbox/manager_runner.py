@@ -14,6 +14,7 @@ from server.infrastructure.mysql.engine import create_engine, create_session_fac
 
 from .docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 from .manager import WarmPoolManager
+from .optimization import AdaptivePoolPolicy
 
 
 async def run_forever() -> None:
@@ -30,6 +31,15 @@ async def run_forever() -> None:
         docker=DockerRuntimeAdapter(DockerRuntimeConfig(image=image)),
         resource_profile_id="python-base",
         ready_target=target,
+        adaptive_policy=(
+            AdaptivePoolPolicy(
+                ready_min=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MIN,
+                ready_max=settings.NLP_AGENT_SANDBOX_WARM_POOL_READY_MAX,
+                burst_buffer=settings.NLP_AGENT_SANDBOX_BURST_BUFFER,
+            )
+            if settings.NLP_AGENT_SANDBOX_ADAPTIVE_POOL_ENABLED
+            else None
+        ),
     )
     try:
         while True:

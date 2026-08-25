@@ -12,11 +12,14 @@ from uuid import uuid4
 
 from sqlalchemy import exists, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from configs.settings import settings
 
 from server.infrastructure.mysql.models import SandboxEnvironmentModel, SandboxLeaseModel, SandboxRuntimeInstanceModel, SessionModel, UserModel
 
 from .contracts import SandboxScope
 from .docker_runtime import DockerRuntimeAdapter
+from .faults import SandboxFaultInjector
+from .optimization import AdaptivePoolPolicy
 from .warm_pool import RuntimeClaim, RuntimeState, reconcile_runtime_ids, runtime_container_name, warm_pool_service
 
 
@@ -86,14 +89,44 @@ class WarmPoolManager:
         docker: DockerRuntimeAdapter,
         resource_profile_id: str,
         ready_target: int,
+        adaptive_policy: AdaptivePoolPolicy | None = None,
+        fault_injector: SandboxFaultInjector | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._docker = docker
         self._resource_profile_id = resource_profile_id
         self._ready_target = ready_target
+        self._adaptive_policy = adaptive_policy
+        self._faults = fault_injector or SandboxFaultInjector.from_env()
+
+    @staticmethod
+    def _trace(name: str, **payload: object) -> None:
+        try:
+            from core.observability.runtime import global_telemetry
+
+            global_telemetry.event(name, payload=payload)
+        except Exception:
+            # Observability must not make the Docker control plane fail open or
+            # fail closed when its optional writer is unavailable.
+            return
+
+    def recommended_ready_target(self, *, arrival_rate_per_min: float, refill_p95_s: float) -> int:
+        if self._adaptive_policy is None:
+            return self._ready_target
+        return self._adaptive_policy.target_for(
+            arrival_rate_per_min=arrival_rate_per_min,
+            refill_p95_s=refill_p95_s,
+        )
+
+    def _effective_ready_target(self) -> int:
+        return self.recommended_ready_target(
+            arrival_rate_per_min=settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN,
+            refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
+        )
 
     async def refill(self) -> int:
         """Create only the deficit. Docker runs outside every database transaction."""
+        self._trace("sandbox.manager.refill.started", profile=self._resource_profile_id)
         lock_name = f"nova.sandbox.pool.{self._resource_profile_id}"
         async with self._session_factory() as lock_session:
             acquired = await lock_session.scalar(text("SELECT GET_LOCK(:name, 0)"), {"name": lock_name})
@@ -105,14 +138,16 @@ class WarmPoolManager:
                 # lock session is held waiting for a second connection.
                 await self._fail_stale_creating(lock_session)
                 counts = await self._counts(lock_session)
+                target = self._effective_ready_target()
                 deficit = refill_deficit(
-                    target=self._ready_target,
+                    target=target,
                     ready_count=counts.ready_count,
                     creating_count=counts.creating_count,
                 )
                 for _ in range(deficit):
                     await self._create_one()
                 await lock_session.commit()
+                self._trace("sandbox.manager.refill.completed", profile=self._resource_profile_id, created=deficit)
                 return deficit
             finally:
                 await lock_session.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": lock_name})
@@ -125,23 +160,30 @@ class WarmPoolManager:
             "resource_profile": self._resource_profile_id,
             "ready": counts.ready_count,
             "creating": counts.creating_count,
-            "target": self._ready_target,
+            "target": self._effective_ready_target(),
             "deficit": refill_deficit(
-                target=self._ready_target,
+                target=self._effective_ready_target(),
                 ready_count=counts.ready_count,
                 creating_count=counts.creating_count,
+            ),
+            "adaptive_target": self.recommended_ready_target(
+                arrival_rate_per_min=settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN,
+                refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
             ),
         }
 
     async def claim(self, scope: SandboxScope, *, lease_id: str) -> RuntimeClaim | None:
+        self._trace("sandbox.manager.claim.started", lease_id=lease_id)
         claim = await self._claim_once(scope, lease_id=lease_id)
         if claim is None:
             await self.refill()
             claim = await self._claim_once(scope, lease_id=lease_id)
         if claim is None:
+            self._trace("sandbox.manager.claim.warming", lease_id=lease_id)
             return None
         external_id = claim.runtime.external_runtime_id
         if external_id and await self._docker.kernel_ready(external_id):
+            self._trace("sandbox.manager.claim.completed", lease_id=lease_id, runtime_id=str(claim.runtime.id))
             return claim
         await self.destroy_runtime(claim.runtime.id, reason="kernel.not.ready")
         return None
@@ -164,6 +206,7 @@ class WarmPoolManager:
             return claim
 
     async def destroy_runtime(self, runtime_id: str, *, reason: str) -> None:
+        self._trace("sandbox.manager.destroy.started", runtime_id=runtime_id, reason=reason)
         async with self._session_factory.begin() as session:
             runtime = await warm_pool_service.mark_draining(session, runtime_id)
             if runtime is None:
@@ -188,6 +231,7 @@ class WarmPoolManager:
                 runtime.failure_reason = reason
             await warm_pool_service.mark_destroyed(session, runtime_id)
         await self.refill()
+        self._trace("sandbox.manager.destroy.completed", runtime_id=runtime_id, reason=reason)
 
     async def reset_runtime(self, runtime_id: str) -> None:
         """Fence every existing ticket before destroying the user's runtime."""
@@ -199,6 +243,33 @@ class WarmPoolManager:
             if environment is not None:
                 environment.generation += 1
         await self.destroy_runtime(runtime_id, reason="user.restart")
+
+    async def run_scratch(
+        self,
+        *,
+        source: str,
+        timeout_seconds: int = 15,
+        output_limit_bytes: int = 1_000_000,
+    ) -> dict[str, object]:
+        """Run an isolated model experiment without claiming a user runtime."""
+        self._faults.fail_if_configured("docker.scratch")
+        return await self._docker.run_scratch(
+            source=source,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+        )
+
+    async def interrupt_runtime(self, runtime_id: str) -> None:
+        """Interrupt only a runtime owned by this manager's database row."""
+        async with self._session_factory() as session:
+            runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id)
+            if runtime is None or runtime.state != RuntimeState.ASSIGNED:
+                raise LookupError("sandbox runtime is not assigned")
+            external_id = runtime.external_runtime_id
+        if not external_id:
+            raise LookupError("sandbox runtime has no Docker container")
+        self._faults.fail_if_configured("docker.interrupt")
+        await self._docker.interrupt(external_id)
 
     async def reconcile(self) -> ReconcileActions:
         """Fail DB rows for vanished containers and remove unmanaged-in-DB orphans."""
@@ -281,6 +352,7 @@ class WarmPoolManager:
         source: str,
     ) -> dict[str, object]:
         """Fence a one-time browser command before it ever reaches Docker."""
+        self._trace("sandbox.manager.execute.started", runtime_id=runtime_id, lease_id=lease_id)
         async with self._session_factory.begin() as session:
             lease = await session.get(SandboxLeaseModel, lease_id, with_for_update=True)
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
@@ -310,7 +382,9 @@ class WarmPoolManager:
         if not external_id:
             raise RuntimeError("claimed runtime has no container id")
         try:
-            return await self._docker.execute(external_id, source=source)
+            result = await self._docker.execute(external_id, source=source)
+            self._trace("sandbox.manager.execute.completed", runtime_id=runtime_id, status=result.get("status"))
+            return result
         except TimeoutError:
             # An interrupted kernel can retain a corrupt execution state; replace
             # it rather than letting a later command inherit an unknown process.
@@ -374,6 +448,7 @@ class WarmPoolManager:
                 )
             )
         try:
+            self._faults.fail_if_configured("docker.create")
             name = runtime_container_name(runtime_id)
             if await self._docker.image_cached():
                 external_id = await self._docker.create_l1(name=name)
