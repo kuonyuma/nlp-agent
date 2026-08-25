@@ -86,9 +86,22 @@ jobs:
           python-version: '3.11'
       - run: pip install -e . pytest pytest-asyncio
       - run: alembic upgrade head
+      - name: Install gVisor runsc for lifecycle tests
+        run: |
+          ARCH=$(uname -m)
+          URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
+          curl -fsSLO ${URL}/gvisor.tar.bz2
+          curl -fsSLO ${URL}/gvisor.tar.bz2.sha512
+          sha512sum -c gvisor.tar.bz2.sha512
+          sudo tar -xjf gvisor.tar.bz2 -C /usr/local/bin
+          sudo chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
+          sudo runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'
       - name: Verify Docker reconcile destroys orphan runtimes
         env:
           RUN_SANDBOX_DOCKER_MANAGER_INTEGRATION: '1'
+          NLP_AGENT_DOCKER_RUNTIME: runsc
         run: pytest tests/test_sandbox_manager_docker_integration.py -q
       - name: Verify authentication lifecycle releases leases
         run: pytest tests/test_sandbox_phase0.py -q

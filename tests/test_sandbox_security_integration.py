@@ -52,5 +52,27 @@ def test_runsc_container_denies_network_and_docker_socket() -> None:
         payload = json.loads(flood.stdout)
         assert len(payload.get("stdout", "").encode()) <= 1024
         assert payload.get("truncated") is True
+
+        fork_probe = _docker_run(
+            ["docker", "exec", name, "python", "-c", (
+                "import os; count=0; "
+                "\nfor _ in range(512):\n"
+                " try: child=os.fork()\n"
+                " except OSError: break\n"
+                " if child == 0: os._exit(0)\n"
+                " count += 1\n"
+                "for _ in range(count): os.wait()\n"
+                "print(count)"
+            )],
+            capture_output=True, text=True,
+        )
+        assert fork_probe.returncode == 0
+        assert int(fork_probe.stdout.strip()) < 512
+
+        memory_probe = _docker_run(
+            ["docker", "exec", name, "python", "-c", "bytearray(2 * 1024 * 1024 * 1024)"],
+            capture_output=True, text=True,
+        )
+        assert memory_probe.returncode != 0
     finally:
         _docker_run(["docker", "rm", "--force", name], capture_output=True, text=True)

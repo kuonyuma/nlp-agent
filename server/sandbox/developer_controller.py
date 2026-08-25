@@ -25,6 +25,43 @@ def _require_monitor(principal: Principal) -> None:
     authorization_service.require(principal, Permission.SYSTEM_RUNTIME_MONITOR)
 
 
+def _runtime_payload(row: SandboxRuntimeInstanceModel, *, detail: bool = False) -> dict[str, object | None]:
+    payload: dict[str, object | None] = {
+        "id": str(row.id),
+        "state": row.state,
+        "node_id": row.node_id,
+        "runtime_kind": row.runtime_kind,
+        "resource_profile_id": row.resource_profile_id,
+        "external_runtime_id": row.external_runtime_id,
+        "failure_reason": row.failure_reason,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+    if detail:
+        payload.update(
+            {
+                "image_digest": row.image_digest,
+                "environment_id": str(row.environment_id) if row.environment_id else None,
+                "generation": row.generation,
+                "last_heartbeat_at": row.last_heartbeat_at.isoformat() if row.last_heartbeat_at else None,
+            }
+        )
+    return payload
+
+
+def _execution_payload(row: SandboxExecutionModel) -> dict[str, object | None]:
+    return {
+        "id": str(row.id),
+        "owner_user_id": str(row.owner_user_id),
+        "environment_id": str(row.environment_id),
+        "runtime_instance_id": str(row.runtime_instance_id) if row.runtime_instance_id else None,
+        "status": row.status,
+        "generation": row.generation,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "exit_reason": row.exit_reason,
+    }
+
+
 @router.get("/overview")
 async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, object]:
     _require_monitor(principal)
@@ -35,6 +72,24 @@ async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, obj
         .where(SandboxExecutionModel.started_at.is_not(None), SandboxExecutionModel.completed_at.is_not(None))
         .order_by(SandboxExecutionModel.created_at.desc()).limit(1000)
     )).all()
+    active_execution_rows = (await db.execute(
+        select(SandboxExecutionModel)
+        .where(SandboxExecutionModel.status == "running")
+        .order_by(SandboxExecutionModel.created_at.desc())
+        .limit(100)
+    )).scalars().all()
+    failed_execution_rows = (await db.execute(
+        select(SandboxExecutionModel)
+        .where(SandboxExecutionModel.status == "failed")
+        .order_by(SandboxExecutionModel.created_at.desc())
+        .limit(50)
+    )).scalars().all()
+    failed_runtime_rows = (await db.execute(
+        select(SandboxRuntimeInstanceModel)
+        .where(SandboxRuntimeInstanceModel.state == "failed")
+        .order_by(SandboxRuntimeInstanceModel.updated_at.desc())
+        .limit(50)
+    )).scalars().all()
     durations: list[float] = []
     for started_at, completed_at in execution_rows:
         if started_at is None or completed_at is None:
@@ -67,6 +122,19 @@ async def sandbox_overview(db: DbSession, principal: Principal) -> dict[str, obj
         "runtime_states": runtime_states,
         "capacity": capacity,
         "execution_latency": summarize_execution_latency(durations),
+        "active_executions": [_execution_payload(row) for row in active_execution_rows],
+        "recent_failures": [
+            {"kind": "execution", **_execution_payload(row)} for row in failed_execution_rows
+        ] + [
+            {
+                "kind": "runtime",
+                "id": str(row.id),
+                "state": row.state,
+                "failure_reason": row.failure_reason,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+            for row in failed_runtime_rows
+        ],
         "alerts": alerts,
         "capacity_history": history,
         "sampled_at": datetime.now(UTC).isoformat(),
@@ -79,15 +147,7 @@ async def list_sandbox_runtimes(db: DbSession, principal: Principal) -> dict[str
     rows = (await db.execute(
         select(SandboxRuntimeInstanceModel).order_by(SandboxRuntimeInstanceModel.updated_at.desc()).limit(200)
     )).scalars().all()
-    return {"items": [
-        {
-            "id": str(row.id), "state": row.state, "node_id": row.node_id,
-            "runtime_kind": row.runtime_kind, "resource_profile_id": row.resource_profile_id,
-            "external_runtime_id": row.external_runtime_id, "failure_reason": row.failure_reason,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-        }
-        for row in rows
-    ]}
+    return {"items": [_runtime_payload(row) for row in rows]}
 
 
 @router.post("/runtimes/{runtime_id}/drain")
@@ -115,29 +175,21 @@ async def get_sandbox_runtime(runtime_id: str, db: DbSession, principal: Princip
     runtime = await db.get(SandboxRuntimeInstanceModel, runtime_id)
     if runtime is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sandbox runtime not found.")
-    return {
-        "id": str(runtime.id), "state": runtime.state, "node_id": runtime.node_id,
-        "runtime_kind": runtime.runtime_kind, "resource_profile_id": runtime.resource_profile_id,
-        "external_runtime_id": runtime.external_runtime_id, "image_digest": runtime.image_digest,
-        "environment_id": str(runtime.environment_id) if runtime.environment_id else None,
-        "generation": runtime.generation, "last_heartbeat_at": runtime.last_heartbeat_at.isoformat() if runtime.last_heartbeat_at else None,
-        "failure_reason": runtime.failure_reason, "updated_at": runtime.updated_at.isoformat() if runtime.updated_at else None,
-    }
+    return _runtime_payload(runtime, detail=True)
 
 
 @router.get("/executions")
-async def list_sandbox_executions(db: DbSession, principal: Principal) -> dict[str, list[dict[str, object | None]]]:
+async def list_sandbox_executions(
+    db: DbSession,
+    principal: Principal,
+    status_filter: str | None = None,
+) -> dict[str, list[dict[str, object | None]]]:
     _require_monitor(principal)
-    rows = (await db.execute(select(SandboxExecutionModel).order_by(SandboxExecutionModel.created_at.desc()).limit(200))).scalars().all()
-    return {"items": [
-        {
-            "id": str(row.id), "owner_user_id": str(row.owner_user_id), "environment_id": str(row.environment_id),
-            "runtime_instance_id": str(row.runtime_instance_id) if row.runtime_instance_id else None,
-            "status": row.status, "generation": row.generation, "started_at": row.started_at.isoformat() if row.started_at else None,
-            "completed_at": row.completed_at.isoformat() if row.completed_at else None, "exit_reason": row.exit_reason,
-        }
-        for row in rows
-    ]}
+    query = select(SandboxExecutionModel).order_by(SandboxExecutionModel.created_at.desc()).limit(200)
+    if status_filter:
+        query = query.where(SandboxExecutionModel.status == status_filter)
+    rows = (await db.execute(query)).scalars().all()
+    return {"items": [_execution_payload(row) for row in rows]}
 
 
 @router.get("/executions/{execution_id}/events")

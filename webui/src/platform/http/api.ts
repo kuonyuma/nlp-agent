@@ -96,6 +96,8 @@ export const api = {
     runtime_states: Record<string, number>;
     capacity: { ready: number; creating: number; target: number; deficit: number };
     execution_latency: { sample_count: number; p50_ms: number | null; p95_ms: number | null; p99_ms: number | null };
+    active_executions: Array<{ id: string; owner_user_id: string; environment_id: string; runtime_instance_id: string | null; status: string; generation: number; started_at: string | null; completed_at: string | null; exit_reason: string | null }>;
+    recent_failures: Array<Record<string, unknown>>;
     alerts: Array<{ code: string; severity: string; message: string }>;
     capacity_history: Array<{ timestamp: number; ready: number; creating: number; target: number; deficit: number }>;
     sampled_at: string;
@@ -103,7 +105,7 @@ export const api = {
   listSandboxRuntimes: () => request<{ items: Array<{ id: string; state: string; node_id: string | null; runtime_kind: string; resource_profile_id: string; external_runtime_id: string | null; failure_reason: string | null; updated_at: string | null }> }>("/developer/sandbox/runtimes"),
   drainSandboxRuntime: (runtimeId: string) => request<{ id: string; state: string }>(`/developer/sandbox/runtimes/${encodeURIComponent(runtimeId)}/drain`, { method: "POST", body: "{}" }),
   getSandboxRuntime: (runtimeId: string) => request<{ id: string; state: string; node_id: string | null; runtime_kind: string; resource_profile_id: string; external_runtime_id: string | null; image_digest: string | null; environment_id: string | null; generation: number; last_heartbeat_at: string | null; failure_reason: string | null; updated_at: string | null }>(`/developer/sandbox/runtimes/${encodeURIComponent(runtimeId)}`),
-  listSandboxExecutions: () => request<{ items: Array<{ id: string; owner_user_id: string; environment_id: string; runtime_instance_id: string | null; status: string; generation: number; started_at: string | null; completed_at: string | null; exit_reason: string | null }> }>("/developer/sandbox/executions"),
+  listSandboxExecutions: (status?: string) => request<{ items: Array<{ id: string; owner_user_id: string; environment_id: string; runtime_instance_id: string | null; status: string; generation: number; started_at: string | null; completed_at: string | null; exit_reason: string | null }> }>(`/developer/sandbox/executions${status ? `?status_filter=${encodeURIComponent(status)}` : ""}`),
   replaySandboxExecutionEvents: (executionId: string, afterEventId?: string) => request<{ execution_id: string; events: Array<{ event_id: string; seq: number | string; type: string; payload: Record<string, unknown> }> }>(`/developer/sandbox/executions/${encodeURIComponent(executionId)}/events${afterEventId ? `?after_event_id=${encodeURIComponent(afterEventId)}` : ""}`),
   getSandboxArtifactUrl: (artifactId: string) => request<{ url: string }>(`/sandbox/artifacts/${encodeURIComponent(artifactId)}/access`),
   createWsTicket: () => request<{ ticket: string; expires_in: number }>("/auth/ws-ticket", { method: "POST", body: "{}" }),

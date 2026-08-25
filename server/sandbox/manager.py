@@ -29,6 +29,35 @@ def refill_deficit(*, target: int, ready_count: int, creating_count: int) -> int
     return max(0, target - ready_count - creating_count)
 
 
+def auth_lifecycle_allows_execution(
+    *,
+    lease: SandboxLeaseModel,
+    auth_session: SessionModel | None,
+    user: UserModel | None,
+    scope_generation: int,
+    now: datetime,
+) -> bool:
+    """Keep a claimed runtime fail-closed across the auth lifecycle.
+
+    Reconciliation eventually destroys runtimes after logout/revocation, but a
+    command can arrive in the small window before that sweep.  The execution
+    path therefore repeats the authoritative lease/session/user checks rather
+    than trusting a previously issued ticket or a stale runtime assignment.
+    """
+    return bool(
+        auth_session is not None
+        and user is not None
+        and auth_session.user_id == lease.user_id
+        and lease.expires_at > now
+        and auth_session.revoked_at is None
+        and auth_session.expires_at > now
+        and auth_session.authorization_version == user.authorization_version
+        and auth_session.authorization_version == scope_generation
+        and user.status == "active"
+        and user.deleted_at is None
+    )
+
+
 @dataclass(frozen=True)
 class ReconcileActions:
     mark_missing_failed: set[str]
@@ -259,6 +288,16 @@ class WarmPoolManager:
                 or runtime.environment_id != lease.environment_id
             ):
                 raise PermissionError("sandbox command lease, generation, or nonce is invalid")
+            auth_session = None if lease is None else await session.get(SessionModel, lease.auth_session_id)
+            user = None if lease is None else await session.get(UserModel, lease.user_id)
+            if lease is None or not auth_lifecycle_allows_execution(
+                lease=lease,
+                auth_session=auth_session,
+                user=user,
+                scope_generation=scope.generation,
+                now=_utc_now(),
+            ):
+                raise PermissionError("sandbox authentication lifecycle is no longer active")
             if runtime.claim_nonce_hash is not None:
                 if nonce is None or not warm_pool_service.validate_nonce(runtime.claim_nonce_hash, nonce):
                     raise PermissionError("sandbox command lease, generation, or nonce is invalid")
@@ -292,7 +331,11 @@ class WarmPoolManager:
                 continue
             try:
                 await self._docker.destroy(external_id)
-            except Exception:
+            except Exception as error:
+                async with self._session_factory.begin() as session:
+                    runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
+                    if runtime is not None:
+                        runtime.failure_reason = f"destroy.retry: {error}"[:500]
                 continue
             async with self._session_factory.begin() as session:
                 await warm_pool_service.mark_destroyed(session, runtime_id)
