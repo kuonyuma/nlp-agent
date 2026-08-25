@@ -55,19 +55,22 @@ def test_runsc_container_denies_network_and_docker_socket() -> None:
 
         fork_probe = _docker_run(
             ["docker", "exec", name, "python", "-c", (
-                "import os; count=0; "
+                "import os; read_fd, write_fd=os.pipe(); children=[]; "
                 "\nfor _ in range(512):\n"
                 " try: child=os.fork()\n"
                 " except OSError: break\n"
-                " if child == 0: os._exit(0)\n"
-                " count += 1\n"
-                "for _ in range(count): os.wait()\n"
-                "print(count)"
+                " if child == 0:\n"
+                "  os.close(write_fd); os.read(read_fd, 1); os._exit(0)\n"
+                " children.append(child)\n"
+                "os.close(read_fd); os.close(write_fd)\n"
+                "for child in children: os.waitpid(child, 0)\n"
+                "print(len(children))"
             )],
             capture_output=True, text=True,
         )
         assert fork_probe.returncode == 0
-        assert int(fork_probe.stdout.strip()) < 512
+        fork_count = int(fork_probe.stdout.strip())
+        assert 0 < fork_count < 512
 
         memory_probe = _docker_run(
             ["docker", "exec", name, "python", "-c", "bytearray(2 * 1024 * 1024 * 1024)"],

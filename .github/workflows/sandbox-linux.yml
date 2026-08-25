@@ -86,6 +86,23 @@ jobs:
           python-version: '3.11'
       - run: pip install -r requirements.txt
       - run: alembic upgrade head
+      - name: Verify authentication lifecycle releases leases
+        run: pytest tests/test_sandbox_phase0.py -q
+
+  # runsc installation restarts Docker, so this job starts MySQL only after
+  # the runtime is registered instead of using a GitHub service container.
+  sandbox-manager-runsc:
+    runs-on: ubuntu-latest
+    env:
+      NLP_AGENT_DATABASE_URL: mysql+aiomysql://root:root@127.0.0.1:3306/pro_nlp
+      RUN_SANDBOX_DOCKER_MANAGER_INTEGRATION: '1'
+      NLP_AGENT_DOCKER_RUNTIME: runsc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
       - name: Install gVisor runsc for lifecycle tests
         run: |
           ARCH=$(uname -m)
@@ -98,10 +115,23 @@ jobs:
           sudo runsc install
           sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'
+      - name: Start MySQL after Docker runtime setup
+        run: |
+          docker run --detach --name nova-ci-mysql --publish 3306:3306 \
+            --env MYSQL_ROOT_PASSWORD=root --env MYSQL_DATABASE=pro_nlp mysql:8.4
+          for attempt in $(seq 1 60); do
+            if docker exec nova-ci-mysql mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs nova-ci-mysql || true
+              exit 1
+            fi
+            sleep 2
+          done
+      - run: alembic upgrade head
       - name: Verify Docker reconcile destroys orphan runtimes
-        env:
-          RUN_SANDBOX_DOCKER_MANAGER_INTEGRATION: '1'
-          NLP_AGENT_DOCKER_RUNTIME: runsc
         run: pytest tests/test_sandbox_manager_docker_integration.py -q
-      - name: Verify authentication lifecycle releases leases
-        run: pytest tests/test_sandbox_phase0.py -q
+      - name: Remove MySQL test container
+        if: always()
+        run: docker rm --force nova-ci-mysql || true
