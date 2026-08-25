@@ -100,7 +100,10 @@ class WarmPoolManager:
             if not acquired:
                 return 0
             try:
-                await self._fail_stale_creating()
+                # Reuse the advisory-lock connection for this read/write
+                # transaction. A small MySQL pool must not deadlock while the
+                # lock session is held waiting for a second connection.
+                await self._fail_stale_creating(lock_session)
                 counts = await self._counts(lock_session)
                 deficit = refill_deficit(
                     target=self._ready_target,
@@ -109,6 +112,7 @@ class WarmPoolManager:
                 )
                 for _ in range(deficit):
                     await self._create_one()
+                await lock_session.commit()
                 return deficit
             finally:
                 await lock_session.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": lock_name})
@@ -340,23 +344,22 @@ class WarmPoolManager:
             async with self._session_factory.begin() as session:
                 await warm_pool_service.mark_destroyed(session, runtime_id)
 
-    async def _fail_stale_creating(self) -> None:
+    async def _fail_stale_creating(self, session: AsyncSession) -> None:
         deadline = _utc_now() - timedelta(minutes=5)
-        async with self._session_factory.begin() as session:
-            rows = list(
-                (await session.scalars(
-                    select(SandboxRuntimeInstanceModel)
-                    .where(
-                        SandboxRuntimeInstanceModel.resource_profile_id == self._resource_profile_id,
-                        SandboxRuntimeInstanceModel.state == "creating",
-                        SandboxRuntimeInstanceModel.created_at < deadline,
-                    )
-                    .with_for_update()
-                )).all()
-            )
-            for runtime in rows:
-                runtime.state = RuntimeState.FAILED
-                runtime.failure_reason = "pool.create.timeout"
+        rows = list(
+            (await session.scalars(
+                select(SandboxRuntimeInstanceModel)
+                .where(
+                    SandboxRuntimeInstanceModel.resource_profile_id == self._resource_profile_id,
+                    SandboxRuntimeInstanceModel.state == "creating",
+                    SandboxRuntimeInstanceModel.created_at < deadline,
+                )
+                .with_for_update()
+            )).all()
+        )
+        for runtime in rows:
+            runtime.state = RuntimeState.FAILED
+            runtime.failure_reason = "pool.create.timeout"
 
     async def _create_one(self) -> None:
         runtime_id = str(uuid4())
