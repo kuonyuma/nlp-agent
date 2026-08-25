@@ -490,6 +490,83 @@ def test_learning_catalog_only_exposes_enabled_topics_and_enabled_knowledge_poin
         ]
 
 
+def test_teacher_book_page_is_draft_first_and_student_reads_only_published_content(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        saved = client.put(
+            "/api/v1/teacher/catalog/default",
+            json={
+                "topics": [{
+                    "id": "transformer", "name": "Transformer", "description": "",
+                    "status": "enabled", "knowledge_points": [{
+                        "id": "attention", "name": "注意力", "markdown": "Q、K、V",
+                        "status": "enabled", "sort_order": 0,
+                    }],
+                }],
+                "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+            },
+            headers=write_headers(csrf),
+        )
+        assert saved.status_code == 200
+
+        navigation = client.get("/api/v1/teacher/book/default/navigation")
+        assert navigation.status_code == 200
+        assert navigation.json()["items"] == [{
+            "topic_id": "transformer", "topic_name": "Transformer",
+            "knowledge_point_id": "attention", "title": "注意力",
+            "sort_order": 0, "topic_status": "enabled", "knowledge_point_status": "enabled",
+            "has_draft": False, "has_published": False, "revision": 0,
+            "published_revision": None,
+        }]
+
+        draft = client.put(
+            "/api/v1/teacher/book/default/pages/attention",
+            json={"content_markdown": "# 注意力\n\n教材草稿", "expected_revision": 0},
+            headers=write_headers(csrf),
+        )
+        assert draft.status_code == 200
+        assert draft.json()["page"]["draft_markdown"] == "# 注意力\n\n教材草稿"
+        assert client.get("/api/v1/learning/book/default/pages/attention").status_code == 404
+
+        published = client.post(
+            "/api/v1/teacher/book/default/pages/attention/publish",
+            json={"expected_revision": 1},
+            headers=write_headers(csrf),
+        )
+        assert published.status_code == 200
+        student_page = client.get("/api/v1/learning/book/default/pages/attention")
+        assert student_page.status_code == 200
+        assert student_page.json()["page"]["content_markdown"] == "# 注意力\n\n教材草稿"
+
+
+def test_teacher_book_import_preview_keeps_only_pytorch_code_segments(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        response = client.post(
+            "/api/v1/teacher/book/default/imports/preview",
+            json={
+                "file_name": "attention.md",
+                "content_markdown": (
+                    "# 注意力\n\n"
+                    "```python\n"
+                    "#@tab tensorflow\n"
+                    "tf.nn.softmax(x)\n"
+                    "#@tab pytorch\n"
+                    "torch.softmax(x, dim=-1)\n"
+                    "```"
+                ),
+            },
+            headers=write_headers(csrf),
+        )
+        assert response.status_code == 200
+        preview = response.json()
+        assert "torch.softmax" in preview["content_markdown"]
+        assert "tf.nn.softmax" not in preview["content_markdown"]
+        assert preview["removed_frameworks"] == ["tensorflow"]
+
+
 def test_teacher_blueprint_resource_requires_one_knowledge_point_and_persists_it(web_app):
     app, _engine = web_app
     with TestClient(app) as client:

@@ -10,12 +10,22 @@ from server.teacher.analytics import build_analytics
 from server.teacher.models import (
     ExerciseBlueprint,
     GuidedBlueprint,
+    LearningBookNavigationItem,
+    LearningBookPage,
     ReviewBlueprint,
+    TeacherBookImportApplyRequest,
+    TeacherBookImportPreview,
+    TeacherBookImportPreviewRequest,
+    TeacherBookNavigationItem,
+    TeacherBookPage,
     TeacherCatalog,
     TeachingGoals,
+    UpdateTeacherBookPage,
     UpdateTeacherCatalog,
     UpdateTeachingGoals,
+    PublishTeacherBookPage,
 )
+from server.teacher.content import normalize_teacher_markdown
 
 
 class TeacherService:
@@ -59,6 +69,177 @@ class TeacherService:
         catalog = value.model_dump(mode="json")
         result = await gateway.update_teaching_catalog(principal, workspace_id, catalog)
         return {"catalog": catalog, "revision": result["revision"], "updated_at": result["updated_at"]}
+
+    @staticmethod
+    def _catalog_point(catalog: TeacherCatalog, knowledge_point_id: str) -> tuple[Any, Any]:
+        for topic in catalog.topics:
+            for point in topic.knowledge_points:
+                if point.id == knowledge_point_id:
+                    return topic, point
+        raise FileNotFoundError(knowledge_point_id)
+
+    @staticmethod
+    def _timestamp(value: Any) -> str | None:
+        return value.isoformat() if hasattr(value, "isoformat") else value
+
+    @classmethod
+    def _teacher_book_page(
+        cls,
+        workspace_id: str,
+        topic: Any,
+        point: Any,
+        row: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return TeacherBookPage(
+            workspace_id=workspace_id,
+            topic_id=topic.id,
+            topic_name=topic.name,
+            knowledge_point_id=point.id,
+            title=point.name,
+            draft_markdown=str(row.get("draft_markdown", "")) if row else "",
+            published_markdown=row.get("published_markdown") if row else None,
+            revision=int(row.get("revision", 0)) if row else 0,
+            published_revision=(
+                int(row["published_revision"])
+                if row and row.get("published_revision") is not None
+                else None
+            ),
+            updated_at=cls._timestamp(row.get("updated_at")) if row else None,
+        ).model_dump(mode="json")
+
+    async def teacher_book_navigation(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id, Permission.LEARNING_PROGRESS_READ_CLASSROOM)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        rows = await gateway.list_knowledge_pages(principal, workspace_id)
+        pages = {str(row["knowledge_point_id"]): row for row in rows}
+        items: list[dict[str, Any]] = []
+        for topic in catalog.topics:
+            for point in topic.knowledge_points:
+                row = pages.get(point.id)
+                item = TeacherBookNavigationItem(
+                    topic_id=topic.id,
+                    topic_name=topic.name,
+                    knowledge_point_id=point.id,
+                    title=point.name,
+                    sort_order=point.sort_order,
+                    topic_status=topic.status,
+                    knowledge_point_status=point.status,
+                    has_draft=bool(row and str(row.get("draft_markdown", "")).strip()),
+                    has_published=bool(row and row.get("published_markdown") is not None),
+                    revision=int(row.get("revision", 0)) if row else 0,
+                    published_revision=(
+                        int(row["published_revision"])
+                        if row and row.get("published_revision") is not None
+                        else None
+                    ),
+                )
+                items.append(item.model_dump(mode="json"))
+        return {"workspace_id": workspace_id, "items": items}
+
+    async def teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id, Permission.LEARNING_PROGRESS_READ_CLASSROOM)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, knowledge_point_id)
+        row = await gateway.get_knowledge_page(principal, workspace_id, knowledge_point_id)
+        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
+
+    async def learning_book_navigation(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str) -> dict[str, Any]:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_READ_WORKSPACE, workspace_id=workspace_id
+        )
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        rows = await gateway.list_knowledge_pages(principal, workspace_id)
+        pages = {str(row["knowledge_point_id"]): row for row in rows}
+        items: list[dict[str, Any]] = []
+        for topic in catalog.topics:
+            if topic.status != "enabled":
+                continue
+            for point in topic.knowledge_points:
+                row = pages.get(point.id)
+                if point.status != "enabled" or not row or row.get("published_markdown") is None:
+                    continue
+                items.append(
+                    LearningBookNavigationItem(
+                        topic_id=topic.id,
+                        topic_name=topic.name,
+                        knowledge_point_id=point.id,
+                        title=point.name,
+                        sort_order=point.sort_order,
+                        revision=int(row["revision"]),
+                    ).model_dump(mode="json")
+                )
+        return {"workspace_id": workspace_id, "items": items}
+
+    async def learning_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str) -> dict[str, Any]:
+        authorization_service.require(
+            principal, Permission.LEARNING_CONTENT_READ_WORKSPACE, workspace_id=workspace_id
+        )
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, knowledge_point_id)
+        if topic.status != "enabled" or point.status != "enabled":
+            raise FileNotFoundError(knowledge_point_id)
+        row = await gateway.get_published_knowledge_page(principal, workspace_id, knowledge_point_id)
+        if row is None:
+            raise FileNotFoundError(knowledge_point_id)
+        page = LearningBookPage(
+            workspace_id=workspace_id,
+            topic_id=topic.id,
+            topic_name=topic.name,
+            knowledge_point_id=point.id,
+            title=point.name,
+            content_markdown=str(row["published_markdown"]),
+            revision=int(row["published_revision"] or row["revision"]),
+        )
+        return {"page": page.model_dump(mode="json")}
+
+    async def update_teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str, body: UpdateTeacherBookPage) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, knowledge_point_id)
+        normalized = normalize_teacher_markdown("page.md", body.content_markdown)
+        row = await gateway.update_knowledge_page(
+            principal, workspace_id, knowledge_point_id, normalized.content_markdown,
+            expected_revision=body.expected_revision,
+        )
+        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
+
+    async def publish_teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str, body: PublishTeacherBookPage) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, knowledge_point_id)
+        row = await gateway.publish_knowledge_page(
+            principal, workspace_id, knowledge_point_id, expected_revision=body.expected_revision
+        )
+        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
+
+    async def preview_teacher_book_import(self, principal: AuthenticatedPrincipal, workspace_id: str, body: TeacherBookImportPreviewRequest) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        return normalize_teacher_markdown(body.file_name, body.content_markdown).model_dump(mode="json")
+
+    async def apply_teacher_book_import(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, body: TeacherBookImportApplyRequest) -> dict[str, Any]:
+        self.require_teacher(principal, workspace_id)
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        topic, point = self._catalog_point(catalog, body.knowledge_point_id)
+        normalized = normalize_teacher_markdown(body.file_name, body.content_markdown)
+        row = await gateway.update_knowledge_page(
+            principal, workspace_id, body.knowledge_point_id, normalized.content_markdown,
+            expected_revision=body.expected_revision,
+        )
+        return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
 
     @staticmethod
     def _validate_blueprint_links(catalog: TeacherCatalog) -> None:

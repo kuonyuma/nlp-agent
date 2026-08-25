@@ -1,4 +1,4 @@
-import type { AuthSession, AuthorizationAuditRecord, DeveloperSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SettingsRuntime, SystemMenu, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { AuthSession, AuthorizationAuditRecord, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, RbacPermission, RbacRole, ReleaseNoteEntry, SettingsRuntime, SystemMenu, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
 
@@ -135,6 +135,14 @@ export const api = {
   saveGuidedBlueprint: (workspaceId: string, blueprint: TeacherCatalog["guided_blueprints"][number]) => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/guided-blueprints/${encodeURIComponent(blueprint.id)}`, { method: "PUT", body: JSON.stringify(blueprint) }),
   deleteBlueprint: (workspaceId: string, kind: "exercise" | "review", blueprintId: string) => request<void>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/${kind}-blueprints/${encodeURIComponent(blueprintId)}`, { method: "DELETE" }),
   getLearningCatalog: (workspaceId = "default") => request<{ catalog: TeacherCatalog }>(`/learning/catalog/${encodeURIComponent(workspaceId)}`),
+  getTeacherBookNavigation: (workspaceId = "default") => request<{ workspace_id: string; items: TeacherBookNavigationItem[] }>(`/teacher/book/${encodeURIComponent(workspaceId)}/navigation`),
+  getTeacherBookPage: (workspaceId: string, knowledgePointId: string) => request<{ page: TeacherBookPage }>(`/teacher/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}`),
+  updateTeacherBookPage: (workspaceId: string, knowledgePointId: string, content_markdown: string, expected_revision: number) => request<{ page: TeacherBookPage }>(`/teacher/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}`, { method: "PUT", body: JSON.stringify({ content_markdown, expected_revision }) }),
+  publishTeacherBookPage: (workspaceId: string, knowledgePointId: string, expected_revision: number) => request<{ page: TeacherBookPage }>(`/teacher/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}/publish`, { method: "POST", body: JSON.stringify({ expected_revision }) }),
+  previewTeacherBookImport: (workspaceId: string, file_name: string, content_markdown: string) => request<TeacherBookImportPreview>(`/teacher/book/${encodeURIComponent(workspaceId)}/imports/preview`, { method: "POST", body: JSON.stringify({ file_name, content_markdown }) }),
+  applyTeacherBookImport: (workspaceId: string, knowledgePointId: string, file_name: string, content_markdown: string, expected_revision: number) => request<{ page: TeacherBookPage }>(`/teacher/book/${encodeURIComponent(workspaceId)}/imports/apply`, { method: "POST", body: JSON.stringify({ knowledge_point_id: knowledgePointId, file_name, content_markdown, expected_revision }) }),
+  getLearningBookNavigation: (workspaceId = "default") => request<{ workspace_id: string; items: LearningBookNavigationItem[] }>(`/learning/book/${encodeURIComponent(workspaceId)}/navigation`),
+  getLearningBookPage: (workspaceId: string, knowledgePointId: string) => request<{ page: LearningBookPage }>(`/learning/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}`),
   getTeacherResource: (resource: "courses" | "prompts" | "reports", workspaceId = "default") =>
     request<{ items: unknown[]; status: string }>(`/teacher/${resource}?workspace_id=${encodeURIComponent(workspaceId)}`),
 

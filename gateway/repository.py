@@ -101,6 +101,16 @@ class GatewayRepository:
                     catalog_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS gateway_knowledge_pages (
+                    workspace_id TEXT NOT NULL,
+                    knowledge_point_id TEXT NOT NULL,
+                    draft_markdown TEXT NOT NULL DEFAULT '',
+                    published_markdown TEXT,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    published_revision INTEGER,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, knowledge_point_id)
+                );
                 CREATE TABLE IF NOT EXISTS gateway_blueprints (
                     workspace_id TEXT NOT NULL, blueprint_id TEXT NOT NULL, kind TEXT NOT NULL,
                     topic_id TEXT NOT NULL, knowledge_point_id TEXT NOT NULL, level TEXT,
@@ -776,6 +786,93 @@ class GatewayRepository:
                          json.dumps(blueprint, ensure_ascii=False, separators=(",", ":")), updated_at),
                     )
         return {"revision": revision, "catalog": catalog, "updated_at": updated_at}
+
+    def get_knowledge_page(self, workspace_id: str, knowledge_point_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT workspace_id,knowledge_point_id,draft_markdown,published_markdown,
+                          revision,published_revision,updated_at
+                   FROM gateway_knowledge_pages
+                   WHERE workspace_id=? AND knowledge_point_id=?""",
+                (workspace_id, knowledge_point_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_knowledge_pages(self, workspace_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT workspace_id,knowledge_point_id,draft_markdown,published_markdown,
+                          revision,published_revision,updated_at
+                   FROM gateway_knowledge_pages
+                   WHERE workspace_id=?""",
+                (workspace_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_published_knowledge_page(self, workspace_id: str, knowledge_point_id: str) -> dict[str, Any] | None:
+        row = self.get_knowledge_page(workspace_id, knowledge_point_id)
+        if row is None or row["published_markdown"] is None:
+            return None
+        return row
+
+    @staticmethod
+    def _check_knowledge_page_revision(current: dict[str, Any] | None, expected_revision: int | None) -> int:
+        revision = int(current["revision"]) if current is not None else 0
+        if expected_revision is not None and expected_revision != revision:
+            raise ValueError(f"知识点教材版本冲突：当前版本为 {revision}")
+        return revision
+
+    def update_knowledge_page(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+        draft_markdown: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        with self._lock, self._conn:
+            current = self.get_knowledge_page(workspace_id, knowledge_point_id)
+            revision = self._check_knowledge_page_revision(current, expected_revision) + 1
+            updated_at = _now()
+            if current is None:
+                self._conn.execute(
+                    """INSERT INTO gateway_knowledge_pages(
+                               workspace_id,knowledge_point_id,draft_markdown,revision,updated_at)
+                       VALUES (?,?,?,?,?)""",
+                    (workspace_id, knowledge_point_id, draft_markdown, revision, updated_at),
+                )
+            else:
+                self._conn.execute(
+                    """UPDATE gateway_knowledge_pages
+                       SET draft_markdown=?,revision=?,updated_at=?
+                       WHERE workspace_id=? AND knowledge_point_id=?""",
+                    (draft_markdown, revision, updated_at, workspace_id, knowledge_point_id),
+                )
+        return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
+
+    def publish_knowledge_page(
+        self,
+        workspace_id: str,
+        knowledge_point_id: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        with self._lock, self._conn:
+            current = self.get_knowledge_page(workspace_id, knowledge_point_id)
+            if current is None:
+                raise ValueError("教材页面尚未保存草稿")
+            revision = self._check_knowledge_page_revision(current, expected_revision)
+            if not str(current["draft_markdown"]).strip():
+                raise ValueError("教材正文为空，不能发布")
+            updated_at = _now()
+            self._conn.execute(
+                """UPDATE gateway_knowledge_pages
+                   SET published_markdown=draft_markdown,
+                       published_revision=?,updated_at=?
+                   WHERE workspace_id=? AND knowledge_point_id=?""",
+                (revision, updated_at, workspace_id, knowledge_point_id),
+            )
+        return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
 
     def select_guided_blueprint(self, *, workspace_id: str, topic_id: str) -> dict[str, Any] | None:
         catalog = self.get_teaching_catalog(workspace_id)["catalog"]

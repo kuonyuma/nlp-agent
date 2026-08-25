@@ -73,7 +73,17 @@ from server.web.developer_runtime import (
     upsert_skill,
     upsert_worker_profile,
 )
-from server.teacher.models import ExerciseBlueprint, GuidedBlueprint, ReviewBlueprint, UpdateTeacherCatalog, UpdateTeachingGoals
+from server.teacher.models import (
+    ExerciseBlueprint,
+    GuidedBlueprint,
+    PublishTeacherBookPage,
+    ReviewBlueprint,
+    TeacherBookImportApplyRequest,
+    TeacherBookImportPreviewRequest,
+    UpdateTeacherBookPage,
+    UpdateTeacherCatalog,
+    UpdateTeachingGoals,
+)
 from server.teacher.service import teacher_service
 from server.rbac.service import rbac_service
 from server.infrastructure.mysql.models import UserModel
@@ -1217,6 +1227,90 @@ def create_app(
             if item.get("status") == "enabled" and item.get("topic_id") in enabled_topic_ids
         ]
         return {"catalog": catalog}
+
+    @app.get("/api/v1/teacher/book/{workspace_id}/navigation", tags=["teacher"])
+    async def get_teacher_book_navigation(workspace_id: str, request: Request, principal: Principal):
+        return await teacher_service.teacher_book_navigation(
+            principal, request.app.state.gateway, workspace_id
+        )
+
+    @app.get("/api/v1/learning/book/{workspace_id}/navigation", tags=["learning"])
+    async def get_learning_book_navigation(workspace_id: str, request: Request, principal: Principal):
+        return await teacher_service.learning_book_navigation(
+            principal, request.app.state.gateway, workspace_id
+        )
+
+    @app.get("/api/v1/teacher/book/{workspace_id}/pages/{knowledge_point_id}", tags=["teacher"])
+    async def get_teacher_book_page(workspace_id: str, knowledge_point_id: str, request: Request, principal: Principal):
+        return await teacher_service.teacher_book_page(
+            principal, request.app.state.gateway, workspace_id, knowledge_point_id
+        )
+
+    @app.get("/api/v1/learning/book/{workspace_id}/pages/{knowledge_point_id}", tags=["learning"])
+    async def get_learning_book_page(workspace_id: str, knowledge_point_id: str, request: Request, principal: Principal):
+        return await teacher_service.learning_book_page(
+            principal, request.app.state.gateway, workspace_id, knowledge_point_id
+        )
+
+    @app.put("/api/v1/teacher/book/{workspace_id}/pages/{knowledge_point_id}", tags=["teacher"])
+    async def put_teacher_book_page(
+        workspace_id: str,
+        knowledge_point_id: str,
+        body: UpdateTeacherBookPage,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.update_teacher_book_page(
+                principal, request.app.state.gateway, workspace_id, knowledge_point_id, body
+            )
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_page", title="教材页面无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/pages/{knowledge_point_id}/publish", tags=["teacher"])
+    async def publish_teacher_book_page(
+        workspace_id: str,
+        knowledge_point_id: str,
+        body: PublishTeacherBookPage,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.publish_teacher_book_page(
+                principal, request.app.state.gateway, workspace_id, knowledge_point_id, body
+            )
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_page", title="教材页面无法发布", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/preview", tags=["teacher"])
+    async def preview_teacher_book_import(
+        workspace_id: str,
+        body: TeacherBookImportPreviewRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.preview_teacher_book_import(principal, workspace_id, body)
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_import", title="教材导入文件无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/apply", tags=["teacher"])
+    async def apply_teacher_book_import(
+        workspace_id: str,
+        body: TeacherBookImportApplyRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.apply_teacher_book_import(
+                principal, request.app.state.gateway, workspace_id, body
+            )
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_import", title="教材导入文件无效", detail=str(error))
 
     @app.put("/api/v1/teacher/catalog/{workspace_id}", tags=["teacher"])
     async def put_teacher_catalog(workspace_id: str, body: UpdateTeacherCatalog, request: Request, principal: Principal, _claims: WriteClaims):

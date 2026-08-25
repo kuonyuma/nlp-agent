@@ -26,6 +26,7 @@ TABLE_COMMENTS: dict[str, str] = {
     "nlp_course_catalogs": "工作区课程目录的当前版本指针。",
     "nlp_course_topics": "课程目录中的主题或章节。",
     "nlp_knowledge_points": "主题下的知识点内容。",
+    "nlp_knowledge_pages": "知识点教材正文的草稿与已发布版本。",
     "nlp_teaching_blueprints": "教学或练习蓝图及其载荷版本。",
     "nlp_blueprint_rubrics": "蓝图评分标准、权重与排序。",
     "nlp_course_catalog_versions": "课程目录发布版本的完整快照。",
