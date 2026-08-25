@@ -107,6 +107,28 @@ export interface TeacherBookImportPreview {
   warnings: string[];
 }
 
+export interface TeacherBookArchiveItemPreview {
+  topic_id: string;
+  knowledge_point_id: string;
+  title: string;
+  file_name: string;
+  action: "create" | "update" | "unchanged";
+  expected_revision: number;
+  content_markdown: string;
+  removed_frameworks: string[];
+  warnings: string[];
+}
+
+export interface TeacherBookArchiveImportPreview {
+  file_name: string;
+  format_version: number;
+  title: string;
+  items: TeacherBookArchiveItemPreview[];
+  asset_paths: string[];
+  omitted_knowledge_points: string[];
+  warnings: string[];
+}
+
 export interface TeacherDistribution { name: string; count: number; percentage: number }
 
 export interface WeakTopic {

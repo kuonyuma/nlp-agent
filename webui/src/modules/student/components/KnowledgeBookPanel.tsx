@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Menu, PanelLeftClose, PanelRightClose, RefreshCw, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Menu, PanelLeftClose, PanelRightClose, RefreshCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
@@ -81,6 +81,11 @@ function readBookViewState(workspaceId: string): BookViewState {
   }
 }
 
+function readBookDeepLink(): { pointId: string | null; heading: string | null } {
+  const params = new URLSearchParams(window.location.search);
+  return { pointId: params.get("bookPoint"), heading: params.get("bookHeading") };
+}
+
 function groupNavigation(items: LearningBookNavigationItem[]): TopicGroup[] {
   const groups = new Map<string, TopicGroup>();
   for (const item of items) {
@@ -117,8 +122,9 @@ function keepFocusInDrawer(event: ReactKeyboardEvent<HTMLElement>) {
 
 export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: { workspaceId: string; onAskNova?: (prompt: string) => void; onOpenInSandbox?: (code: string, language: string) => void }) {
   const [initialViewState] = useState(() => readBookViewState(workspaceId));
+  const [initialDeepLink] = useState(readBookDeepLink);
   const [navigation, setNavigation] = useState<LearningBookNavigationItem[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(initialViewState.selectedId);
+  const [selectedId, setSelectedId] = useState<string | null>(initialDeepLink.pointId ?? initialViewState.selectedId);
   const [page, setPage] = useState<LearningBookPage | null>(null);
   const [loadingNavigation, setLoadingNavigation] = useState(true);
   const [loadingPage, setLoadingPage] = useState(false);
@@ -131,6 +137,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   const [expandedTopics, setExpandedTopics] = useState<Set<string>>(() => new Set(initialViewState.expandedTopics));
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
   const [selectionPrompt, setSelectionPrompt] = useState<SelectionPrompt | null>(null);
+  const [navigationQuery, setNavigationQuery] = useState("");
   const contentRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
   const selectionActionRef = useRef<HTMLButtonElement>(null);
@@ -146,6 +153,16 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   const topicGroups = useMemo(() => groupNavigation(navigation), [navigation]);
   const visiblePage = page?.knowledge_point_id === selectedId ? page : null;
   const headingIndex = useMemo(() => indexMarkdownHeadings(visiblePage?.content_markdown ?? ""), [visiblePage?.content_markdown]);
+  const filteredTopicGroups = useMemo(() => {
+    const query = navigationQuery.trim().toLocaleLowerCase();
+    if (!query) return topicGroups;
+    return topicGroups
+      .map((group) => {
+        if (group.name.toLocaleLowerCase().includes(query)) return group;
+        return { ...group, items: group.items.filter((item) => item.title.toLocaleLowerCase().includes(query)) };
+      })
+      .filter((group) => group.items.length > 0);
+  }, [navigationQuery, topicGroups]);
 
   const saveViewState = useCallback(() => {
     try {
@@ -201,6 +218,14 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   }, [loadNavigation]);
 
   useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tool", "knowledge-book");
+    if (selectedId) url.searchParams.set("bookPoint", selectedId);
+    else url.searchParams.delete("bookPoint");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [selectedId]);
+
+  useEffect(() => {
     if (!selectedId) return undefined;
     let current = true;
     const timer = window.setTimeout(() => {
@@ -245,6 +270,14 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadingPage, visiblePage]);
+
+  useEffect(() => {
+    if (!visiblePage || loadingPage || !initialDeepLink.heading || !headingIndex.headings.length) return undefined;
+    const target = headingIndex.headings.find((heading) => heading.id === initialDeepLink.heading || heading.text === initialDeepLink.heading);
+    if (!target) return undefined;
+    const timer = window.setTimeout(() => scrollToHeading(target.id), 0);
+    return () => window.clearTimeout(timer);
+  }, [headingIndex, initialDeepLink.heading, loadingPage, visiblePage]);
 
   useEffect(() => {
     if (!leftOpen && !rightOpen && !selectionPrompt) return undefined;
@@ -332,6 +365,11 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     setRightOpen(false);
     setSelectionPrompt(null);
     window.getSelection()?.removeAllRanges();
+    const url = new URL(window.location.href);
+    url.searchParams.set("tool", "knowledge-book");
+    url.searchParams.set("bookPoint", id);
+    url.searchParams.delete("bookHeading");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   };
   const askSelection = () => {
     if (!onAskNova || !selectionPrompt || !visiblePage) return;
@@ -353,13 +391,14 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
       <aside ref={leftDrawerRef} onKeyDown={keepFocusInDrawer} className={["knowledge-book-sidebar", leftOpen && "drawer-open", leftCollapsed && "collapsed"].filter(Boolean).join(" ")} aria-label="教材大纲">
         <button type="button" className="knowledge-book-collapsed-toggle" aria-label="展开教材目录" onClick={() => setLeftCollapsed(false)}><PanelLeftClose size={16} /></button>
         <div className="knowledge-book-sidebar-heading"><strong>课程目录</strong><button type="button" aria-label="收起教材目录" onClick={() => { setLeftOpen(false); setLeftCollapsed(true); }}><X size={15} /></button></div>
-        {loadingNavigation ? <p className="knowledge-book-muted">正在加载目录……</p> : topicGroups.length ? topicGroups.map((group) => {
-          const expanded = expandedTopics.has(group.id);
+        <label className="knowledge-book-search"><Search size={14} /><input value={navigationQuery} onChange={(event) => setNavigationQuery(event.target.value)} placeholder="搜索主题或知识点" aria-label="搜索主题或知识点" /></label>
+        {loadingNavigation ? <p className="knowledge-book-muted">正在加载目录……</p> : filteredTopicGroups.length ? filteredTopicGroups.map((group) => {
+          const expanded = navigationQuery.trim().length > 0 || expandedTopics.has(group.id);
           return <section className="knowledge-book-topic" key={group.id}>
             <button type="button" className="knowledge-book-topic-heading" aria-expanded={expanded} onClick={() => setExpandedTopics((current) => { const next = new Set(current); if (next.has(group.id)) next.delete(group.id); else next.add(group.id); return next; })}><span>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<strong>{group.name}</strong></span><small>{group.items.length}</small></button>
             {expanded && <div className="knowledge-book-topic-items">{group.items.map((item) => <button type="button" key={item.knowledge_point_id} className={item.knowledge_point_id === selectedId ? "active" : ""} onClick={() => selectKnowledgePoint(item.knowledge_point_id)}><span>{item.title}</span></button>)}</div>}
           </section>;
-        }) : <p className="knowledge-book-muted">教师还没有发布知识教材。</p>}
+        }) : <p className="knowledge-book-muted">{navigationQuery.trim() ? "没有匹配的知识点。" : "教师还没有发布知识教材。"}</p>}
       </aside>
       <main className="knowledge-book-main">
         {error && <div className="knowledge-book-error" role="alert"><span>{error}</span><button type="button" onClick={() => selectedId ? setPageReloadToken((value) => value + 1) : void loadNavigation()}>重试</button></div>}

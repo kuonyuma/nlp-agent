@@ -111,6 +111,16 @@ class GatewayRepository:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(workspace_id, knowledge_point_id)
                 );
+                CREATE TABLE IF NOT EXISTS gateway_knowledge_book_assets (
+                    workspace_id TEXT NOT NULL,
+                    asset_path TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, asset_path)
+                );
                 CREATE TABLE IF NOT EXISTS gateway_blueprints (
                     workspace_id TEXT NOT NULL, blueprint_id TEXT NOT NULL, kind TEXT NOT NULL,
                     topic_id TEXT NOT NULL, knowledge_point_id TEXT NOT NULL, level TEXT,
@@ -873,6 +883,73 @@ class GatewayRepository:
                 (revision, updated_at, workspace_id, knowledge_point_id),
             )
         return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
+
+    def apply_knowledge_book_import(
+        self,
+        workspace_id: str,
+        pages: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Apply a validated package atomically after checking every revision."""
+        with self._lock, self._conn:
+            currents: dict[str, dict[str, Any] | None] = {}
+            for page in pages:
+                point_id = str(page["knowledge_point_id"])
+                current = self.get_knowledge_page(workspace_id, point_id)
+                self._check_knowledge_page_revision(current, int(page["expected_revision"]))
+                currents[point_id] = current
+
+            for page in pages:
+                point_id = str(page["knowledge_point_id"])
+                current = currents[point_id]
+                revision = int(page["expected_revision"]) + 1
+                updated_at = _now()
+                if current is None:
+                    self._conn.execute(
+                        """INSERT INTO gateway_knowledge_pages(
+                           workspace_id,knowledge_point_id,draft_markdown,revision,updated_at)
+                           VALUES (?,?,?,?,?)""",
+                        (workspace_id, point_id, str(page["content_markdown"]), revision, updated_at),
+                    )
+                else:
+                    self._conn.execute(
+                        """UPDATE gateway_knowledge_pages
+                           SET draft_markdown=?,revision=?,updated_at=?
+                           WHERE workspace_id=? AND knowledge_point_id=?""",
+                        (str(page["content_markdown"]), revision, updated_at, workspace_id, point_id),
+                    )
+
+            for asset in assets:
+                content = bytes(asset["content"])
+                self._conn.execute(
+                    """INSERT INTO gateway_knowledge_book_assets(
+                       workspace_id,asset_path,media_type,content,size_bytes,sha256,updated_at)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(workspace_id,asset_path) DO UPDATE SET
+                         media_type=excluded.media_type,content=excluded.content,
+                         size_bytes=excluded.size_bytes,sha256=excluded.sha256,
+                         updated_at=excluded.updated_at""",
+                    (
+                        workspace_id,
+                        str(asset["asset_path"]),
+                        str(asset["media_type"]),
+                        content,
+                        len(content),
+                        str(asset["sha256"]),
+                        _now(),
+                    ),
+                )
+        return [self.get_knowledge_page(workspace_id, str(page["knowledge_point_id"])) for page in pages]  # type: ignore[list-item]
+
+    def get_knowledge_book_asset(self, workspace_id: str, asset_path: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT workspace_id,asset_path,media_type,content,size_bytes,sha256
+                   FROM gateway_knowledge_book_assets
+                   WHERE workspace_id=? AND asset_path=?""",
+                (workspace_id, asset_path),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def select_guided_blueprint(self, *, workspace_id: str, topic_id: str) -> dict[str, Any] | None:
         catalog = self.get_teaching_catalog(workspace_id)["catalog"]

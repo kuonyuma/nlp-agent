@@ -1,6 +1,10 @@
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import io
+import json
+import zipfile
 
 import pytest
 from argon2 import PasswordHasher
@@ -564,7 +568,52 @@ def test_teacher_book_import_preview_keeps_only_pytorch_code_segments(web_app):
         preview = response.json()
         assert "torch.softmax" in preview["content_markdown"]
         assert "tf.nn.softmax" not in preview["content_markdown"]
-        assert preview["removed_frameworks"] == ["tensorflow"]
+    assert preview["removed_frameworks"] == ["tensorflow"]
+
+
+def test_teacher_book_archive_preview_apply_and_asset_read_are_atomic(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        catalog = {
+            "topics": [{
+                "id": "basic", "name": "基础", "description": "", "status": "enabled",
+                "knowledge_points": [{"id": "attention", "name": "注意力", "status": "enabled", "sort_order": 0}],
+            }],
+            "exercise_blueprints": [], "review_blueprints": [], "guided_blueprints": [],
+        }
+        assert client.put("/api/v1/teacher/catalog/default", json=catalog, headers=write_headers(csrf)).status_code == 200
+        archive_stream = io.BytesIO()
+        with zipfile.ZipFile(archive_stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps({
+                "format_version": 1, "title": "Nova 教材",
+                "topics": [{"id": "basic", "knowledge_points": [{"id": "attention", "name": "注意力", "file": "topics/basic/attention.md"}]}],
+            }, ensure_ascii=False))
+            archive.writestr("topics/basic/attention.md", "# 注意力\n\n![图](../../assets/attention.png)\n\n正文")
+            archive.writestr("assets/attention.png", b"png")
+        encoded = base64.b64encode(archive_stream.getvalue()).decode("ascii")
+
+        preview = client.post(
+            "/api/v1/teacher/book/default/imports/archive/preview",
+            json={"file_name": "nova-book.zip", "archive_base64": encoded},
+            headers=write_headers(csrf),
+        )
+        assert preview.status_code == 200
+        assert preview.json()["items"][0]["action"] == "create"
+        assert preview.json()["asset_paths"] == ["assets/attention.png"]
+        assert client.get("/api/v1/teacher/book/default/pages/attention").json()["page"]["revision"] == 0
+
+        applied = client.post(
+            "/api/v1/teacher/book/default/imports/archive/apply",
+            json={"file_name": "nova-book.zip", "archive_base64": encoded, "expected_revisions": {"attention": 0}},
+            headers=write_headers(csrf),
+        )
+        assert applied.status_code == 200
+        assert applied.json()["applied_count"] == 1
+        assert client.get("/api/v1/teacher/book/default/pages/attention").json()["page"]["revision"] == 1
+        asset = client.get("/api/v1/learning/book/default/assets/assets/attention.png")
+        assert asset.status_code == 200
+        assert asset.content == b"png"
 
 
 def test_teacher_blueprint_resource_requires_one_knowledge_point_and_persists_it(web_app):

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -16,6 +19,10 @@ from server.teacher.models import (
     TeacherBookImportApplyRequest,
     TeacherBookImportPreview,
     TeacherBookImportPreviewRequest,
+    TeacherBookArchiveImportApplyRequest,
+    TeacherBookArchiveImportPreview,
+    TeacherBookArchiveImportPreviewRequest,
+    TeacherBookArchiveItemPreview,
     TeacherBookNavigationItem,
     TeacherBookPage,
     TeacherCatalog,
@@ -26,6 +33,7 @@ from server.teacher.models import (
     PublishTeacherBookPage,
 )
 from server.teacher.content import normalize_teacher_markdown
+from server.teacher.archive import parse_teacher_book_archive
 
 
 class TeacherService:
@@ -200,6 +208,23 @@ class TeacherService:
         )
         return {"page": page.model_dump(mode="json")}
 
+    async def knowledge_book_asset(
+        self,
+        principal: AuthenticatedPrincipal,
+        gateway: Any,
+        workspace_id: str,
+        asset_path: str,
+    ) -> dict[str, Any]:
+        if "\\" in asset_path or "\x00" in asset_path or not asset_path.startswith("assets/"):
+            raise FileNotFoundError(asset_path)
+        parts = asset_path.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise FileNotFoundError(asset_path)
+        asset = await gateway.get_knowledge_book_asset(principal, workspace_id, asset_path)
+        if asset is None:
+            raise FileNotFoundError(asset_path)
+        return asset
+
     async def update_teacher_book_page(self, principal: AuthenticatedPrincipal, gateway: Any, workspace_id: str, knowledge_point_id: str, body: UpdateTeacherBookPage) -> dict[str, Any]:
         self.require_teacher(principal, workspace_id)
         catalog = TeacherCatalog.model_validate(
@@ -240,6 +265,152 @@ class TeacherService:
             expected_revision=body.expected_revision,
         )
         return {"page": self._teacher_book_page(workspace_id, topic, point, row)}
+
+    @staticmethod
+    def _decode_archive(value: str) -> bytes:
+        try:
+            archive = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError("教材压缩包编码无效") from error
+        if not archive:
+            raise ValueError("教材压缩包不能为空")
+        return archive
+
+    async def _teacher_book_archive_preview(
+        self,
+        principal: AuthenticatedPrincipal,
+        gateway: Any,
+        workspace_id: str,
+        file_name: str,
+        archive_base64: str,
+    ) -> tuple[TeacherBookArchiveImportPreview, Any, Any]:
+        self.require_teacher(principal, workspace_id)
+        parsed = parse_teacher_book_archive(
+            file_name,
+            self._decode_archive(archive_base64),
+            workspace_id=workspace_id,
+        )
+        catalog = TeacherCatalog.model_validate(
+            (await gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
+        rows = await gateway.list_knowledge_pages(principal, workspace_id)
+        row_by_point = {str(row["knowledge_point_id"]): row for row in rows}
+        catalog_points = {
+            point.id: (topic, point)
+            for topic in catalog.topics
+            for point in topic.knowledge_points
+        }
+        items: list[TeacherBookArchiveItemPreview] = []
+        imported_ids: set[str] = set()
+        for archive_page in parsed.pages:
+            target = catalog_points.get(archive_page.knowledge_point_id)
+            if target is None:
+                raise ValueError(f"Manifest 知识点不存在于当前教师目录：{archive_page.knowledge_point_id}")
+            topic, point = target
+            if topic.id != archive_page.topic_id:
+                raise ValueError(
+                    f"知识点 {archive_page.knowledge_point_id} 的主题 ID 与教师目录不一致"
+                )
+            row = row_by_point.get(point.id)
+            current_content = str(row.get("draft_markdown", "")) if row else ""
+            expected_revision = int(row.get("revision", 0)) if row else 0
+            action = "create" if row is None else (
+                "unchanged" if current_content == archive_page.content_markdown else "update"
+            )
+            warnings = list(archive_page.warnings)
+            if archive_page.title and archive_page.title != point.name:
+                warnings.append("Manifest 中的知识点名称与教师目录不同，已以教师目录名称为准")
+            items.append(
+                TeacherBookArchiveItemPreview(
+                    topic_id=topic.id,
+                    knowledge_point_id=point.id,
+                    title=point.name,
+                    file_name=archive_page.file_name,
+                    action=action,
+                    expected_revision=expected_revision,
+                    content_markdown=archive_page.content_markdown,
+                    removed_frameworks=archive_page.removed_frameworks,
+                    warnings=warnings,
+                )
+            )
+            imported_ids.add(point.id)
+
+        omitted = [
+            point.id
+            for topic in catalog.topics
+            for point in topic.knowledge_points
+            if point.id not in imported_ids
+        ]
+        warnings = []
+        if omitted:
+            warnings.append(f"本次包未更新 {len(omitted)} 个目录知识点，现有草稿不会被删除")
+        preview = TeacherBookArchiveImportPreview(
+            file_name=file_name,
+            format_version=parsed.format_version,
+            title=parsed.title,
+            items=items,
+            asset_paths=[asset.path for asset in parsed.assets],
+            omitted_knowledge_points=omitted,
+            warnings=warnings,
+        )
+        return preview, parsed, catalog
+
+    async def preview_teacher_book_archive_import(
+        self,
+        principal: AuthenticatedPrincipal,
+        gateway: Any,
+        workspace_id: str,
+        body: TeacherBookArchiveImportPreviewRequest,
+    ) -> dict[str, Any]:
+        preview, _parsed, _catalog = await self._teacher_book_archive_preview(
+            principal, gateway, workspace_id, body.file_name, body.archive_base64
+        )
+        return preview.model_dump(mode="json")
+
+    async def apply_teacher_book_archive_import(
+        self,
+        principal: AuthenticatedPrincipal,
+        gateway: Any,
+        workspace_id: str,
+        body: TeacherBookArchiveImportApplyRequest,
+    ) -> dict[str, Any]:
+        preview, parsed, catalog = await self._teacher_book_archive_preview(
+            principal, gateway, workspace_id, body.file_name, body.archive_base64
+        )
+        expected_by_point = body.expected_revisions
+        pages = [
+            {
+                "knowledge_point_id": item.knowledge_point_id,
+                "expected_revision": int(expected_by_point.get(item.knowledge_point_id, item.expected_revision)),
+                "content_markdown": item.content_markdown,
+            }
+            for item in preview.items
+            if item.action != "unchanged"
+        ]
+        assets = [
+            {
+                "asset_path": asset.path,
+                "media_type": asset.media_type,
+                "content": asset.content,
+                "sha256": hashlib.sha256(asset.content).hexdigest(),
+            }
+            for asset in parsed.assets
+        ]
+        rows = await gateway.apply_knowledge_book_import(principal, workspace_id, pages, assets)
+        points = {
+            point.id: (topic, point)
+            for topic in catalog.topics
+            for point in topic.knowledge_points
+        }
+        return {
+            "pages": [
+                self._teacher_book_page(workspace_id, points[str(row["knowledge_point_id"])][0], points[str(row["knowledge_point_id"])][1], row)
+                for row in rows
+                if row is not None
+            ],
+            "asset_paths": [asset.path for asset in parsed.assets],
+            "applied_count": len(rows),
+        }
 
     @staticmethod
     def _validate_blueprint_links(catalog: TeacherCatalog) -> None:

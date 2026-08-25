@@ -33,6 +33,7 @@ const page: LearningBookPage = {
 describe("KnowledgeBookPanel", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/");
     vi.mocked(api.getLearningBookNavigation).mockResolvedValue({ workspace_id: "workspace-1", items: navigation });
     vi.mocked(api.getLearningBookPage).mockImplementation((_workspaceId, knowledgePointId) => Promise.resolve({ page: { ...page, knowledge_point_id: knowledgePointId, title: knowledgePointId === "point-2" ? "句法分析" : page.title } }));
   });
@@ -83,5 +84,19 @@ describe("KnowledgeBookPanel", () => {
     expect(askNova).toHaveBeenCalledWith(expect.stringContaining("词元是文本处理的基本单位。"));
     expect(askNova).toHaveBeenCalledWith(expect.stringContaining("的「核心概念」小节"));
     expect(screen.queryByRole("button", { name: "向 Nova 提问" })).not.toBeInTheDocument();
+  });
+
+  it("opens a deep-linked point and filters the large outline", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({}, "", "/?tool=knowledge-book&bookPoint=point-2&bookHeading=核心概念");
+
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByRole("heading", { name: "句法分析" })).toBeInTheDocument();
+    expect(window.location.search).toContain("bookPoint=point-2");
+    const search = screen.getByRole("textbox", { name: "搜索主题或知识点" });
+    await user.type(search, "句法");
+    expect(screen.getAllByRole("button", { name: "句法分析" }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "词法分析" })).not.toBeInTheDocument();
   });
 });

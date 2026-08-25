@@ -733,6 +733,10 @@ button { color: inherit; }
 .knowledge-book-sidebar-heading strong { font-size: 11px; }
 .knowledge-book-sidebar-heading button { display: grid; width: 25px; height: 25px; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
 .knowledge-book-sidebar-heading button:hover { background: var(--muted-bg); color: var(--fg); }
+.knowledge-book-search { display: flex; align-items: center; gap: 6px; margin: 9px 10px 4px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--muted); }
+.knowledge-book-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.knowledge-book-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; font-size: 10px; }
+.knowledge-book-search input::placeholder { color: var(--muted); }
 .knowledge-book-topic { padding: 8px 7px 0; }
 .knowledge-book-topic-heading { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 5px; padding: 7px 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); text-align: left; cursor: pointer; }
 .knowledge-book-topic-heading:hover { background: var(--muted-bg); color: var(--fg); }
@@ -910,6 +914,19 @@ button { color: inherit; }
 .teacher-book-import-preview pre { max-height: 180px; margin: 7px 0 0; overflow: auto; padding: 9px; border: 1px solid #e3e0ef; border-radius: 7px; background: #fff; color: #454655; font: 10px/1.6 "Cascadia Code", monospace; white-space: pre-wrap; }
 .teacher-book-import-preview button { flex: 0 0 auto; border-color: #c6c0ef; background: #6758c9; color: #fff; }
 .teacher-book-import-preview button:hover { background: #5547b6; color: #fff; }
+.teacher-book-archive-preview { align-items: stretch; flex-direction: column; }
+.teacher-book-archive-summary { display: grid; gap: 3px; }
+.teacher-book-archive-items { display: grid; max-height: 230px; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 7px; overflow: auto; }
+.teacher-book-archive-item { display: grid; gap: 2px; padding: 8px 9px; border: 1px solid #e3e0ef; border-radius: 8px; background: #fff; }
+.teacher-book-archive-item strong { overflow: hidden; color: #303240; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.teacher-book-archive-item small { overflow: hidden; color: var(--teacher-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.teacher-book-archive-item.create { border-color: #b8e3c9; background: #f6fff8; }
+.teacher-book-archive-item.update { border-color: #ddd8ff; background: #fff; }
+.teacher-book-archive-item.unchanged { opacity: .65; }
+.teacher-book-archive-action { width: fit-content; padding: 2px 5px; border-radius: 4px; background: #eeebff; color: #5547b6; font-size: 9px; }
+.teacher-book-archive-item.create .teacher-book-archive-action { background: #e1f5e8; color: #168348; }
+.teacher-book-archive-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.teacher-book-archive-actions button:first-child { border-color: var(--teacher-border); background: #fff; color: #555766; }
 .teacher-book-layout { display: grid; min-height: 630px; grid-template-columns: minmax(190px, 230px) minmax(0, 1fr); overflow: hidden; border: 1px solid var(--teacher-border); border-radius: 14px; background: #fff; box-shadow: 0 4px 18px rgb(30 32 48 / 5%); }
 .teacher-book-tree { overflow: auto; border-right: 1px solid var(--teacher-border); background: #fbfbfe; }
 .teacher-book-tree-heading { display: grid; gap: 3px; padding: 15px 14px 12px; border-bottom: 1px solid var(--teacher-border); }

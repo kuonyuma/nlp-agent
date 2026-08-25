@@ -5,6 +5,7 @@ short SQLAlchemy transaction per command while the schema remains Alembic-only.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -717,6 +718,92 @@ class MySQLGatewayRepository:
                 },
             )
         return self.get_knowledge_page(workspace_id, knowledge_point_id)  # type: ignore[return-value]
+
+    def apply_knowledge_book_import(
+        self,
+        workspace_id: str,
+        pages: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        with self._engine.begin() as connection:
+            currents: dict[str, dict[str, Any] | None] = {}
+            for page in pages:
+                point_id = str(page["knowledge_point_id"])
+                row = connection.execute(
+                    text(
+                        "SELECT workspace_id,knowledge_point_id,draft_markdown,published_markdown,"
+                        "revision,published_revision,updated_at FROM nlp_knowledge_pages "
+                        "WHERE workspace_id=:workspace_id AND knowledge_point_id=:knowledge_point_id FOR UPDATE"
+                    ),
+                    {"workspace_id": workspace_id, "knowledge_point_id": point_id},
+                ).mappings().first()
+                current = dict(row) if row else None
+                self._check_knowledge_page_revision(current, int(page["expected_revision"]))
+                currents[point_id] = current
+
+            for page in pages:
+                point_id = str(page["knowledge_point_id"])
+                current = currents[point_id]
+                revision = int(page["expected_revision"]) + 1
+                if current is None:
+                    connection.execute(
+                        text(
+                            "INSERT INTO nlp_knowledge_pages(id,workspace_id,knowledge_point_id,draft_markdown,revision) "
+                            "VALUES(:id,:workspace_id,:knowledge_point_id,:draft_markdown,:revision)"
+                        ),
+                        {
+                            "id": str(uuid.uuid4()),
+                            "workspace_id": workspace_id,
+                            "knowledge_point_id": point_id,
+                            "draft_markdown": str(page["content_markdown"]),
+                            "revision": revision,
+                        },
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            "UPDATE nlp_knowledge_pages SET draft_markdown=:draft_markdown,revision=:revision,"
+                            "updated_at=UTC_TIMESTAMP(6) WHERE workspace_id=:workspace_id "
+                            "AND knowledge_point_id=:knowledge_point_id"
+                        ),
+                        {
+                            "draft_markdown": str(page["content_markdown"]),
+                            "revision": revision,
+                            "workspace_id": workspace_id,
+                            "knowledge_point_id": point_id,
+                        },
+                    )
+
+            for asset in assets:
+                content = bytes(asset["content"])
+                connection.execute(
+                    text(
+                        "INSERT INTO nlp_knowledge_book_assets(workspace_id,asset_path,media_type,content,"
+                        "size_bytes,sha256) VALUES(:workspace_id,:asset_path,:media_type,:content,:size_bytes,:sha256) "
+                        "ON DUPLICATE KEY UPDATE media_type=VALUES(media_type),content=VALUES(content),"
+                        "size_bytes=VALUES(size_bytes),sha256=VALUES(sha256),updated_at=UTC_TIMESTAMP(6)"
+                    ),
+                    {
+                        "workspace_id": workspace_id,
+                        "asset_path": str(asset["asset_path"]),
+                        "media_type": str(asset["media_type"]),
+                        "content": content,
+                        "size_bytes": len(content),
+                        "sha256": str(asset.get("sha256") or hashlib.sha256(content).hexdigest()),
+                    },
+                )
+        return [self.get_knowledge_page(workspace_id, str(page["knowledge_point_id"])) for page in pages]  # type: ignore[list-item]
+
+    def get_knowledge_book_asset(self, workspace_id: str, asset_path: str) -> dict[str, Any] | None:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT workspace_id,asset_path,media_type,content,size_bytes,sha256 "
+                    "FROM nlp_knowledge_book_assets WHERE workspace_id=:workspace_id AND asset_path=:asset_path"
+                ),
+                {"workspace_id": workspace_id, "asset_path": asset_path},
+            ).mappings().first()
+        return dict(row) if row else None
 
     def teaching_topic(self, workspace_id: str, topic_id: str):
         catalog = self.get_teaching_catalog(workspace_id)["catalog"]

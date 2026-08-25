@@ -76,6 +76,8 @@ from server.web.developer_runtime import (
 from server.teacher.models import (
     ExerciseBlueprint,
     GuidedBlueprint,
+    TeacherBookArchiveImportApplyRequest,
+    TeacherBookArchiveImportPreviewRequest,
     PublishTeacherBookPage,
     ReviewBlueprint,
     TeacherBookImportApplyRequest,
@@ -1311,6 +1313,62 @@ def create_app(
             )
         except ValueError as error:
             return _problem(request, status_code=422, code="invalid_book_import", title="教材导入文件无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/archive/preview", tags=["teacher"])
+    async def preview_teacher_book_archive_import(
+        workspace_id: str,
+        body: TeacherBookArchiveImportPreviewRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.preview_teacher_book_archive_import(
+                principal, request.app.state.gateway, workspace_id, body
+            )
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_archive", title="教材批量包无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/archive/apply", tags=["teacher"])
+    async def apply_teacher_book_archive_import(
+        workspace_id: str,
+        body: TeacherBookArchiveImportApplyRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.apply_teacher_book_archive_import(
+                principal, request.app.state.gateway, workspace_id, body
+            )
+        except ValueError as error:
+            conflict = "版本冲突" in str(error)
+            return _problem(
+                request,
+                status_code=409 if conflict else 422,
+                code="book_import_conflict" if conflict else "invalid_book_archive",
+                title="教材批量导入版本冲突" if conflict else "教材批量包无效",
+                detail=str(error),
+            )
+
+    @app.get("/api/v1/learning/book/{workspace_id}/assets/{asset_path:path}", tags=["learning"])
+    async def get_learning_book_asset(
+        workspace_id: str,
+        asset_path: str,
+        request: Request,
+        principal: Principal,
+    ):
+        try:
+            asset = await teacher_service.knowledge_book_asset(
+                principal, request.app.state.gateway, workspace_id, asset_path
+            )
+        except FileNotFoundError:
+            return _problem(request, status_code=404, code="book_asset_not_found", title="教材资源不存在")
+        return Response(
+            content=asset["content"],
+            media_type=str(asset["media_type"]),
+            headers={"Cache-Control": "private, max-age=300", "ETag": str(asset["sha256"])},
+        )
 
     @app.put("/api/v1/teacher/catalog/{workspace_id}", tags=["teacher"])
     async def put_teacher_catalog(workspace_id: str, body: UpdateTeacherCatalog, request: Request, principal: Principal, _claims: WriteClaims):

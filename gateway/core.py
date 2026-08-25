@@ -775,6 +775,42 @@ class BackendGateway:
             expected_revision=expected_revision,
         )
 
+    async def apply_knowledge_book_import(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        pages: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_MANAGE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.apply_knowledge_book_import,
+            workspace_id,
+            pages,
+            assets,
+        )
+
+    async def get_knowledge_book_asset(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        asset_path: str,
+    ) -> dict[str, Any] | None:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_READ_WORKSPACE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.get_knowledge_book_asset,
+            workspace_id,
+            asset_path,
+        )
+
     async def stream_events(
         self,
         principal: AuthenticatedPrincipal,

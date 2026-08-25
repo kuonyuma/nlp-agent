@@ -347,6 +347,21 @@ class KnowledgePageModel(TimestampedModel, Base):
     published_revision: Mapped[int | None] = mapped_column(BIGINT(unsigned=True))
 
 
+class KnowledgeBookAssetModel(TimestampedModel, Base):
+    """Validated local image assets referenced by published book pages."""
+
+    __tablename__ = "nlp_knowledge_book_assets"
+
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), primary_key=True
+    )
+    asset_path: Mapped[str] = mapped_column(String(512, collation="utf8mb4_bin"), primary_key=True)
+    media_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64, collation="ascii_bin"), nullable=False)
+
+
 class TeachingBlueprintModel(TimestampedModel, Base):
     __tablename__ = "nlp_teaching_blueprints"
     __table_args__ = (Index("ix_nlp_blueprints_assignment", "workspace_id", "kind", "topic_id", "knowledge_point_id", "status"),)

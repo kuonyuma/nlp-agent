@@ -2,10 +2,20 @@ import { AlertCircle, BookOpenText, Eye, FileUp, RefreshCw, Save, Send, Upload }
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "@/platform/http/api";
-import type { TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage } from "@/shared/types";
+import type { TeacherBookArchiveImportPreview, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage } from "@/shared/types";
 import { MarkdownContent } from "@/modules/student/components/MarkdownContent";
 
 type Props = { workspaceId: string };
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return window.btoa(binary);
+}
 
 function groupNavigation(items: TeacherBookNavigationItem[]) {
   return items.reduce<Array<{ topicId: string; topicName: string; items: TeacherBookNavigationItem[] }>>((groups, item) => {
@@ -24,6 +34,9 @@ export function TeacherBookEditor({ workspaceId }: Props) {
   const [preview, setPreview] = useState(false);
   const [importPreview, setImportPreview] = useState<TeacherBookImportPreview | null>(null);
   const [importName, setImportName] = useState("");
+  const [archivePreview, setArchivePreview] = useState<TeacherBookArchiveImportPreview | null>(null);
+  const [archiveName, setArchiveName] = useState("");
+  const [archiveBase64, setArchiveBase64] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -54,6 +67,7 @@ export function TeacherBookEditor({ workspaceId }: Props) {
       setPage(result.page);
       setContent(result.page.draft_markdown);
       setImportPreview(null);
+      setArchivePreview(null);
       setMessage("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -119,6 +133,20 @@ export function TeacherBookEditor({ workspaceId }: Props) {
     }
   };
 
+  const handleArchiveFile = async (file: File | undefined) => {
+    if (!file) return;
+    setMessage("");
+    try {
+      const archive_base64 = await fileToBase64(file);
+      const nextPreview = await api.previewTeacherBookArchiveImport(workspaceId, file.name, archive_base64);
+      setArchiveName(file.name);
+      setArchiveBase64(archive_base64);
+      setArchivePreview(nextPreview);
+    } catch (reason) {
+      setMessage(`教材包预览失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+  };
+
   const applyImport = async () => {
     if (!page || !selectedId || !importPreview) return;
     setSaving(true);
@@ -136,6 +164,26 @@ export function TeacherBookEditor({ workspaceId }: Props) {
     }
   };
 
+  const applyArchive = async () => {
+    if (!archivePreview || !archiveBase64) return;
+    setSaving(true);
+    try {
+      const expectedRevisions = Object.fromEntries(
+        archivePreview.items.map((item) => [item.knowledge_point_id, item.expected_revision]),
+      );
+      const result = await api.applyTeacherBookArchiveImport(workspaceId, archiveName, archiveBase64, expectedRevisions);
+      setArchivePreview(null);
+      setArchiveBase64("");
+      setMessage(`教材包已应用 ${result.applied_count} 个知识点草稿${result.asset_paths.length ? `，并保存 ${result.asset_paths.length} 个图片资源` : ""}。请逐页检查后发布。`);
+      await loadNavigation();
+      await loadPage();
+    } catch (reason) {
+      setMessage(`教材包应用失败：${reason instanceof Error ? `${reason.message}（请重新预览后再试）` : String(reason)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading && navigation.length === 0) return <div className="teacher-state"><RefreshCw className="spin" />正在加载教材目录…</div>;
   if (error && navigation.length === 0) return <div className="teacher-state error"><AlertCircle /><strong>无法加载教材内容</strong><p>{error}</p></div>;
 
@@ -147,10 +195,17 @@ export function TeacherBookEditor({ workspaceId }: Props) {
       </section>
       <div className="teacher-book-toolbar">
         <label className="teacher-book-import"><Upload size={15} />导入 Markdown<input type="file" accept=".md,text/markdown" onChange={(event) => { void handleFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
+        <label className="teacher-book-import"><Upload size={15} />导入教材包<input type="file" accept=".zip,application/zip" onChange={(event) => { void handleArchiveFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
         <button type="button" onClick={() => void loadNavigation()} disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />刷新目录</button>
         {message && <span role="status">{message}</span>}
       </div>
       {importPreview && <section className="teacher-book-import-preview" aria-label="Markdown 导入预览"><div><strong>{importName}</strong><span>{importPreview.removed_frameworks.length ? `已过滤：${importPreview.removed_frameworks.join("、")}` : "未发现需要过滤的框架代码"}</span>{importPreview.warnings.map((warning) => <small key={warning}>{warning}</small>)}<details><summary>查看规范化后的 Markdown</summary><pre>{importPreview.content_markdown}</pre></details></div><button type="button" onClick={() => void applyImport()} disabled={saving}><FileUp size={15} />应用到当前草稿</button></section>}
+      {archivePreview && <section className="teacher-book-import-preview teacher-book-archive-preview" aria-label="教材包导入预览">
+        <div className="teacher-book-archive-summary"><strong>{archivePreview.title}</strong><span>{archiveName} · {archivePreview.items.length} 个待检查知识点 · {archivePreview.asset_paths.length} 个图片资源</span>{archivePreview.warnings.map((warning) => <small key={warning}>{warning}</small>)}</div>
+        <div className="teacher-book-archive-items">{archivePreview.items.map((item) => <div className={`teacher-book-archive-item ${item.action}`} key={item.knowledge_point_id}><span className="teacher-book-archive-action">{item.action === "create" ? "新增草稿" : item.action === "update" ? "覆盖草稿" : "内容未变"}</span><strong>{item.title}</strong><small>{item.file_name} · 版本 {item.expected_revision}</small>{item.removed_frameworks.length > 0 && <small>已过滤：{item.removed_frameworks.join("、")}</small>}{item.warnings.map((warning) => <small key={warning}>{warning}</small>)}</div>)}</div>
+        {archivePreview.omitted_knowledge_points.length > 0 && <small>未包含的目录知识点不会被删除：{archivePreview.omitted_knowledge_points.length} 个</small>}
+        <div className="teacher-book-archive-actions"><button type="button" onClick={() => setArchivePreview(null)} disabled={saving}>取消</button><button type="button" onClick={() => void applyArchive()} disabled={saving || archivePreview.items.every((item) => item.action === "unchanged")}><FileUp size={15} />确认应用到草稿</button></div>
+      </section>}
       <div className="teacher-book-layout">
         <aside className="teacher-book-tree" aria-label="教材目录">
           <div className="teacher-book-tree-heading"><strong>教材目录</strong><small>{navigation.length} 个知识点</small></div>

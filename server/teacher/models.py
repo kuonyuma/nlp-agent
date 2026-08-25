@@ -192,3 +192,34 @@ class TeacherBookImportPreview(StrictTeacherModel):
     content_markdown: str
     removed_frameworks: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class TeacherBookArchiveImportPreviewRequest(StrictTeacherModel):
+    file_name: str = Field(min_length=1, max_length=256)
+    archive_base64: str = Field(min_length=1, max_length=16_000_000)
+
+
+class TeacherBookArchiveItemPreview(StrictTeacherModel):
+    topic_id: str
+    knowledge_point_id: str
+    title: str
+    file_name: str
+    action: Literal["create", "update", "unchanged"]
+    expected_revision: int = Field(ge=0)
+    content_markdown: str
+    removed_frameworks: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TeacherBookArchiveImportPreview(StrictTeacherModel):
+    file_name: str
+    format_version: int = Field(ge=1)
+    title: str
+    items: list[TeacherBookArchiveItemPreview] = Field(max_length=1000)
+    asset_paths: list[str] = Field(default_factory=list, max_length=1000)
+    omitted_knowledge_points: list[str] = Field(default_factory=list, max_length=1000)
+    warnings: list[str] = Field(default_factory=list, max_length=100)
+
+
+class TeacherBookArchiveImportApplyRequest(TeacherBookArchiveImportPreviewRequest):
+    expected_revisions: dict[str, int] = Field(default_factory=dict, max_length=1000)
