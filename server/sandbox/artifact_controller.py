@@ -51,6 +51,13 @@ async def get_artifact_content(artifact_id: str, ticket: str, db: DbSession):
     if not root:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox artifact store is not configured.")
     try:
-        return build_artifact_response(artifact, ticket=ticket, signer=_signer(), store_root=Path(root))
-    except (FileNotFoundError, PermissionError) as error:
+        application_origin = settings.NLP_AGENT_SANDBOX_APPLICATION_ORIGIN.strip() or None
+        return build_artifact_response(
+            artifact,
+            ticket=ticket,
+            signer=_signer(),
+            store_root=Path(root),
+            application_origin=application_origin,
+        )
+    except (FileNotFoundError, PermissionError, ValueError) as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error

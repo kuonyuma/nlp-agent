@@ -51,3 +51,28 @@ jobs:
         with:
           name: sandbox-linux-metadata
           path: sandbox-linux-image.txt
+
+  sandbox-auth-lifecycle:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: pro_nlp
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      NLP_AGENT_DATABASE_URL: mysql+aiomysql://root:root@127.0.0.1:3306/pro_nlp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e . pytest
+      - run: alembic upgrade head
+      - name: Verify authentication lifecycle releases leases
+        run: pytest tests/test_sandbox_phase0.py -q

@@ -1361,7 +1361,6 @@ def create_app(
     from server.sandbox.controller import router as sandbox_router
     from server.sandbox.artifact_controller import router as sandbox_artifact_router
     from server.sandbox.developer_controller import router as sandbox_developer_router
-    from server.sandbox.artifact_controller import router as sandbox_artifact_router
 
     app.include_router(user_router)
     app.include_router(workspace_router)
@@ -1369,7 +1368,6 @@ def create_app(
     app.include_router(sandbox_router)
     app.include_router(sandbox_artifact_router)
     app.include_router(sandbox_developer_router)
-    app.include_router(sandbox_artifact_router)
 
     static_dir_value = str(web_config.get("static_dir", "")).strip()
     static_dir = Path(static_dir_value).expanduser() if static_dir_value else None

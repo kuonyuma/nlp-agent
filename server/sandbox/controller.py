@@ -53,7 +53,9 @@ def _sandbox_gateway(request: Request) -> SandboxGateway:
     if factory is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox database is unavailable.")
     mode = settings.NLP_AGENT_SANDBOX_RUNTIME_MODE.strip().lower()
-    secret = settings.NLP_AGENT_WEB_SECRET or "development-sandbox-ticket-secret"
+    secret = settings.NLP_AGENT_WEB_SECRET.strip()
+    if not secret:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Sandbox ticket signing is not configured.")
     manager = None
     if mode == "docker":
         image = settings.NLP_AGENT_SANDBOX_DOCKER_IMAGE_DIGEST.strip()

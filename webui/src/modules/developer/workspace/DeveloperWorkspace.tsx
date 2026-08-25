@@ -125,14 +125,15 @@ function RuntimeSettings({ snapshot }: { snapshot: DeveloperSnapshot }) {
 }
 
 function SandboxManagement() {
-  const [states, setStates] = useState<Record<string, number> | null>(null);
+  const [overview, setOverview] = useState<Awaited<ReturnType<typeof api.getSandboxOverview>> | null>(null);
+  const [runtimes, setRuntimes] = useState<Awaited<ReturnType<typeof api.listSandboxRuntimes>>["items"]>([]);
   const [error, setError] = useState("");
   const load = useCallback(async () => {
-    try { setError(""); setStates((await api.getSandboxOverview()).runtime_states); }
+    try { setError(""); const [nextOverview, nextRuntimes] = await Promise.all([api.getSandboxOverview(), api.listSandboxRuntimes()]); setOverview(nextOverview); setRuntimes(nextRuntimes.items); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }, []);
   useEffect(() => { queueMicrotask(() => void load()); }, [load]);
-  return <Section title="Sandbox 容量" hint="只读管理面；容器生命周期仍由 Sandbox Manager 控制。"><button type="button" onClick={() => void load()}>刷新</button>{error && <p>{error}</p>}{states && <div className="developer-kpis">{Object.entries(states).map(([state, count]) => <article key={state}><TerminalSquare /><span>{state}</span><strong>{count}</strong></article>)}</div>}</Section>;
+  return <Section title="Sandbox 容量与运行指标" hint="生命周期由 Sandbox Manager 控制；Drain 会将实例交给下一轮 reconcile 销毁。"><button type="button" onClick={() => void load()}>刷新</button>{error && <p>{error}</p>}{overview && <><div className="developer-kpis">{Object.entries(overview.runtime_states).map(([state, count]) => <article key={state}><TerminalSquare /><span>{state}</span><strong>{count}</strong></article>)}</div><p>Ready {overview.capacity.ready}/{overview.capacity.target} · deficit {overview.capacity.deficit} · 执行 P50/P95/P99 {overview.execution_latency.p50_ms ?? "—"}/{overview.execution_latency.p95_ms ?? "—"}/{overview.execution_latency.p99_ms ?? "—"} ms</p>{overview.alerts.map((alert) => <p key={alert.code} role="alert">[{alert.severity}] {alert.message}</p>)}<div className="developer-list">{runtimes.map((runtime) => <article key={runtime.id}><TerminalSquare /><span><strong>{runtime.id}</strong><small>{runtime.state} · {runtime.node_id ?? "unassigned"}</small></span>{["assigned", "ready_unbound", "claiming"].includes(runtime.state) && <button type="button" onClick={() => void api.drainSandboxRuntime(runtime.id).then(() => void load())}>Drain</button>}</article>)}</div></>}</Section>;
 }
 
 export function ReleaseNotes() {

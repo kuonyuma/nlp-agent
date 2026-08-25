@@ -92,7 +92,15 @@ export const api = {
   executeSandbox: (source: string, ticket: string | null) => request<{ status?: string; stdout: string; stderr: string; ticket?: string; execution_id?: string; artifacts?: Array<{ id: string; mime_type: string }> }>("/sandbox/execute", { method: "POST", body: JSON.stringify({ source, ticket }) }),
   restartSandbox: (ticket: string | null) => request<{ status: string; ticket?: string | null }>("/sandbox/restart", { method: "POST", body: JSON.stringify({ ticket }) }),
   replaySandboxEvents: (executionId: string, afterEventId?: string) => request<{ execution_id: string; events: Array<{ event_id: string; seq: number; type: string; payload: { text?: string } }> }>(`/sandbox/executions/${encodeURIComponent(executionId)}/events${afterEventId ? `?after_event_id=${encodeURIComponent(afterEventId)}` : ""}`),
-  getSandboxOverview: () => request<{ runtime_states: Record<string, number> }>("/developer/sandbox/overview"),
+  getSandboxOverview: () => request<{
+    runtime_states: Record<string, number>;
+    capacity: { ready: number; creating: number; target: number; deficit: number };
+    execution_latency: { sample_count: number; p50_ms: number | null; p95_ms: number | null; p99_ms: number | null };
+    alerts: Array<{ code: string; severity: string; message: string }>;
+    sampled_at: string;
+  }>("/developer/sandbox/overview"),
+  listSandboxRuntimes: () => request<{ items: Array<{ id: string; state: string; node_id: string | null; runtime_kind: string; resource_profile_id: string; external_runtime_id: string | null; failure_reason: string | null; updated_at: string | null }> }>("/developer/sandbox/runtimes"),
+  drainSandboxRuntime: (runtimeId: string) => request<{ id: string; state: string }>(`/developer/sandbox/runtimes/${encodeURIComponent(runtimeId)}/drain`, { method: "POST", body: "{}" }),
   getSandboxArtifactUrl: (artifactId: string) => request<{ url: string }>(`/sandbox/artifacts/${encodeURIComponent(artifactId)}/access`),
   createWsTicket: () => request<{ ticket: string; expires_in: number }>("/auth/ws-ticket", { method: "POST", body: "{}" }),
   listSessions: () => request<{ items: SessionSummary[] }>("/sessions"),

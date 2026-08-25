@@ -16,9 +16,19 @@ def test_runsc_container_denies_network_and_docker_socket() -> None:
     command = ["docker", "run", "--detach", "--name", name, "--runtime", "runsc", "--read-only", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--memory", "768m", "--cpus", "1", "--pids-limit", "128", "--tmpfs", "/workspace:rw,nosuid,nodev,size=256m", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/run/nova:rw,nosuid,nodev,uid=10001,gid=10001,mode=700,size=16m", "--user", "10001:10001", image]
     try:
         subprocess.run(command, check=True, capture_output=True, text=True)
+        inspect = subprocess.run(
+            ["docker", "inspect", name, "--format", "{{json .HostConfig}}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert '"ReadonlyRootfs":true' in inspect
+        assert '"NetworkMode":"none"' in inspect
+        assert '"PidsLimit":128' in inspect
+        assert '"Memory":805306368' in inspect
         network = subprocess.run(["docker", "exec", name, "python", "-c", "import socket; socket.create_connection(('1.1.1.1', 53), timeout=1)"], capture_output=True, text=True)
         socket_check = subprocess.run(["docker", "exec", name, "python", "-c", "import os; raise SystemExit(os.path.exists('/var/run/docker.sock'))"], capture_output=True, text=True)
+        rootfs_check = subprocess.run(["docker", "exec", name, "python", "-c", "open('/etc/nova-write-check', 'w').write('x')"], capture_output=True, text=True)
         assert network.returncode != 0
         assert socket_check.returncode == 0
+        assert rootfs_check.returncode != 0
     finally:
         subprocess.run(["docker", "rm", "--force", name], capture_output=True, text=True)

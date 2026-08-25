@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     NLP_AGENT_SANDBOX_WARM_POOL_READY_TARGET: int = 0
     NLP_AGENT_SANDBOX_RECONCILE_INTERVAL_S: int = 30
     NLP_AGENT_SANDBOX_ARTIFACT_ORIGIN: str = ""
+    # Public Nova origin allowed to embed artifact documents.  It is kept
+    # separate from the artifact host so the delivery service can emit a
+    # precise frame-ancestors policy without trusting request Host headers.
+    NLP_AGENT_SANDBOX_APPLICATION_ORIGIN: str = ""
     NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT: str = ""
 
     _config: dict = {}

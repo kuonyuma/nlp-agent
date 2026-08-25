@@ -18,17 +18,55 @@ class ArtifactMetadata(Protocol):
     mime_type: str
 
 
-def build_artifact_response(artifact: ArtifactMetadata, *, ticket: str, signer: ArtifactAccessSigner, store_root: Path) -> Response:
+def _read_artifact_bytes(store_root: Path, locator: str) -> bytes:
+    """Open a locator with no-follow semantics for every path component."""
+    path = resolve_artifact_path(store_root, locator)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if directory and os.open in getattr(os, "supports_dir_fd", set()):
+        root_fd = os.open(str(store_root.resolve()), os.O_RDONLY | directory | nofollow)
+        current_fd = root_fd
+        try:
+            relative_parts = Path(locator).parts
+            for index, component in enumerate(relative_parts):
+                flags = os.O_RDONLY | nofollow
+                if index < len(relative_parts) - 1:
+                    flags |= directory
+                next_fd = os.open(component, flags, dir_fd=current_fd)
+                if current_fd != root_fd:
+                    os.close(current_fd)
+                current_fd = next_fd
+            with os.fdopen(current_fd, "rb") as stream:
+                current_fd = -1
+                return stream.read(MAX_ARTIFACT_BYTES + 1)
+        finally:
+            if current_fd >= 0:
+                os.close(current_fd)
+            os.close(root_fd)
+    flags = os.O_RDONLY | nofollow
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        return stream.read(MAX_ARTIFACT_BYTES + 1)
+
+
+def build_artifact_response(
+    artifact: ArtifactMetadata,
+    *,
+    ticket: str,
+    signer: ArtifactAccessSigner,
+    store_root: Path,
+    application_origin: str | None = None,
+) -> Response:
     signer.verify(ticket, artifact_id=artifact.id, owner_user_id=artifact.owner_user_id)
-    headers = artifact_security_headers(artifact.mime_type)
+    frame_ancestors = "'none'"
+    if application_origin:
+        parsed = validate_artifact_origin(application_origin, application_origin="https://artifact-origin.invalid")
+        frame_ancestors = parsed
+    headers = artifact_security_headers(artifact.mime_type, frame_ancestors=frame_ancestors)
     if artifact.mime_type == "image/svg+xml":
         headers["Content-Disposition"] = "attachment"
-    path = resolve_artifact_path(store_root, artifact.locator)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
-        with os.fdopen(descriptor, "rb") as stream:
-            content = stream.read(MAX_ARTIFACT_BYTES + 1)
+        content = _read_artifact_bytes(store_root, artifact.locator)
     except OSError as error:
         raise PermissionError("sandbox artifact could not be opened safely") from error
     if len(content) > MAX_ARTIFACT_BYTES:
