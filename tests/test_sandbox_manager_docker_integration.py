@@ -259,6 +259,10 @@ async def test_reset_claim_execute_uses_new_environment_generation() -> None:
                     generation=1,
                 )
             )
+            # Lease/runtime are linked by a database FK but intentionally do
+            # not have an ORM relationship.  Flush the runtime rows first so
+            # SQLAlchemy cannot batch a lease insert ahead of its target.
+            await session.flush()
             session.add(
                 SandboxLeaseModel(
                     id=lease_id,

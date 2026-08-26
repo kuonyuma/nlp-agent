@@ -61,6 +61,11 @@ class SandboxLifecycleService:
         The owner uniqueness constraint is the concurrency authority, so a
         nested transaction absorbs the loser of two first-creation requests.
         """
+        # Serialize first-creation and lease renewal for one owner.  Without
+        # this stable row lock, concurrent MySQL transactions can deadlock in
+        # the broad auth-expiry update before the owner uniqueness constraint
+        # gets a chance to resolve the race.
+        await session.get(UserModel, scope.owner_user_id, with_for_update=True)
         # Avoid an absent-row gap lock; MySQL can deadlock two first creators.
         environment = await session.scalar(
             select(SandboxEnvironmentModel).where(
@@ -99,8 +104,10 @@ class SandboxLifecycleService:
         return environment
 
     async def ensure_current_lease(self, session: AsyncSession, scope: SandboxScope) -> dict:
-        await self.revoke_expired_leases(session)
         environment = await self.ensure_environment(session, scope)
+        # The owner row is locked by ensure_environment, so this expiry pass
+        # now has a deterministic lock order across concurrent claims.
+        await self.revoke_expired_leases(session)
         now = _utc_now()
         environment.generation = max(environment.generation, scope.generation)
         environment.last_active_at = now
