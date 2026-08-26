@@ -338,3 +338,70 @@ def test_manager_rpc_replays_cached_result_without_redispatch() -> None:
     assert manager.calls == 1
     assert len(redis.responses) == 2
     assert all(response["ok"] == "1" for response in redis.responses)
+
+
+def test_manager_rpc_duplicate_takes_over_after_processing_owner_expires() -> None:
+    from server.sandbox.manager_rpc import (
+        HANDLED_PREFIX,
+        RedisSandboxManagerRpcServer,
+        RESULT_PREFIX,
+        _json,
+        _signature,
+    )
+
+    class FakeManager:
+        calls = 0
+
+        async def capacity_snapshot(self):
+            self.calls += 1
+            return {"target": 2}
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.values = {f"{HANDLED_PREFIX}takeover-request": "processing"}
+            self.processing_reads = 0
+            self.responses: list[dict[str, str]] = []
+
+        async def get(self, key):
+            if key.startswith(HANDLED_PREFIX):
+                self.processing_reads += 1
+                if self.processing_reads >= 2:
+                    self.values.pop(key, None)
+            return self.values.get(key)
+
+        async def set(self, key, value, *, nx=False, ex=None):
+            del ex
+            if nx and key in self.values:
+                return False
+            self.values[key] = str(value)
+            return True
+
+        async def xadd(self, stream, fields, **_kwargs):
+            if stream.startswith("nova:sandbox:manager:rpc:responses:"):
+                self.responses.append(fields)
+
+        async def expire(self, *_args):
+            return True
+
+    async def exercise() -> tuple[FakeManager, FakeRedis]:
+        request_id = "takeover-request"
+        now = time.time()
+        body = _json({"issued_at": now, "expires_at": now + 30})
+        fields = {
+            "request_id": request_id,
+            "response_stream": f"nova:sandbox:manager:rpc:responses:{request_id}",
+            "method": "capacity_snapshot",
+            "payload": body,
+            "signature": _signature("rpc-secret", request_id, "capacity_snapshot", body),
+        }
+        redis = FakeRedis()
+        manager = FakeManager()
+        server = RedisSandboxManagerRpcServer(redis, manager=manager, secret="rpc-secret")
+        await server._handle(fields)
+        return manager, redis
+
+    manager, redis = asyncio.run(exercise())
+    assert manager.calls == 1
+    assert len(redis.responses) == 1
+    assert redis.responses[0]["ok"] == "1"
+    assert any(key.startswith(RESULT_PREFIX) for key in redis.values)

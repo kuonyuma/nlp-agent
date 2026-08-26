@@ -29,7 +29,9 @@ HANDLED_PREFIX = "nova:sandbox:manager:rpc:handled:"
 RESULT_PREFIX = "nova:sandbox:manager:rpc:result:"
 REQUEST_TTL_SECONDS = 60
 REQUEST_CLOCK_SKEW_SECONDS = 5
-RPC_PROCESSING_TTL_SECONDS = 30
+# Keep takeover below the Web RPC timeout; heartbeat renewal covers healthy
+# dispatches that run longer (for example a 15-second scratch execution).
+RPC_PROCESSING_TTL_SECONDS = 10
 RPC_RESULT_TTL_SECONDS = 600
 
 
@@ -312,6 +314,42 @@ class RedisSandboxManagerRpcServer:
             except Exception:
                 return
 
+    async def _wait_for_processing_recovery(
+        self, fields: dict[str, str], handled_key: str
+    ) -> None:
+        """Take over a request if its Manager owner disappears mid-dispatch.
+
+        Every Manager reads the request stream independently.  A duplicate
+        therefore cannot simply return when another instance owns the short
+        processing lease: if that owner crashes, no new stream delivery is
+        guaranteed.  Keep the duplicate task alive until the lease expires,
+        then retry the same signed request; a cached result wins whenever the
+        original owner completed successfully.
+        """
+        get = getattr(self._client, "get", None)
+        if not callable(get):
+            return
+        request_id = fields.get("request_id", "")
+        response_stream = fields.get("response_stream", f"{RESPONSE_PREFIX}{request_id}")
+        deadline = time.monotonic() + RPC_PROCESSING_TTL_SECONDS + REQUEST_CLOCK_SKEW_SECONDS
+        while time.monotonic() < deadline:
+            if await self._publish_cached_response(response_stream, request_id):
+                return
+            try:
+                state = await get(handled_key)
+            except Exception:
+                return
+            if state is None:
+                # The owner lease expired.  Re-enter the normal path so NX
+                # ownership, validation, dispatch, and result persistence are
+                # applied exactly as for the first delivery.
+                await self._handle(fields)
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(1.0, remaining))
+
     async def process_once(self, *, block_ms: int = 100) -> bool:
         rows = await self._client.xread({self._request_stream: self._cursor}, count=1, block=max(1, block_ms))
         if not rows:
@@ -377,8 +415,9 @@ class RedisSandboxManagerRpcServer:
             if not accepted:
                 # A completed request has a durable response record.  An
                 # in-flight request has no response yet and is owned by
-                # another Manager; do not publish a competing error.
-                await self._publish_cached_response(response_stream, request_id)
+                # another Manager.  Keep this duplicate delivery around so
+                # it can take over if that Manager crashes before completion.
+                await self._wait_for_processing_recovery(fields, handled_key)
                 return
             renew_task = create_task(
                 self._renew_processing_lease(handled_key),

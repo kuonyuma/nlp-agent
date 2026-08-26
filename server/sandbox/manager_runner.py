@@ -37,6 +37,17 @@ async def process_manager_command(
     command_id = command.get("id", "")
     if not command_id:
         return False
+
+    def trace_apply_failed(error: Exception) -> None:
+        try:
+            manager._trace(
+                "sandbox.manager.command.apply_failed",
+                command_id=command_id,
+                error=type(error).__name__,
+            )
+        except Exception:
+            pass
+
     try:
         if await command_store.is_handled(command_id):
             return True
@@ -79,14 +90,7 @@ async def process_manager_command(
         # it after refusing the side effect so it cannot poison the queue.
         return await acknowledge()
     except Exception as error:
-        try:
-            manager._trace(
-                "sandbox.manager.command.apply_failed",
-                command_id=command_id,
-                error=type(error).__name__,
-            )
-        except Exception:
-            pass
+        trace_apply_failed(error)
         return False
     try:
         # Refill is part of the command's side effect.  Do it before the
@@ -94,14 +98,7 @@ async def process_manager_command(
         # requested capacity target.
         await manager.refill()
     except Exception as error:
-        try:
-            manager._trace(
-                "sandbox.manager.command.apply_failed",
-                command_id=command_id,
-                error=type(error).__name__,
-            )
-        except Exception:
-            pass
+        trace_apply_failed(error)
         return False
     return await acknowledge()
 
