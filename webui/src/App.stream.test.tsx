@@ -135,7 +135,22 @@ describe("student stream rendering", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "沙箱代码" }), { target: { value: "x = 1\nx + 1" } });
     fireEvent.click(screen.getByRole("button", { name: "运行代码" }));
     await waitFor(() => expect(stream.executeSandbox).toHaveBeenCalledWith("x = 1\nx + 1", null));
-    expect(await screen.findByText("2")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("region", { name: "运行输出" })).toHaveTextContent("2"));
+  });
+
+  it("renders the sandbox as a VS Code-style editor with a numbered gutter and resizable output panel", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+
+    const editor = screen.getByRole("region", { name: "代码工作台" });
+    expect(editor).toHaveAttribute("data-editor-theme", "dark");
+    expect(screen.getByRole("list", { name: "代码行号" })).toHaveTextContent("1");
+    expect(screen.getByRole("separator", { name: "调整输出面板高度" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "切换为 VS Code 浅色主题" }));
+    expect(editor).toHaveAttribute("data-editor-theme", "light");
   });
 
   it("opens the tool picker from the plus trigger and closes it with the dock", async () => {

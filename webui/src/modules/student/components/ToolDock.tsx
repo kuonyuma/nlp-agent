@@ -1,4 +1,4 @@
-import { BookOpenCheck, Code2, FileText, Globe2, Plus, Terminal, X } from "lucide-react";
+import { BookOpenCheck, Code2, Contrast, FileText, Globe2, Moon, Play, Plus, RotateCcw, Sun, Terminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { api } from "@/platform/http/api";
@@ -31,6 +31,17 @@ function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning"> }) {
   </section>;
 }
 
+type SandboxEditorTheme = "light" | "dark" | "high-contrast";
+
+const sandboxThemes: Array<{ id: SandboxEditorTheme; label: string; buttonLabel: string; icon: typeof Sun }> = [
+  { id: "light", label: "VS Code 浅色", buttonLabel: "切换为 VS Code 浅色主题", icon: Sun },
+  { id: "dark", label: "VS Code 深色", buttonLabel: "切换为 VS Code 深色主题", icon: Moon },
+  { id: "high-contrast", label: "黑色高对比", buttonLabel: "切换为黑色高对比主题", icon: Contrast },
+];
+
+const MIN_OUTPUT_HEIGHT = 132;
+const MAX_OUTPUT_HEIGHT = 440;
+
 function SandboxPhaseZeroPanel() {
   const [leaseStatus, setLeaseStatus] = useState<"creating" | "ready" | "error">("creating");
   const [source, setSource] = useState("# 在这里运行 Python 代码\n");
@@ -39,6 +50,11 @@ function SandboxPhaseZeroPanel() {
   const [runtimeTicket, setRuntimeTicket] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<Array<{ id: number | string; label: string; detail: string }>>([]);
   const [artifactUrls, setArtifactUrls] = useState<string[]>([]);
+  const [editorTheme, setEditorTheme] = useState<SandboxEditorTheme>("dark");
+  const [outputHeight, setOutputHeight] = useState(204);
+  const [resizingOutput, setResizingOutput] = useState(false);
+  const [editorScrollTop, setEditorScrollTop] = useState(0);
+  const outputResizeStart = useRef<{ pointerY: number; height: number } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -48,27 +64,83 @@ function SandboxPhaseZeroPanel() {
     return () => { active = false; };
   }, []);
 
-  return <section className="tool-dock-empty-panel sandbox-phase-zero-panel">
-    <span><Code2 size={20} /></span>
-    <strong>Code Runner</strong>
-    <p>当前会话使用隔离运行环境；变量和 import 会在 Runtime 存活期间保留。</p>
-    <div className={`sandbox-runtime-status ${leaseStatus}`}><i />{leaseStatus === "creating" ? "正在预热运行环境…" : leaseStatus === "ready" ? "运行环境已就绪" : "运行环境不可用"}</div>
-    <textarea aria-label="沙箱代码" value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} />
-    <div className="sandbox-phase-zero-actions">
-      <button type="button" disabled={running} onClick={() => {
+  useEffect(() => {
+    if (!resizingOutput) return undefined;
+    const resize = (event: globalThis.PointerEvent) => {
+      const start = outputResizeStart.current;
+      if (!start) return;
+      setOutputHeight(Math.min(MAX_OUTPUT_HEIGHT, Math.max(MIN_OUTPUT_HEIGHT, start.height - (event.clientY - start.pointerY))));
+    };
+    const stop = () => {
+      outputResizeStart.current = null;
+      setResizingOutput(false);
+    };
+    window.addEventListener("pointermove", resize);
+    window.addEventListener("pointerup", stop, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", resize);
+      window.removeEventListener("pointerup", stop);
+    };
+  }, [resizingOutput]);
+
+  const beginOutputResize = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    outputResizeStart.current = { pointerY: event.clientY, height: outputHeight };
+    setResizingOutput(true);
+  };
+  const resizeOutputWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const change = event.key === "ArrowUp" ? 24 : -24;
+    setOutputHeight((current) => Math.min(MAX_OUTPUT_HEIGHT, Math.max(MIN_OUTPUT_HEIGHT, current + change)));
+  };
+  const editorLines = source.split("\n");
+  const runCode = () => {
         setRunning(true); setTimeline((current) => [...current, { id: Date.now(), label: "开始执行", detail: "正在向隔离 Kernel 发送代码。" }]);
         void api.executeSandbox(source, runtimeTicket)
           .then(async (value) => { if (value.ticket) setRuntimeTicket(value.ticket); setResult(value.stdout || value.stderr || "运行完成。"); if (value.artifacts) setArtifactUrls((await Promise.all(value.artifacts.map((artifact) => api.getSandboxArtifactUrl(artifact.id).then((access) => access.url).catch(() => null)))).filter((url): url is string => Boolean(url))); if (value.execution_id) { const replay = await api.replaySandboxEvents(value.execution_id); setTimeline(replay.events.map((event) => ({ id: event.event_id, label: event.type === "execution.output" ? "运行输出" : event.type === "execution.completed" ? "执行完成" : "开始执行", detail: event.payload.text ?? "运行状态已恢复。" }))); } else setTimeline((current) => [...current, { id: Date.now(), label: "执行完成", detail: value.stderr ? "运行返回错误输出。" : "已收到 Kernel 输出。" }]); })
           .catch(() => { setResult("当前运行环境不可用。"); setTimeline((current) => [...current, { id: Date.now(), label: "执行失败", detail: "请重新打开或重置运行环境。" }]); })
           .finally(() => setRunning(false));
-      }}>{running ? "运行中…" : "运行代码"}</button>
-      <button type="button" className="secondary" disabled={running} onClick={() => {
-        void api.restartSandbox(runtimeTicket).then(() => { setRuntimeTicket(null); setResult("运行环境已重置，请重新打开沙箱。"); setTimeline((current) => [...current, { id: Date.now(), label: "运行环境已重置", detail: "Kernel 内存状态已清空。" }]); }).catch(() => setResult("当前运行环境不可用。"));
-      }}>重置运行环境</button>
+  };
+
+  return <section className={"sandbox-workbench " + (resizingOutput ? "is-resizing" : "")} role="region" aria-label="代码工作台" data-editor-theme={editorTheme}>
+    <header className="sandbox-workbench-titlebar">
+      <div className="sandbox-file-tab"><Code2 size={16} /><strong>Code Runner</strong><span>main.py</span><small>Python</small></div>
+      <div className={`sandbox-runtime-status ${leaseStatus}`}><i />{leaseStatus === "creating" ? "正在预热…" : leaseStatus === "ready" ? "Kernel 已就绪" : "运行环境不可用"}</div>
+      <div className="sandbox-theme-switcher" role="group" aria-label="代码编辑器主题">
+        {sandboxThemes.map((theme) => {
+          const Icon = theme.icon;
+          return <button key={theme.id} type="button" aria-label={theme.buttonLabel} aria-pressed={editorTheme === theme.id} title={theme.label} onClick={() => setEditorTheme(theme.id)}><Icon size={15} /></button>;
+        })}
+      </div>
+    </header>
+    <div className="sandbox-environment-bar" aria-label="运行环境版本">
+      <span>当前会话使用隔离运行环境</span><span>Python 3.11</span><span>IPython Kernel 6.29</span><span>PyTorch 未预装</span><span>runsc 隔离</span>
     </div>
-    {result && <pre>{result}</pre>}
-    {artifactUrls.length > 0 && <section aria-label="沙箱产物预览">{artifactUrls.map((url) => <SandboxArtifactFrame key={url} url={url} />)}</section>}
-    <section className="sandbox-execution-timeline" aria-label="执行时间线"><strong>执行记录</strong>{timeline.slice(-5).reverse().map((event) => <div key={event.id}><i /><span><b>{event.label}</b><small>{event.detail}</small></span></div>)}</section>
+    <div className="sandbox-editor-pane">
+      <div className="sandbox-code-gutter" role="list" aria-label="代码行号">
+        <div style={{ transform: `translateY(${-editorScrollTop}px)` }}>{editorLines.map((_, index) => <span key={index} role="listitem">{index + 1}</span>)}</div>
+      </div>
+      <textarea aria-label="沙箱代码" value={source} onChange={(event) => setSource(event.target.value)} onScroll={(event) => setEditorScrollTop(event.currentTarget.scrollTop)} spellCheck={false} wrap="off" />
+    </div>
+    <footer className="sandbox-editor-statusbar">
+      <span>Ln {editorLines.length}, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>Python</span>
+    </footer>
+    <div className="sandbox-output-resizer" role="separator" aria-label="调整输出面板高度" aria-orientation="horizontal" aria-valuemin={MIN_OUTPUT_HEIGHT} aria-valuemax={MAX_OUTPUT_HEIGHT} aria-valuenow={outputHeight} tabIndex={0} onPointerDown={beginOutputResize} onKeyDown={resizeOutputWithKeyboard}><i /></div>
+    <section className="sandbox-output-panel" style={{ height: outputHeight }} aria-label="运行输出">
+      <header>
+        <div><Terminal size={15} /><strong>输出</strong><span>{running ? "运行中" : result ? "最近一次运行" : "等待运行"}</span></div>
+        <div className="sandbox-phase-zero-actions">
+          <button type="button" disabled={running} onClick={runCode}><Play size={14} />{running ? "运行中…" : "运行代码"}</button>
+          <button type="button" className="secondary" disabled={running} onClick={() => {
+            void api.restartSandbox(runtimeTicket).then(() => { setRuntimeTicket(null); setResult("运行环境已重置，请重新打开沙箱。"); setTimeline((current) => [...current, { id: Date.now(), label: "运行环境已重置", detail: "Kernel 内存状态已清空。" }]); }).catch(() => setResult("当前运行环境不可用。"));
+          }}><RotateCcw size={14} />重置</button>
+        </div>
+      </header>
+      <pre>{result || "# 点击“运行代码”后，标准输出和错误输出将在这里显示。"}</pre>
+      {artifactUrls.length > 0 && <section className="sandbox-artifacts" aria-label="沙箱产物预览">{artifactUrls.map((url) => <SandboxArtifactFrame key={url} url={url} />)}</section>}
+      {timeline.length > 0 && <p className="sandbox-last-event">{timeline.at(-1)?.label} · {timeline.at(-1)?.detail}</p>}
+    </section>
   </section>;
 }
 
