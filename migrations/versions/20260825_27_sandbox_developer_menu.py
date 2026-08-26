@@ -7,7 +7,7 @@ from server.rbac.catalog import MENU_CATALOG, menu_id, menu_row, role_id
 
 
 revision = "20260825_27"
-down_revision = "20260825_26"
+down_revision = "20260825_26_sandbox_warm_pool"
 branch_labels = None
 depends_on = None
 
