@@ -4,6 +4,7 @@ const stream = vi.hoisted(() => {
   let onEvent: ((event: Record<string, unknown>) => void) | undefined;
   let lastRequestId = "";
   let lastModelProfile = "";
+  let lastMessage = "";
   const updateSettings = vi.fn(async (patch: Record<string, unknown>) => ({ settings: {
     locale: "zh-CN", theme: "system",content_font_size: "medium", reduce_motion: false, show_reasoning: false,
     stream_render_interval_ms: 30, model_profile: "deepseek", ...patch,
@@ -18,6 +19,7 @@ const stream = vi.hoisted(() => {
   return {
     lastRequestId: () => lastRequestId,
     lastModelProfile: () => lastModelProfile,
+    lastMessage: () => lastMessage,
     updateSettings,
     ensureSandboxLease,
     executeSandbox,
@@ -27,7 +29,7 @@ const stream = vi.hoisted(() => {
       connect() { this.onStatus("connected"); }
       close() {}
       setSession() {}
-      sendChat(_sessionId: string, _content: string, requestId: string, _learningContext?: object, modelProfile?: string) { lastRequestId = requestId; lastModelProfile = modelProfile ?? ""; }
+      sendChat(_sessionId: string, content: string, requestId: string, _learningContext?: object, modelProfile?: string) { lastRequestId = requestId; lastModelProfile = modelProfile ?? ""; lastMessage = content; }
       resume() {}
       cancel() {}
     },
@@ -127,6 +129,17 @@ describe("student stream rendering", () => {
     await waitFor(() => expect(stream.ensureSandboxLease).toHaveBeenCalledTimes(1));
   });
 
+  it("keeps the kernel status in the environment strip when the workbench is expanded", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    const editor = screen.getByRole("region", { name: "代码工作台" });
+    const status = editor.querySelector(".sandbox-runtime-status");
+    expect(status).not.toBeNull();
+    expect(status!.closest(".sandbox-environment-bar")).not.toBeNull();
+    expect(status!.closest(".sandbox-workbench-titlebar")).toBeNull();
+  });
+
   it("runs code from the sandbox workbench and renders stdout", async () => {
     stream.executeSandbox.mockClear();
     render(<App />);
@@ -138,29 +151,92 @@ describe("student stream rendering", () => {
     await waitFor(() => expect(screen.getByRole("region", { name: "运行输出" })).toHaveTextContent("2"));
   });
 
-  it("renders the sandbox as a VS Code-style editor with a numbered gutter and resizable output panel", async () => {
+  it("opens the sandbox as a normally sized light editor with concise theme labels", async () => {
+    window.localStorage.removeItem("nova.sandbox.editor-theme");
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
     fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
 
     const editor = screen.getByRole("region", { name: "代码工作台" });
-    expect(editor).toHaveAttribute("data-editor-theme", "dark");
+    expect(editor).toHaveAttribute("data-editor-theme", "light");
     expect(screen.getByRole("list", { name: "代码行号" })).toHaveTextContent("1");
     expect(screen.getByRole("separator", { name: "调整输出面板高度" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "浅色" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "深色" })).toBeVisible();
+    expect(document.querySelector(".app-shell")).not.toHaveClass("tool-dock-expanded");
+    expect(screen.getByRole("button", { name: "展开工具面板" })).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "切换为 VS Code 浅色主题" }));
-    expect(editor).toHaveAttribute("data-editor-theme", "light");
+    fireEvent.click(screen.getByRole("button", { name: "深色" }));
+    expect(editor).toHaveAttribute("data-editor-theme", "dark");
   });
 
-  it("opens the code sandbox in the full workbench by default", async () => {
+  it("retains the editor theme after the sandbox page is replaced", async () => {
+    window.localStorage.removeItem("nova.sandbox.editor-theme");
+    const first = render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    fireEvent.click(screen.getByRole("button", { name: "深色" }));
+    expect(screen.getByRole("region", { name: "代码工作台" })).toHaveAttribute("data-editor-theme", "dark");
+    first.unmount();
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    expect(screen.getByRole("region", { name: "代码工作台" })).toHaveAttribute("data-editor-theme", "dark");
+  });
+
+  it("supports editor-only font zoom, syntax tokens, reset and keyboard shortcuts", async () => {
+    stream.executeSandbox.mockClear();
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
     fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    const editor = screen.getByRole("region", { name: "代码工作台" });
+    const input = screen.getByRole("textbox", { name: "沙箱代码" }) as HTMLTextAreaElement;
 
-    expect(document.querySelector(".app-shell")).toHaveClass("tool-dock-expanded");
-    expect(screen.getByRole("button", { name: "还原工具面板" })).toBeVisible();
+    fireEvent.change(input, { target: { value: "def hello(name):\n    return f'Hi {name}'" } });
+    expect(editor.querySelector(".sandbox-syntax-keyword")).toHaveTextContent("def");
+    fireEvent.click(screen.getByRole("button", { name: "放大代码字体" }));
+    expect(editor.style.getPropertyValue("--sandbox-editor-font-size")).toBe("16px");
+
+    input.setSelectionRange(0, input.value.length);
+    fireEvent.keyDown(input, { key: "/", ctrlKey: true });
+    expect(input).toHaveValue("# def hello(name):\n    # return f'Hi {name}'");
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(stream.executeSandbox).toHaveBeenCalledWith("# def hello(name):\n    # return f'Hi {name}'", null));
+
+    fireEvent.click(screen.getByRole("button", { name: "清空代码" }));
+    expect(input).toHaveValue("");
+  });
+
+  it("offers the current source as a browser download", async () => {
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "沙箱代码" }), { target: { value: "print('download')" } });
+    fireEvent.click(screen.getByRole("button", { name: "下载代码" }));
+
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+    anchorClick.mockRestore();
+  });
+
+  it("copies the editor source and sends it to the main agent for explanation", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "沙箱代码" }), { target: { value: "total = sum(range(5))" } });
+    fireEvent.click(screen.getByRole("button", { name: "复制代码" }));
+    expect(writeText).toHaveBeenCalledWith("total = sum(range(5))");
+
+    fireEvent.click(screen.getByRole("button", { name: "解释此代码" }));
+    await waitFor(() => expect(stream.lastMessage()).toBe("请解释以下 Python 代码：\n\n```python\ntotal = sum(range(5))\n```"));
   });
 
   it("opens the tool picker from the plus trigger and closes it with the dock", async () => {
@@ -189,11 +265,11 @@ describe("student stream rendering", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开文件工具" }));
 
     const separator = screen.getByRole("separator", { name: "调整工具侧栏宽度" });
-    expect(separator).toHaveAttribute("aria-valuenow", "420");
+    expect(separator).toHaveAttribute("aria-valuenow", "560");
     fireEvent.pointerDown(separator, { clientX: 480 });
     fireEvent.pointerMove(window, { clientX: 360 });
     fireEvent.pointerUp(window);
-    expect(Number(separator.getAttribute("aria-valuenow"))).toBeGreaterThan(420);
+    expect(Number(separator.getAttribute("aria-valuenow"))).toBeGreaterThan(560);
 
     fireEvent.click(screen.getByRole("button", { name: "展开工具面板" }));
     expect(document.querySelector(".app-shell")).toHaveClass("tool-dock-expanded");

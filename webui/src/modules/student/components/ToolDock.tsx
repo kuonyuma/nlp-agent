@@ -1,4 +1,4 @@
-import { BookOpenCheck, Code2, Contrast, FileText, Globe2, Moon, Play, Plus, RotateCcw, Sun, Terminal, X } from "lucide-react";
+import { BookOpenCheck, Code2, Contrast, Copy, Download, FileText, Globe2, MessageSquareText, Moon, Play, Plus, RotateCcw, Sun, Terminal, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { api } from "@/platform/http/api";
@@ -34,15 +34,45 @@ function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning"> }) {
 type SandboxEditorTheme = "light" | "dark" | "high-contrast";
 
 const sandboxThemes: Array<{ id: SandboxEditorTheme; label: string; buttonLabel: string; icon: typeof Sun }> = [
-  { id: "light", label: "VS Code 浅色", buttonLabel: "切换为 VS Code 浅色主题", icon: Sun },
-  { id: "dark", label: "VS Code 深色", buttonLabel: "切换为 VS Code 深色主题", icon: Moon },
-  { id: "high-contrast", label: "黑色高对比", buttonLabel: "切换为黑色高对比主题", icon: Contrast },
+  { id: "light", label: "浅色", buttonLabel: "浅色", icon: Sun },
+  { id: "dark", label: "深色", buttonLabel: "深色", icon: Moon },
+  { id: "high-contrast", label: "高对比", buttonLabel: "高对比", icon: Contrast },
 ];
 
 const MIN_OUTPUT_HEIGHT = 132;
 const MAX_OUTPUT_HEIGHT = 440;
+const SANDBOX_THEME_STORAGE_KEY = "nova.sandbox.editor-theme";
+const MIN_EDITOR_FONT_SIZE = 14;
+const MAX_EDITOR_FONT_SIZE = 24;
+const DEFAULT_EDITOR_FONT_SIZE = 15;
 
-function SandboxPhaseZeroPanel() {
+function storedSandboxTheme(): SandboxEditorTheme {
+  try {
+    const value = window.localStorage.getItem(SANDBOX_THEME_STORAGE_KEY);
+    return value === "dark" || value === "high-contrast" || value === "light" ? value : "light";
+  } catch {
+    return "light";
+  }
+}
+
+const pythonTokenPattern = /(#.*$)|((?:[fbruFBRU])?(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))|\b(?:False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b|\b(?:print|len|range|sum|list|dict|set|str|int|float|bool|enumerate|zip|open|type|isinstance)\b|\b\d+(?:\.\d+)?/gm;
+
+function PythonSyntax({ source }: { source: string }) {
+  const fragments: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of source.matchAll(pythonTokenPattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) fragments.push(source.slice(cursor, index));
+    const token = match[0];
+    const tokenClass = match[1] ? "comment" : match[2] ? "string" : /^\d/.test(token) ? "number" : /^(print|len|range|sum|list|dict|set|str|int|float|bool|enumerate|zip|open|type|isinstance)$/.test(token) ? "builtin" : "keyword";
+    fragments.push(<span className={`sandbox-syntax-${tokenClass}`} key={`${index}-${token}`}>{token}</span>);
+    cursor = index + token.length;
+  }
+  if (cursor < source.length) fragments.push(source.slice(cursor));
+  return <>{fragments}</>;
+}
+
+function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: string) => void }) {
   const [leaseStatus, setLeaseStatus] = useState<"creating" | "ready" | "error">("creating");
   const [source, setSource] = useState("# 在这里运行 Python 代码\n");
   const [result, setResult] = useState("");
@@ -50,11 +80,15 @@ function SandboxPhaseZeroPanel() {
   const [runtimeTicket, setRuntimeTicket] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<Array<{ id: number | string; label: string; detail: string }>>([]);
   const [artifactUrls, setArtifactUrls] = useState<string[]>([]);
-  const [editorTheme, setEditorTheme] = useState<SandboxEditorTheme>("dark");
+  const [editorTheme, setEditorTheme] = useState<SandboxEditorTheme>(storedSandboxTheme);
+  const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied">("idle");
   const [outputHeight, setOutputHeight] = useState(204);
   const [resizingOutput, setResizingOutput] = useState(false);
   const [editorScrollTop, setEditorScrollTop] = useState(0);
+  const [editorScrollLeft, setEditorScrollLeft] = useState(0);
   const outputResizeStart = useRef<{ pointerY: number; height: number } | null>(null);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -103,25 +137,127 @@ function SandboxPhaseZeroPanel() {
           .finally(() => setRunning(false));
   };
 
-  return <section className={"sandbox-workbench " + (resizingOutput ? "is-resizing" : "")} role="region" aria-label="代码工作台" data-editor-theme={editorTheme}>
+  const setTheme = (theme: SandboxEditorTheme) => {
+    setEditorTheme(theme);
+    try {
+      window.localStorage.setItem(SANDBOX_THEME_STORAGE_KEY, theme);
+    } catch {
+      // Local UI preferences remain optional in privacy-restricted browsers.
+    }
+  };
+  const downloadSource = () => {
+    const blob = new Blob([source], { type: "text/x-python;charset=utf-8" });
+    const url = typeof URL.createObjectURL === "function" ? URL.createObjectURL(blob) : `data:text/plain;charset=utf-8,${encodeURIComponent(source)}`;
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "main.py";
+    anchor.click();
+    if (typeof URL.revokeObjectURL === "function" && !url.startsWith("data:")) window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+  const copySource = async () => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source);
+      else {
+        const fallback = document.createElement("textarea");
+        fallback.value = source;
+        fallback.style.position = "fixed";
+        fallback.style.opacity = "0";
+        document.body.append(fallback);
+        fallback.select();
+        document.execCommand("copy");
+        fallback.remove();
+      }
+      setCopyStatus("copied");
+      window.setTimeout(() => setCopyStatus("idle"), 1500);
+    } catch {
+      setCopyStatus("idle");
+    }
+  };
+  const updateSourceAndSelection = (nextSource: string, selectionStart: number, selectionEnd = selectionStart) => {
+    setSource(nextSource);
+    window.requestAnimationFrame(() => {
+      editorRef.current?.focus();
+      editorRef.current?.setSelectionRange(selectionStart, selectionEnd);
+    });
+  };
+  const toggleComment = (input: HTMLTextAreaElement) => {
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const lineStart = source.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    const newlineAfterEnd = source.indexOf("\n", end);
+    const lineEnd = newlineAfterEnd === -1 ? source.length : newlineAfterEnd;
+    const selectedLines = source.slice(lineStart, lineEnd).split("\n");
+    const uncomment = selectedLines.every((line) => !line.trim() || /^\s*# ?/.test(line));
+    const nextLines = selectedLines.map((line) => uncomment ? line.replace(/^(\s*)# ?/, "$1") : line.replace(/^(\s*)/, "$1# "));
+    const replacement = nextLines.join("\n");
+    const nextSource = source.slice(0, lineStart) + replacement + source.slice(lineEnd);
+    updateSourceAndSelection(nextSource, lineStart, lineStart + replacement.length);
+  };
+  const indentSelection = (input: HTMLTextAreaElement, outdent: boolean) => {
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const lineStart = source.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    const newlineAfterEnd = source.indexOf("\n", end);
+    const lineEnd = newlineAfterEnd === -1 ? source.length : newlineAfterEnd;
+    const selected = source.slice(lineStart, lineEnd);
+    const replacement = outdent ? selected.replace(/^(?: {1,4}|\t)/gm, "") : selected.replace(/^/gm, "    ");
+    const nextSource = source.slice(0, lineStart) + replacement + source.slice(lineEnd);
+    updateSourceAndSelection(nextSource, lineStart, lineStart + replacement.length);
+  };
+  const handleEditorKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const hasModifier = event.ctrlKey || event.metaKey;
+    if (hasModifier && event.key === "Enter") {
+      event.preventDefault();
+      if (!running) runCode();
+      return;
+    }
+    if (hasModifier && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      downloadSource();
+      return;
+    }
+    if (hasModifier && event.key === "/") {
+      event.preventDefault();
+      toggleComment(event.currentTarget);
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      indentSelection(event.currentTarget, event.shiftKey);
+    }
+  };
+
+  const workbenchStyle = { "--sandbox-editor-font-size": `${editorFontSize}px` } as CSSProperties;
+  return <section className={"sandbox-workbench " + (resizingOutput ? "is-resizing" : "")} role="region" aria-label="代码工作台" data-editor-theme={editorTheme} style={workbenchStyle}>
     <header className="sandbox-workbench-titlebar">
       <div className="sandbox-file-tab"><Code2 size={16} /><strong>Code Runner</strong><span>main.py</span><small>Python</small></div>
-      <div className={`sandbox-runtime-status ${leaseStatus}`}><i />{leaseStatus === "creating" ? "正在预热…" : leaseStatus === "ready" ? "Kernel 已就绪" : "运行环境不可用"}</div>
       <div className="sandbox-theme-switcher" role="group" aria-label="代码编辑器主题">
         {sandboxThemes.map((theme) => {
           const Icon = theme.icon;
-          return <button key={theme.id} type="button" aria-label={theme.buttonLabel} aria-pressed={editorTheme === theme.id} title={theme.label} onClick={() => setEditorTheme(theme.id)}><Icon size={15} /></button>;
+          return <button key={theme.id} type="button" aria-label={theme.buttonLabel} aria-pressed={editorTheme === theme.id} title={theme.label} onClick={() => setTheme(theme.id)}><Icon size={16} /></button>;
         })}
+      </div>
+      <div className="sandbox-editor-actions" aria-label="代码编辑器操作">
+        <button type="button" aria-label="缩小代码字体" title="缩小代码字体" disabled={editorFontSize <= MIN_EDITOR_FONT_SIZE} onClick={() => setEditorFontSize((size) => Math.max(MIN_EDITOR_FONT_SIZE, size - 1))}><ZoomOut size={16} /></button>
+        <button type="button" aria-label="放大代码字体" title="放大代码字体" disabled={editorFontSize >= MAX_EDITOR_FONT_SIZE} onClick={() => setEditorFontSize((size) => Math.min(MAX_EDITOR_FONT_SIZE, size + 1))}><ZoomIn size={16} /></button>
+        <button type="button" aria-label="复制代码" title={copyStatus === "copied" ? "已复制" : "复制代码"} onClick={() => void copySource()}><Copy size={16} /></button>
+        <button type="button" aria-label="下载代码" title="下载代码 (Ctrl/Cmd+S)" onClick={downloadSource}><Download size={16} /></button>
+        <button type="button" aria-label="解释此代码" title="交给主页面智能体解释" onClick={() => onExplainCode(source)}><MessageSquareText size={16} /></button>
+        <button type="button" aria-label="清空代码" title="清空代码" onClick={() => updateSourceAndSelection("", 0)}><Trash2 size={16} /></button>
       </div>
     </header>
     <div className="sandbox-environment-bar" aria-label="运行环境版本">
+      <div className={`sandbox-runtime-status ${leaseStatus}`}><i />{leaseStatus === "creating" ? "正在预热…" : leaseStatus === "ready" ? "Kernel 已就绪" : "运行环境不可用"}</div>
       <span>当前会话使用隔离运行环境</span><span>Python 3.11</span><span>IPython Kernel 6.29</span><span>PyTorch 未预装</span><span>runsc 隔离</span>
     </div>
     <div className="sandbox-editor-pane">
       <div className="sandbox-code-gutter" role="list" aria-label="代码行号">
         <div style={{ transform: `translateY(${-editorScrollTop}px)` }}>{editorLines.map((_, index) => <span key={index} role="listitem">{index + 1}</span>)}</div>
       </div>
-      <textarea aria-label="沙箱代码" value={source} onChange={(event) => setSource(event.target.value)} onScroll={(event) => setEditorScrollTop(event.currentTarget.scrollTop)} spellCheck={false} wrap="off" />
+      <div className="sandbox-editor-layer">
+        <pre className="sandbox-syntax-layer" aria-hidden="true" style={{ transform: `translate(${-editorScrollLeft}px, ${-editorScrollTop}px)` }}><code><PythonSyntax source={source} /></code></pre>
+        <textarea ref={editorRef} aria-label="沙箱代码" value={source} onChange={(event) => setSource(event.target.value)} onKeyDown={handleEditorKeyDown} onScroll={(event) => { setEditorScrollTop(event.currentTarget.scrollTop); setEditorScrollLeft(event.currentTarget.scrollLeft); }} spellCheck={false} wrap="off" />
+      </div>
     </div>
     <footer className="sandbox-editor-statusbar">
       <span>Ln {editorLines.length}, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>Python</span>
@@ -144,8 +280,8 @@ function SandboxPhaseZeroPanel() {
   </section>;
 }
 
-const DEFAULT_DOCK_WIDTH = 420;
-const MIN_DOCK_WIDTH = 320;
+const DEFAULT_DOCK_WIDTH = 560;
+const MIN_DOCK_WIDTH = 380;
 const MAX_DOCK_VIEWPORT_RATIO = 0.88;
 
 function getMaxDockWidth() {
@@ -165,7 +301,7 @@ function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }
   </nav>;
 }
 
-export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, learningPanel }: {
+export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, onExplainCode, learningPanel }: {
   open: boolean;
   expanded: boolean;
   openTools: ToolDockTool[];
@@ -175,6 +311,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   onOpenTool: (tool: ToolDockTool) => void;
   onCloseTool: (tool: ToolDockTool) => void;
   onActiveToolChange: (tool: ToolDockTool | null) => void;
+  onExplainCode: (source: string) => void;
   learningPanel: ReactNode;
 }) {
   const [width, setWidth] = useState(DEFAULT_DOCK_WIDTH);
@@ -266,7 +403,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
             <kbd>{item.shortcut}</kbd>
           </button>;
         })}
-      </nav> : activeTool === "learning" ? learningPanel : activeTool === "sandbox" ? <SandboxPhaseZeroPanel /> : activeTool ? <EmptyToolPanel tool={activeTool} /> : null}
+      </nav> : activeTool === "learning" ? learningPanel : activeTool === "sandbox" ? <SandboxPhaseZeroPanel onExplainCode={onExplainCode} /> : activeTool ? <EmptyToolPanel tool={activeTool} /> : null}
     </div>}
   </aside>;
 }
