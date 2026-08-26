@@ -28,6 +28,7 @@ MENU_CATALOG = (
     ("developer.skills", "Skills", "/developer/skills", "skills", Permission.SYSTEM_TOOL_CONFIG_MANAGE, 60),
     ("developer.release-notes", "发布说明", "/developer/release-notes", "release-notes", Permission.SYSTEM_RELEASE_NOTES_MANAGE, 70),
     ("developer.automations", "Apps 与自动化", "/developer/automations", "automations", Permission.SYSTEM_RUNTIME_MONITOR, 80),
+    ("developer.feedback", "意见反馈", "/developer/feedback", "feedback", Permission.LEARNING_FEEDBACK_READ, 95),
     ("developer.settings", "运行时设置", "/developer/settings", "settings", Permission.SYSTEM_RUNTIME_INSPECT, 90),
     ("developer.sandbox", "代码沙箱", "/developer/sandbox", "sandbox", Permission.SYSTEM_RUNTIME_MONITOR, 95),
     ("developer.users", "用户管理", "/developer/users", "users", Permission.SYSTEM_USER_MANAGE, 100),
@@ -49,8 +50,12 @@ def permission_id(permission: Permission | str) -> str:
 def permission_scope(permission: Permission) -> str:
     if permission is Permission.LEARNING_CONTENT_READ_PUBLIC:
         return "public"
-    if permission.name.startswith("SYSTEM_"):
+    if permission.name.startswith("SYSTEM_") or permission is Permission.LEARNING_FEEDBACK_READ:
         return "system"
+    if permission in {
+        Permission.LEARNING_FEEDBACK_SUBMIT,
+    }:
+        return "own"
     if permission in {
         Permission.LEARNING_CONTENT_MANAGE,
         Permission.LEARNING_PROGRESS_READ_CLASSROOM,

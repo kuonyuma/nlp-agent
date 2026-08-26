@@ -1,4 +1,4 @@
-import { Archive, BookOpen, FolderPlus, Heart, Menu, MoreHorizontal, Pencil, Pin, Plus, Search, Settings, Trash2, UserRound, X } from "lucide-react";
+import { Archive, BookOpen, FolderPlus,  Menu, MoreHorizontal, Pencil, Pin, Plus, Search, Settings, Trash2, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import novaMarkUrl from "../../../../logo/nova-remove.png";
@@ -23,7 +23,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   onAddCategory: (name: string) => string;
   onRenameCategory: (id: string, name: string) => void;
   onDeleteCategory: (id: string, name: string) => void;
-  onDelete: (id: string, title: string) => void;
+  onDelete: (id: string, title: string, onDeleted?: () => void) => void;
   onAccount: () => void;
   onSettings: () => void;
 }) {
@@ -136,18 +136,6 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
 >
   <span>{meta.title ?? "新的学习对话"}</span>
 </button>
-{meta.favorite && (
-  <button
-    type="button"
-    className="session-favorite active"
-    aria-label="取消收藏"
-    aria-pressed="true"
-    title="取消收藏"
-    onClick={() => onMeta(session.session_id, { favorite: false })}
-  >
-    <Heart size={14} fill="currentColor" />
-  </button>
-)}
               <button
   type="button"
   className={`session-pin ${meta.pinnedAt ? "active" : ""}`}
@@ -165,10 +153,55 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
                 <button type="button" onClick={() => { const title = prompt("重命名学习对话", meta.title ?? ""); if (title?.trim()) onMeta(session.session_id, { title: title.trim() }); }}><Pencil size={14} />重命名</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { pinnedAt: meta.pinnedAt ? undefined : Date.now() })}><Pin size={14} />{meta.pinnedAt ? "取消置顶" : "置顶"}</button>
-                <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
-                <button type="button" onClick={() => onMeta(session.session_id, { archived: !meta.archived })}><Archive size={14} />{meta.archived ? "移出归档" : "归档"}</button>
+                <button
+  type="button"
+  onClick={(event) => {
+    const isUnarchivingLastSession =
+      showArchived &&
+      meta.archived &&
+      !sessions.some(
+        (item) =>
+          item.session_id !== session.session_id &&
+          preferences.sessions[item.session_id]?.archived,
+      );
+
+    onMeta(session.session_id, { archived: !meta.archived });
+    event.currentTarget.closest("details")?.removeAttribute("open");
+    if (isUnarchivingLastSession) {
+      setShowArchived(false);
+    }
+  }}
+>
+  <Archive size={14} />
+  {meta.archived ? "移出归档" : "归档"}
+</button>
                 <div className="session-category-actions"><span>移动到分类</span><button type="button" onClick={() => onMeta(session.session_id, { categoryId: undefined })}>未分类</button>{preferences.categories.map((category) => <button key={category.id} type="button" onClick={() => onMeta(session.session_id, { categoryId: category.id })}>{category.name}</button>)}</div>
-                <button className="danger" type="button" onClick={() => onDelete(session.session_id, meta.title ?? "新的学习对话")}><Trash2 size={14} />删除</button>
+                <button
+  className="danger"
+  type="button"
+  onClick={(event) => {
+  const isDeletingLastArchivedSession =
+    showArchived &&
+    meta.archived &&
+    !sessions.some(
+      (item) =>
+        item.session_id !== session.session_id &&
+        preferences.sessions[item.session_id]?.archived,
+    );
+
+  event.currentTarget.closest("details")?.removeAttribute("open");
+  onDelete(
+    session.session_id,
+    meta.title ?? "新的学习对话",
+    isDeletingLastArchivedSession
+      ? () => setShowArchived(false)
+      : undefined,
+  );
+}}
+>
+  <Trash2 size={14} />
+  删除
+</button>
               </div></details>
             </div>;
           })}

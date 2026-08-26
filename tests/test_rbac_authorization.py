@@ -10,6 +10,7 @@ from server.rbac.catalog import (
     ROLE_NAMES,
     permission_id,
     permission_row,
+    permission_scope,
     role_id,
     role_permission_rows,
     role_permission_scope_rows,
@@ -43,6 +44,35 @@ def test_student_capabilities_include_guest_baseline_but_not_teacher_actions() -
     assert not authorization.allowed(
         principal("student"), Permission.LEARNING_CONTENT_MANAGE
     )
+    assert authorization.allowed(
+        principal("student"), Permission.LEARNING_FEEDBACK_SUBMIT
+    )
+    assert not authorization.allowed(
+        principal("student"), Permission.LEARNING_FEEDBACK_CREATE
+    )
+    assert not authorization.allowed(
+        principal("student"), Permission.LEARNING_FEEDBACK_READ
+    )
+
+
+def test_student_feedback_submission_does_not_grant_classroom_feedback_tool() -> None:
+    authorization = AuthorizationService()
+
+    assert not authorization.allowed(
+        principal("student"), Permission.LEARNING_FEEDBACK_CREATE
+    )
+    assert authorization.allowed(
+        principal("teacher"), Permission.LEARNING_FEEDBACK_CREATE
+    )
+    assert authorization.allowed(
+        principal("developer"), Permission.LEARNING_FEEDBACK_READ
+    )
+
+
+def test_feedback_permission_scopes_are_explicit() -> None:
+    assert permission_scope(Permission.LEARNING_FEEDBACK_SUBMIT) == "own"
+    assert permission_scope(Permission.LEARNING_FEEDBACK_READ) == "system"
+    assert permission_scope(Permission.LEARNING_FEEDBACK_CREATE) == "classroom"
 
 
 def test_multiple_roles_combine_capabilities() -> None:
@@ -121,6 +151,34 @@ def test_classroom_scope_requires_an_explicit_membership() -> None:
     resource = ResourceRef("classroom", workspace_id="class-a", classroom_id="classroom-a")
     assert authorization.allowed_resource(member, Permission.CLASSROOM_MEMBER_MANAGE, resource)
     assert not authorization.allowed_resource(member, Permission.CLASSROOM_MEMBER_MANAGE, ResourceRef("classroom", workspace_id="class-a", classroom_id="classroom-b"))
+
+
+def test_feedback_read_resource_requires_system_scope() -> None:
+    authorization = AuthorizationService()
+    own_scoped = AuthenticatedPrincipal(
+        user_id="developer-1",
+        permissions=frozenset({Permission.LEARNING_FEEDBACK_READ.value}),
+        permission_scopes={Permission.LEARNING_FEEDBACK_READ.value: frozenset({"own"})},
+    )
+    system_scoped = own_scoped.model_copy(
+        update={
+            "permission_scopes": {
+                Permission.LEARNING_FEEDBACK_READ.value: frozenset({"system"})
+            }
+        }
+    )
+
+    assert not authorization.allowed_resource(
+        own_scoped, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+    )
+    assert authorization.allowed_resource(
+        system_scoped, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+    )
+    # Legacy in-memory developer identities have no persisted scopes, but must
+    # still receive the catalogued system scope during the migration.
+    assert authorization.allowed_resource(
+        principal("developer"), Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+    )
 
 
 def test_builtin_catalog_has_stable_ids_and_complete_role_permission_rows() -> None:

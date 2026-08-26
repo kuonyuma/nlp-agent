@@ -16,6 +16,7 @@ export function DeveloperRoutes() {
       <Route path="skills" element={<DeveloperWorkspace page="skills" onNavigate={page} />} />
       <Route path="release-notes" element={<DeveloperWorkspace page="release-notes" onNavigate={page} />} />
       <Route path="automations" element={<DeveloperWorkspace page="automations" onNavigate={page} />} />
+      <Route path="feedback" element={<DeveloperWorkspace page="feedback" onNavigate={page} />} />
       <Route path="settings" element={<DeveloperWorkspace page="settings" onNavigate={page} />} />
       <Route path="sandbox" element={<DeveloperWorkspace page="sandbox" onNavigate={page} />} />
       <Route path="users" element={<DeveloperWorkspace page="users" onNavigate={page} />} />
