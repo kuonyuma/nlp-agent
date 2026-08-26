@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -282,6 +283,7 @@ async def test_reset_claim_execute_uses_new_environment_generation() -> None:
             resource_profile_id="python-base",
             ready_target=0,
         )
+        print("reset integration: seeded database", flush=True)
         scope = SandboxScope(
             owner_user_id=str(user.id),
             auth_session_id=session_id,
@@ -289,22 +291,31 @@ async def test_reset_claim_execute_uses_new_environment_generation() -> None:
             generation=1,
             lease_expires_at=now + timedelta(hours=1),
         )
-        await manager.reset_runtime(
-            scope,
-            lease_id=lease_id,
-            runtime_id=old_runtime_id,
-            generation=1,
+        print("reset integration: reset start", flush=True)
+        await asyncio.wait_for(
+            manager.reset_runtime(
+                scope,
+                lease_id=lease_id,
+                runtime_id=old_runtime_id,
+                generation=1,
+            ),
+            timeout=60,
         )
-        claim = await manager.claim(scope, lease_id=lease_id)
+        print("reset integration: reset complete", flush=True)
+        claim = await asyncio.wait_for(manager.claim(scope, lease_id=lease_id), timeout=60)
         assert claim is not None
         assert claim.runtime.generation == 2
-        result = await manager.execute_claimed(
-            scope,
-            lease_id=lease_id,
-            runtime_id=str(claim.runtime.id),
-            generation=claim.runtime.generation,
-            nonce=claim.nonce,
-            source="print(1)",
+        print("reset integration: claim complete", flush=True)
+        result = await asyncio.wait_for(
+            manager.execute_claimed(
+                scope,
+                lease_id=lease_id,
+                runtime_id=str(claim.runtime.id),
+                generation=claim.runtime.generation,
+                nonce=claim.nonce,
+                source="print(1)",
+            ),
+            timeout=60,
         )
         assert result["status"] == "completed"
     finally:
