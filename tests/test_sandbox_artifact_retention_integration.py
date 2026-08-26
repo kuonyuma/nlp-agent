@@ -65,6 +65,7 @@ async def test_expired_artifact_is_removed_from_mysql_and_store(tmp_path: Path) 
                     generation=1,
                 )
             )
+            await session.flush()
             session.add(
                 SandboxExecutionModel(
                     id=execution_id,
@@ -80,6 +81,7 @@ async def test_expired_artifact_is_removed_from_mysql_and_store(tmp_path: Path) 
                     completed_at=now,
                 )
             )
+            await session.flush()
             session.add(
                 SandboxArtifactModel(
                     id=artifact_id,
