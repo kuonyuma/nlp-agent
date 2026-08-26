@@ -69,6 +69,9 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
   const openTool = (tool: ToolDockTool) => {
     setOpenTools((current) => current.includes(tool) ? current : [...current, tool]);
     setActiveTool(tool);
+    // Code needs an editor-sized canvas. Other utilities remain available as
+    // compact dock panels, while Sandbox opens directly into its workbench.
+    setToolDockExpanded(tool === "sandbox");
   };
   const closeTool = (tool: ToolDockTool) => {
     const next = openTools.filter((item) => item !== tool);

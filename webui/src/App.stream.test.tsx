@@ -153,6 +153,16 @@ describe("student stream rendering", () => {
     expect(editor).toHaveAttribute("data-editor-theme", "light");
   });
 
+  it("opens the code sandbox in the full workbench by default", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+
+    expect(document.querySelector(".app-shell")).toHaveClass("tool-dock-expanded");
+    expect(screen.getByRole("button", { name: "还原工具面板" })).toBeVisible();
+  });
+
   it("opens the tool picker from the plus trigger and closes it with the dock", async () => {
     render(<App />);
 
