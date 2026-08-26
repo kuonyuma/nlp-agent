@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    CheckConstraint,
     Computed,
     ForeignKey,
     Index,
@@ -103,6 +104,37 @@ class UserRoleModel(Base):
     assigned_by_user_id: Mapped[str | None] = mapped_column(
         UUID, ForeignKey("nlp_users.id", ondelete="SET NULL")
     )
+
+
+class FeedbackThreadModel(TimestampedModel, Base):
+    __tablename__ = "nlp_feedback_threads"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_nlp_feedback_threads_user_id"),
+        Index("ix_nlp_feedback_threads_updated_at", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False)
+    developer_read_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+
+class FeedbackMessageModel(TimestampedModel, Base):
+    __tablename__ = "nlp_feedback_messages"
+    __table_args__ = (
+        Index("ix_nlp_feedback_messages_thread_created", "thread_id", "created_at"),
+        CheckConstraint(
+            "sender_type IN ('student', 'developer')",
+            # Short name on purpose: the metadata naming convention expands it
+            # to ck_nlp_feedback_messages_sender_type.
+            name="sender_type",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_feedback_threads.id", ondelete="CASCADE"), nullable=False)
+    sender_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False)
+    sender_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class RolePermissionModel(Base):

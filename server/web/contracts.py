@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 from core.learning import LearningContext
 from gateway.contracts import EvaluationContext
 
@@ -25,6 +25,19 @@ class LoginBody(StrictModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=512)
     workspace_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class FeedbackBody(StrictModel):
+    body: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def strip_body(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class FeedbackReadBody(StrictModel):
+    read_through_message_id: str = Field(min_length=1, max_length=128)
 
 
 class ReplaceUserRolesBody(StrictModel):

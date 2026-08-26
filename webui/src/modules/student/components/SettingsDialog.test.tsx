@@ -1,12 +1,12 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { SettingsDialog } from "./SettingsDialog";
 import { loadFeedback } from "@/shared/utils/feedback";
 import { APP_VERSION } from "@/shared/version";
 import type { UserSettings } from "@/shared/types";
 
-const { listPublishedReleaseNotesMock } = vi.hoisted(() => ({ listPublishedReleaseNotesMock: vi.fn() }));
-vi.mock("@/platform/http/api", () => ({ api: { listPublishedReleaseNotes: listPublishedReleaseNotesMock } }));
+const { listPublishedReleaseNotesMock, submitFeedbackMock } = vi.hoisted(() => ({ listPublishedReleaseNotesMock: vi.fn(), submitFeedbackMock: vi.fn() }));
+vi.mock("@/platform/http/api", () => ({ api: { listPublishedReleaseNotes: listPublishedReleaseNotesMock, submitFeedback: submitFeedbackMock } }));
 
 const settings: UserSettings = {
   theme: "system",
@@ -23,6 +23,7 @@ const baseProps = {
   open: true,
   settings,
   learningContext: { topic_id: null as string | null, topic_name: "", level: "beginner" as const, mode: "explain" as const },
+  roles: ["student"],
   onClose: () => {},
   onChange: () => {},
   onReset: () => {},
@@ -36,6 +37,8 @@ describe("SettingsDialog", () => {
     localStorage.clear();
     listPublishedReleaseNotesMock.mockReset();
     listPublishedReleaseNotesMock.mockResolvedValue({ items: [] });
+    submitFeedbackMock.mockReset();
+    submitFeedbackMock.mockResolvedValue({ thread_id: "thread-1" });
   });
 
   it("renders the current version from the build-injected constant", () => {
@@ -90,14 +93,53 @@ describe("SettingsDialog", () => {
     expect(listPublishedReleaseNotesMock).toHaveBeenCalledTimes(2);
   });
 
-  it("persists submitted feedback before reporting success", () => {
+  it("persists submitted feedback before reporting success", async () => {
     render(<SettingsDialog {...baseProps} />);
     fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));
     fireEvent.change(screen.getByPlaceholderText(/我希望/), { target: { value: "请增加错题计划" } });
     fireEvent.click(screen.getByRole("button", { name: "发布意见" }));
 
-    expect(loadFeedback().map((item) => item.content)).toEqual(["请增加错题计划"]);
-    expect(screen.getByText("已将本次意见保存在此浏览器。")).toBeVisible();
+    await waitFor(() => expect(loadFeedback().map((item) => item.content)).toEqual(["请增加错题计划"]));
+    expect(screen.getByText("意见已发送到开发者工作台。")).toBeVisible();
+    expect(submitFeedbackMock).toHaveBeenCalledWith("请增加错题计划");
+  });
+
+  it("shows an error card and keeps the draft when submission fails", async () => {
+    submitFeedbackMock.mockRejectedValue(new Error("HTTP 403"));
+    render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));
+    fireEvent.change(screen.getByPlaceholderText(/我希望/), { target: { value: "会失败的意见" } });
+    fireEvent.click(screen.getByRole("button", { name: "发布意见" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("发送失败：HTTP 403");
+    expect(screen.getByPlaceholderText(/我希望/)).toHaveValue("会失败的意见");
+    expect(screen.getByRole("button", { name: "发布意见" })).toBeEnabled();
+    expect(loadFeedback()).toEqual([]);
+    expect(submitFeedbackMock).toHaveBeenCalledWith("会失败的意见");
+  });
+
+  it("disables the feedback entry for guests instead of rendering a doomed form", () => {
+    render(<SettingsDialog {...baseProps} roles={["guest"]} />);
+
+    const entry = screen.getByRole("button", { name: "意见反馈" });
+    expect(entry).toBeDisabled();
+    expect(entry).toHaveAttribute("title", "当前身份不支持提交反馈");
+  });
+
+  it("keeps feedback submittable for a custom role granted the permission", async () => {
+    render(<SettingsDialog {...baseProps} roles={[]} permissions={["learning:feedback:submit"]} />);
+    fireEvent.click(screen.getByRole("button", { name: "意见反馈" }));
+    fireEvent.change(screen.getByPlaceholderText(/我希望/), { target: { value: "自定义角色也能提交" } });
+    fireEvent.click(screen.getByRole("button", { name: "发布意见" }));
+
+    await waitFor(() => expect(submitFeedbackMock).toHaveBeenCalledWith("自定义角色也能提交"));
+  });
+
+  it("defers to server permissions even when built-in roles suggest otherwise", () => {
+    render(<SettingsDialog {...baseProps} roles={["student"]} permissions={["identity:profile:read_self"]} />);
+
+    expect(screen.getByRole("button", { name: "意见反馈" })).toBeDisabled();
   });
 
   it("only projects teacher and developer navigation for the matching roles", () => {
