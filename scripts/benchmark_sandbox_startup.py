@@ -176,7 +176,12 @@ async def benchmark(
     update_matrix: bool = False,
     measure_manager_claim: bool = False,
 ) -> dict[str, object]:
-    adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image=image))
+    adapter = DockerRuntimeAdapter(
+        DockerRuntimeConfig(
+            image=image,
+            allow_local_image_id=image.startswith("sha256:"),
+        )
+    )
     claim_probe = await create_manager_claim_probe(adapter) if measure_manager_claim else None
     samples: list[dict[str, object]] = []
     image_started = perf_counter()
@@ -319,7 +324,14 @@ def update_preload_matrix(
         profiles = {}
         payload["profiles"] = profiles
     row = dict(compatibility.as_dict())
-    row["image_digest"] = compatibility.image_digest
+    # A locally built Docker image exposes an image ID, not a registry
+    # manifest digest.  Keep that diagnostic separate so the persisted matrix
+    # can never be mistaken for a deployable ``repo@sha256:...`` reference.
+    if compatibility.image_digest.startswith("sha256:"):
+        row["image_digest"] = ""
+        row["image_id"] = compatibility.image_digest
+    else:
+        row["image_digest"] = compatibility.image_digest
     row["measured_at"] = datetime.now(UTC).isoformat()
     row["benchmark"] = {
         "iterations": len(benchmark_result.get("iterations", [])),
@@ -332,7 +344,11 @@ def update_preload_matrix(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="immutable image@sha256 digest")
+    parser.add_argument(
+        "--image",
+        required=True,
+        help="immutable image@sha256 digest (or a local sha256 image ID in CI)",
+    )
     parser.add_argument("--iterations", type=int, default=3, choices=range(1, 21))
     parser.add_argument("--modules", default="numpy,pandas,matplotlib", help="comma-separated preload modules to probe")
     parser.add_argument("--profile-id", default="python-base")

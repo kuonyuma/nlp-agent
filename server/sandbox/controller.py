@@ -25,6 +25,12 @@ from server.sandbox.gateway import SandboxGateway
 from server.sandbox.confirmation import SandboxConfirmationSigner
 from server.sandbox.ticket import SandboxTicketSigner
 from server.sandbox.events import SandboxEventStore, default_sandbox_event_store
+from server.sandbox.execution_events import (
+    execution_failure_payload,
+    execution_output_streams,
+    execution_result_failure_payload,
+    execution_result_failed,
+)
 from server.web.protocol import control_event
 
 from .contracts import SandboxScope
@@ -175,26 +181,88 @@ async def execute_sandbox(
     await request.app.state.hub.broadcast(control_event("sandbox.execution.started", payload={"execution_id": execution_id, "seq": 1}), user_id=scope.owner_user_id)
     try:
         result = await _sandbox_gateway(request).execute(scope, source=body.source, ticket=body.ticket)
-        output = str(result.get("stdout") or result.get("stderr") or "")
-        if output:
-            event = await sandbox_events.append(execution_id, user_id=scope.owner_user_id, event_type="execution.output", payload={"text": output})
-            await request.app.state.hub.broadcast(control_event("sandbox.execution.output", payload={"execution_id": execution_id, **event}), user_id=scope.owner_user_id)
-        event = await sandbox_events.append(execution_id, user_id=scope.owner_user_id, event_type="execution.completed", payload={})
-        await request.app.state.hub.broadcast(control_event("sandbox.execution.completed", payload={"execution_id": execution_id, **event}), user_id=scope.owner_user_id)
+        for stream, output in execution_output_streams(result):
+            event = await sandbox_events.append(
+                execution_id,
+                user_id=scope.owner_user_id,
+                event_type="execution.output",
+                payload={"stream": stream, "text": output},
+            )
+            await request.app.state.hub.broadcast(
+                control_event(
+                    "sandbox.execution.output",
+                    payload={"execution_id": execution_id, **event},
+                ),
+                user_id=scope.owner_user_id,
+            )
         execution.status = str(result.get("status") or "completed")
         execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        if execution_result_failed(result):
+            event = await sandbox_events.append(
+                execution_id,
+                user_id=scope.owner_user_id,
+                event_type="execution.failed",
+                payload=execution_result_failure_payload(result),
+            )
+            await request.app.state.hub.broadcast(
+                control_event(
+                    "sandbox.execution.failed",
+                    payload={"execution_id": execution_id, **event},
+                ),
+                user_id=scope.owner_user_id,
+            )
+        else:
+            event = await sandbox_events.append(
+                execution_id,
+                user_id=scope.owner_user_id,
+                event_type="execution.completed",
+                payload={},
+            )
+            await request.app.state.hub.broadcast(
+                control_event(
+                    "sandbox.execution.completed",
+                    payload={"execution_id": execution_id, **event},
+                ),
+                user_id=scope.owner_user_id,
+            )
         await db.commit()
         return {**result, "execution_id": execution_id}
     except PermissionError as error:
         execution.status = "failed"
         execution.exit_reason = str(error)[:128]
         execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        event = await sandbox_events.append(
+            execution_id,
+            user_id=scope.owner_user_id,
+            event_type="execution.failed",
+            payload=execution_failure_payload(error),
+        )
+        await request.app.state.hub.broadcast(
+            control_event(
+                "sandbox.execution.failed",
+                payload={"execution_id": execution_id, **event},
+            ),
+            user_id=scope.owner_user_id,
+        )
         await db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     except Exception as error:
         execution.status = "failed"
         execution.exit_reason = f"{type(error).__name__}: {error}"[:128]
         execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        event = await sandbox_events.append(
+            execution_id,
+            user_id=scope.owner_user_id,
+            event_type="execution.failed",
+            payload=execution_failure_payload(error),
+        )
+        await request.app.state.hub.broadcast(
+            control_event(
+                "sandbox.execution.failed",
+                payload={"execution_id": execution_id, **event},
+            ),
+            user_id=scope.owner_user_id,
+        )
         await db.commit()
         raise
 

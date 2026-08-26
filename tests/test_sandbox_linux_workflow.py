@@ -20,6 +20,11 @@ def test_linux_smoke_uses_the_registered_gvisor_runtime() -> None:
     assert "docker run --detach --name nova-ci-mysql" in workflow
     assert "--measure-manager-claim" in workflow
     assert "sandbox-manager-claim-benchmark" in workflow
+    assert 'IMAGE_ID=$(docker image inspect nova-sandbox-runtime:manager-ci --format' in workflow
+    assert 'nova-sandbox-runtime:manager-ci@${IMAGE_ID}' not in workflow
+    assert "contents: write" in workflow
+    assert "Persist preload compatibility matrix" in workflow
+    assert "git push origin HEAD:${GITHUB_REF_NAME}" in workflow
     assert "feature/sandbox-phase3-develop" in workflow
     assert "pip install -e ." not in workflow
     assert "pip install -r requirements.txt" in workflow

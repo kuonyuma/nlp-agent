@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 import hashlib
+import secrets
 from typing import Any
 from uuid import uuid4
 
@@ -70,9 +71,11 @@ class SandboxModelToolService:
         self.session_factory = session_factory
         self._manager = manager
         self._interactive = interactive or InMemoryRuntime()
-        self._signer = SandboxTicketSigner(settings.NLP_AGENT_WEB_SECRET.strip() or "phase4-local-sandbox-secret")
+        configured_secret = settings.NLP_AGENT_WEB_SECRET.strip()
+        self._signing_secret = configured_secret or secrets.token_urlsafe(32)
+        self._signer = SandboxTicketSigner(self._signing_secret)
         self._confirmation_signer = SandboxConfirmationSigner(
-            settings.NLP_AGENT_WEB_SECRET.strip() or "phase4-local-sandbox-secret"
+            self._signing_secret
         )
         self._confirmation_replay_store = create_confirmation_replay_store()
         self._local_executions: dict[str, dict[str, object]] = {}
@@ -555,7 +558,15 @@ class SandboxModelToolService:
             return _error("sandbox_unavailable", "Docker Sandbox Manager is not configured")
         try:
             trace_id, span_id = self._telemetry_ids(config)
-            await manager.interrupt_runtime(runtime_id, trace_id=trace_id, span_id=span_id)
+            assert authorized.scope is not None and authorized.lease_id is not None
+            await manager.interrupt_runtime(
+                authorized.scope,
+                lease_id=authorized.lease_id,
+                runtime_id=runtime_id,
+                generation=None,
+                trace_id=trace_id,
+                span_id=span_id,
+            )
         except Exception as error:
             return _error("interrupt_failed", str(error)[:500])
         async with self.session_factory.begin() as session:
@@ -598,7 +609,15 @@ class SandboxModelToolService:
         if manager is None:
             return _error("sandbox_unavailable", "Docker Sandbox Manager is not configured")
         trace_id, span_id = self._telemetry_ids(config)
-        await manager.reset_runtime(authorized.runtime_id, trace_id=trace_id, span_id=span_id)
+        assert authorized.scope is not None and authorized.lease_id is not None
+        await manager.reset_runtime(
+            authorized.scope,
+            lease_id=authorized.lease_id,
+            runtime_id=authorized.runtime_id,
+            generation=None,
+            trace_id=trace_id,
+            span_id=span_id,
+        )
         return {"ok": True, "status": "restarted", "runtime_id": authorized.runtime_id}
 
 

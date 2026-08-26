@@ -7,6 +7,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-linux-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   sandbox-runtime:
     runs-on: ubuntu-latest
@@ -66,7 +73,7 @@ jobs:
       - name: Benchmark runsc Scratch startup
         run: |
           IMAGE_ID=$(docker image inspect nova-sandbox-runtime:ci --format '{{.Id}}')
-          python scripts/benchmark_sandbox_startup.py --image "nova-sandbox-runtime:ci@${IMAGE_ID}" --iterations 3 --matrix-path configs/sandbox_preload_matrix.json --update-matrix | tee sandbox-startup-benchmark.json
+          python scripts/benchmark_sandbox_startup.py --image "${IMAGE_ID}" --iterations 3 --matrix-path configs/sandbox_preload_matrix.json --update-matrix | tee sandbox-startup-benchmark.json
       - uses: actions/upload-artifact@v4
         with:
           name: sandbox-linux-metadata
@@ -108,6 +115,8 @@ jobs:
   # the runtime is registered instead of using a GitHub service container.
   sandbox-manager-runsc:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       NLP_AGENT_DATABASE_URL: mysql+aiomysql://root:root@127.0.0.1:3306/pro_nlp
       RUN_SANDBOX_DOCKER_MANAGER_INTEGRATION: '1'
@@ -151,7 +160,7 @@ jobs:
         run: |
           IMAGE_ID=$(docker image inspect nova-sandbox-runtime:manager-ci --format '{{.Id}}')
           python scripts/benchmark_sandbox_startup.py \
-            --image "nova-sandbox-runtime:manager-ci@${IMAGE_ID}" \
+            --image "${IMAGE_ID}" \
             --iterations 3 \
             --matrix-path configs/sandbox_preload_matrix.json \
             --update-matrix \
@@ -164,6 +173,17 @@ jobs:
           path: |
             sandbox-manager-claim-benchmark.json
             configs/sandbox_preload_matrix.json
+      - name: Persist preload compatibility matrix
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/sandbox-phase3-develop'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- configs/sandbox_preload_matrix.json; then
+            exit 0
+          fi
+          git add configs/sandbox_preload_matrix.json
+          git commit -m "ci(sandbox): update preload compatibility matrix [skip ci]"
+          git push origin HEAD:${GITHUB_REF_NAME}
       - name: Remove MySQL test container
         if: always()
         run: docker rm --force nova-ci-mysql || true

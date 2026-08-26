@@ -33,7 +33,17 @@ class SandboxGateway:
         self._inmemory = inmemory or InMemoryRuntime()
 
     async def open(self, session: AsyncSession, scope: SandboxScope) -> dict[str, object]:
-        lease_payload = await sandbox_lifecycle_service.ensure_current_lease(session, scope)
+        if self._mode == "docker":
+            # The Manager uses its own database connection.  Commit the lease
+            # in a short, dedicated transaction before asking it to claim a
+            # runtime; otherwise the first request's uncommitted lease is
+            # invisible and is incorrectly reported as warming.
+            async with self._session_factory.begin() as committed_session:
+                lease_payload = await sandbox_lifecycle_service.ensure_current_lease(
+                    committed_session, scope
+                )
+        else:
+            lease_payload = await sandbox_lifecycle_service.ensure_current_lease(session, scope)
         if self._mode == "inmemory":
             return {**lease_payload, "runtime_available": True, "runtime": {"kind": "inmemory", "ticket": None}}
         manager = self._require_manager()
@@ -69,7 +79,12 @@ class SandboxGateway:
             await self._inmemory.restart(user_id=scope.owner_user_id)
             return {"status": "restarted", "ticket": None}
         claims = self._claims(scope, ticket)
-        await self._require_manager().reset_runtime(claims.runtime_id)
+        await self._require_manager().reset_runtime(
+            scope,
+            lease_id=claims.lease_id,
+            runtime_id=claims.runtime_id,
+            generation=claims.generation,
+        )
         return {"status": "restarted", "ticket": None}
 
     def _claims(self, scope: SandboxScope, ticket: str | None) -> SandboxTicketClaims:

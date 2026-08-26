@@ -95,7 +95,7 @@ async def test_model_scratch_does_not_share_interactive_kernel() -> None:
     context = _config()
     from server.sandbox.confirmation import SandboxConfirmationSigner
 
-    token = SandboxConfirmationSigner("phase4-local-sandbox-secret").issue(
+    token = SandboxConfirmationSigner(service._signing_secret).issue(
         user_id="local",
         session_id="model-session",
         tool_name="sandbox_run_active_kernel",
@@ -208,3 +208,14 @@ def test_model_sandbox_helpers_are_event_loop_safe() -> None:
     result = asyncio.run(service.run_scratch(source="print(2 + 2)", config=_config()))
 
     assert result["stdout"].strip() == "4"
+
+
+def test_model_tool_fallback_signing_secret_is_ephemeral(monkeypatch) -> None:
+    from configs.settings import settings
+    from server.sandbox.model_tools import SandboxModelToolService
+
+    monkeypatch.setattr(settings, "NLP_AGENT_WEB_SECRET", "")
+    first = SandboxModelToolService(mode="inmemory")
+    second = SandboxModelToolService(mode="inmemory")
+    assert first._signing_secret
+    assert first._signing_secret != second._signing_secret

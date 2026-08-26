@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import importlib
+import inspect
+import asyncio
+import time
 from typing import Mapping, Protocol
+from uuid import uuid4
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +61,13 @@ class KubernetesRuntimeManifest:
         spec: dict[str, object] = {
             "restartPolicy": "Never",
             "automountServiceAccountToken": False,
-            "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001},
+            "securityContext": {
+                "runAsNonRoot": True,
+                "runAsUser": 10001,
+                "runAsGroup": 10001,
+                "fsGroup": 10001,
+                "fsGroupChangePolicy": "OnRootMismatch",
+            },
             "containers": [{
                 "name": "sandbox",
                 "image": image,
@@ -66,8 +77,18 @@ class KubernetesRuntimeManifest:
                     "readOnlyRootFilesystem": True,
                     "capabilities": {"drop": ["ALL"]},
                 },
+                "volumeMounts": [
+                    {"name": "workspace", "mountPath": "/workspace"},
+                    {"name": "tmp", "mountPath": "/tmp"},
+                    {"name": "run-nova", "mountPath": "/run/nova"},
+                ],
                 "resources": {"requests": {"cpu": "1", "memory": "768Mi"}, "limits": {"cpu": "1", "memory": "768Mi"}},
             }],
+            "volumes": [
+                {"name": "workspace", "emptyDir": {"sizeLimit": "256Mi"}},
+                {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "256Mi"}},
+                {"name": "run-nova", "emptyDir": {"medium": "Memory", "sizeLimit": "16Mi"}},
+            ],
         }
         if node_id:
             spec["nodeName"] = node_id
@@ -80,9 +101,63 @@ class KubernetesRuntimeClient(Protocol):
     async def delete_pod(self, pod_id: str) -> None: ...
     async def pod_healthy(self, pod_id: str) -> bool: ...
     async def pod_kernel_ready(self, pod_id: str) -> bool: ...
-    async def execute(self, pod_id: str, *, source: str) -> dict[str, object]: ...
+    async def execute(
+        self,
+        pod_id: str,
+        *,
+        source: str,
+        timeout_seconds: int,
+        output_limit_bytes: int,
+    ) -> dict[str, object]: ...
     async def interrupt(self, pod_id: str) -> None: ...
     async def managed_pod_ids(self) -> set[str]: ...
+
+
+def create_kubernetes_runtime_client(factory_spec: str) -> KubernetesRuntimeClient:
+    """Load the Manager-owned Kubernetes client from an explicit factory.
+
+    The isolated Manager is deliberately the only process that resolves this
+    setting.  Keeping the client implementation behind a dotted factory lets
+    a deployment provide its cluster credentials/transport without importing a
+    Kubernetes SDK into the Web process or silently falling back to a fake
+    client.
+    """
+    spec = factory_spec.strip()
+    if not spec:
+        raise ValueError(
+            "Kubernetes Sandbox backend requires a client factory "
+            "(module:function)"
+        )
+    module_name, separator, attribute = spec.partition(":")
+    if not separator:
+        module_name, separator, attribute = spec.rpartition(".")
+    if not module_name or not attribute:
+        raise ValueError("Kubernetes client factory must be module:function")
+    try:
+        factory = getattr(importlib.import_module(module_name), attribute)
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError("Kubernetes Sandbox client factory could not be loaded") from error
+    if not callable(factory):
+        raise TypeError("Kubernetes Sandbox client factory must be callable")
+    client = factory()
+    if inspect.isawaitable(client):
+        raise TypeError("Kubernetes Sandbox client factory must return a client synchronously")
+    required = (
+        "list_nodes",
+        "create_pod",
+        "delete_pod",
+        "pod_healthy",
+        "pod_kernel_ready",
+        "execute",
+        "interrupt",
+        "managed_pod_ids",
+    )
+    missing = [name for name in required if not callable(getattr(client, name, None))]
+    if missing:
+        raise TypeError(
+            "Kubernetes Sandbox client is missing methods: " + ", ".join(missing)
+        )
+    return client
 
 
 class KubernetesRuntimeAdapter:
@@ -94,6 +169,7 @@ class KubernetesRuntimeAdapter:
         image: str,
         scheduler: SandboxNodeScheduler | None = None,
         client: KubernetesRuntimeClient | None = None,
+        readiness_timeout_seconds: float = 60.0,
     ) -> None:
         if "@sha256:" not in image:
             raise ValueError("Kubernetes Sandbox image must be pinned by immutable digest")
@@ -101,6 +177,9 @@ class KubernetesRuntimeAdapter:
         self.runtime_kind = "kubernetes"
         self.scheduler = scheduler or SandboxNodeScheduler()
         self.client = client
+        if readiness_timeout_seconds <= 0:
+            raise ValueError("Kubernetes readiness timeout must be positive")
+        self.readiness_timeout_seconds = readiness_timeout_seconds
 
     @property
     def image_digest(self) -> str:
@@ -136,7 +215,22 @@ class KubernetesRuntimeAdapter:
         client = self._client()
         nodes = await client.list_nodes()
         manifest = self.create_manifest(name=name, nodes=nodes, required_labels={"sandbox": "true"})
-        return await client.create_pod(manifest)
+        pod_id = await client.create_pod(manifest)
+        deadline = time.monotonic() + self.readiness_timeout_seconds
+        try:
+            while time.monotonic() < deadline:
+                if await client.pod_kernel_ready(pod_id):
+                    return pod_id
+                await asyncio.sleep(0.5)
+        except BaseException:
+            try:
+                await client.delete_pod(pod_id)
+            finally:
+                raise
+        try:
+            await client.delete_pod(pod_id)
+        finally:
+            raise TimeoutError("Kubernetes Sandbox Pod did not become kernel-ready")
 
     async def destroy(self, external_runtime_id: str) -> None:
         await self._client().delete_pod(external_runtime_id)
@@ -155,8 +249,12 @@ class KubernetesRuntimeAdapter:
         timeout_seconds: int = 15,
         output_limit_bytes: int = 1_000_000,
     ) -> dict[str, object]:
-        del timeout_seconds, output_limit_bytes
-        return await self._client().execute(external_runtime_id, source=source)
+        return await self._client().execute(
+            external_runtime_id,
+            source=source,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+        )
 
     async def interrupt(self, external_runtime_id: str) -> None:
         await self._client().interrupt(external_runtime_id)
@@ -165,9 +263,15 @@ class KubernetesRuntimeAdapter:
         return await self._client().managed_pod_ids()
 
     async def run_scratch(self, *, source: str, timeout_seconds: int = 15, output_limit_bytes: int = 1_000_000) -> dict[str, object]:
-        del timeout_seconds, output_limit_bytes
-        runtime_id = await self.create_ready(name="nova-scratch", claim_nonce="")
+        runtime_id = await self.create_ready(
+            name=f"nova-scratch-{uuid4().hex}", claim_nonce=""
+        )
         try:
-            return await self.execute(runtime_id, source=source)
+            return await self.execute(
+                runtime_id,
+                source=source,
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+            )
         finally:
             await self.destroy(runtime_id)

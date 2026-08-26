@@ -6,9 +6,15 @@ from types import SimpleNamespace
 
 def _auth_fixture(**overrides: object) -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
     now = datetime.now(UTC).replace(tzinfo=None)
-    lease = SimpleNamespace(user_id="user-1", expires_at=now + timedelta(minutes=5))
+    lease = SimpleNamespace(
+        user_id="user-1",
+        auth_session_id="session-1",
+        workspace_id="workspace-1",
+        expires_at=now + timedelta(minutes=5),
+    )
     auth_session = SimpleNamespace(
         user_id="user-1",
+        workspace_id="workspace-1",
         revoked_at=None,
         expires_at=now + timedelta(minutes=5),
         authorization_version=3,
@@ -57,4 +63,52 @@ def test_auth_lifecycle_allows_only_current_active_session() -> None:
         lease, auth_session, user = _auth_fixture(**overrides)
         assert not auth_lifecycle_allows_execution(
             lease=lease, auth_session=auth_session, user=user, scope_generation=3, now=now
+        )
+
+
+def test_runtime_control_requires_scope_lease_and_generation_binding() -> None:
+    from server.sandbox.contracts import SandboxScope
+    from server.sandbox.manager import runtime_control_allows
+
+    now = datetime.now(UTC)
+    scope = SandboxScope(
+        owner_user_id="user-1",
+        auth_session_id="session-1",
+        workspace_id="workspace-1",
+        generation=3,
+        lease_expires_at=now + timedelta(minutes=5),
+    )
+    lease = SimpleNamespace(
+        id="lease-1",
+        user_id="user-1",
+        auth_session_id="session-1",
+        workspace_id="workspace-1",
+        environment_id="environment-1",
+        runtime_instance_id="runtime-1",
+        generation=7,
+        state="active",
+        expires_at=now.replace(tzinfo=None) + timedelta(minutes=5),
+    )
+    runtime = SimpleNamespace(
+        id="runtime-1",
+        environment_id="environment-1",
+        generation=7,
+        state="assigned",
+    )
+    assert runtime_control_allows(
+        scope=scope, lease=lease, runtime=runtime, expected_generation=7, now=now.replace(tzinfo=None)
+    )
+    for overrides in (
+        {"user_id": "other-user"},
+        {"auth_session_id": "other-session"},
+        {"runtime_instance_id": "other-runtime"},
+        {"workspace_id": "other-workspace"},
+        {"generation": 8},
+        {"state": "released"},
+    ):
+        changed = SimpleNamespace(**lease.__dict__)
+        for key, value in overrides.items():
+            setattr(changed, key, value)
+        assert not runtime_control_allows(
+            scope=scope, lease=changed, runtime=runtime, expected_generation=7, now=now.replace(tzinfo=None)
         )

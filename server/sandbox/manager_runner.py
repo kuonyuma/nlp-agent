@@ -14,12 +14,12 @@ from configs.settings import settings
 from server.infrastructure.mysql.config import DatabaseConfig
 from server.infrastructure.mysql.engine import create_engine, create_session_factory
 
-from .commands import create_sandbox_manager_command_store
+from .commands import command_expired, create_sandbox_manager_command_store
 from .manager import WarmPoolManager
 from .manager_rpc import create_sandbox_manager_rpc_server
 from .optimization import AdaptivePoolPolicy
 from .metrics import create_sandbox_adaptive_state_store, create_sandbox_metrics_store
-from .runtime_factory import create_runtime_adapter
+from .runtime_factory import create_kubernetes_runtime_client, create_runtime_adapter
 
 
 async def run_forever() -> None:
@@ -37,11 +37,18 @@ async def run_forever() -> None:
         else None
     )
     metrics_store = create_sandbox_metrics_store() if settings.NLP_AGENT_SANDBOX_ADAPTIVE_POOL_ENABLED else None
+    backend = settings.NLP_AGENT_SANDBOX_RUNTIME_BACKEND.strip().lower()
+    kubernetes_client = None
+    if backend in {"kubernetes", "k8s"}:
+        kubernetes_client = create_kubernetes_runtime_client(
+            settings.NLP_AGENT_SANDBOX_KUBERNETES_CLIENT_FACTORY
+        )
     runtime = create_runtime_adapter(
-        backend=settings.NLP_AGENT_SANDBOX_RUNTIME_BACKEND,
+        backend=backend,
         image=image,
         kernel_image=settings.NLP_AGENT_SANDBOX_FIRECRACKER_KERNEL_IMAGE.strip() or None,
         rootfs_image=settings.NLP_AGENT_SANDBOX_FIRECRACKER_ROOTFS_IMAGE.strip() or None,
+        client=kubernetes_client,
     )
     manager = WarmPoolManager(
         session_factory=create_session_factory(engine),
@@ -62,7 +69,13 @@ async def run_forever() -> None:
     )
     command_store = create_sandbox_manager_command_store()
     rpc_server = create_sandbox_manager_rpc_server(manager)
-    command_cursor = "0-0"
+    if command_store is not None:
+        try:
+            command_cursor = await command_store.load_cursor()
+        except Exception:
+            command_cursor = "0-0"
+    else:
+        command_cursor = "0-0"
     pending_commands: list[dict[str, str]] = []
     next_reconcile = 0.0
     try:
@@ -93,6 +106,9 @@ async def run_forever() -> None:
                 remaining: list[dict[str, str]] = []
                 now = datetime.now(UTC)
                 for command in pending_commands:
+                    if command_expired(command, now=now.timestamp()):
+                        due.append(command)
+                        continue
                     execute_at = command.get("execute_at", "")
                     if execute_at:
                         try:
@@ -106,7 +122,22 @@ async def run_forever() -> None:
                             continue
                     due.append(command)
                 pending_commands = remaining
+                cursor_safe = True
+                retry_commands: list[dict[str, str]] = []
                 for command in due:
+                    command_id = command.get("id")
+                    if command_store is not None and command_id:
+                        try:
+                            if not await command_store.mark_handled(command_id):
+                                continue
+                        except Exception:
+                            # Never apply a command when its durable dedupe
+                            # marker cannot be written.
+                            cursor_safe = False
+                            retry_commands.append(command)
+                            continue
+                    if command_expired(command, now=now.timestamp()):
+                        continue
                     if command.get("type") != "pool_target":
                         continue
                     if command.get("profile_id") != "python-base":
@@ -119,6 +150,12 @@ async def run_forever() -> None:
                         await manager.request_target(int(command["target"]))
                     except (KeyError, ValueError):
                         continue
+                pending_commands.extend(retry_commands)
+                if due and cursor_safe and not pending_commands and command_store is not None:
+                    try:
+                        await command_store.save_cursor(command_cursor)
+                    except Exception:
+                        pass
                 if due:
                     await manager.refill()
             await asyncio.sleep(0.05)

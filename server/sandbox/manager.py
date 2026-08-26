@@ -38,6 +38,7 @@ def auth_lifecycle_allows_execution(
     auth_session: SessionModel | None,
     user: UserModel | None,
     scope_generation: int,
+    scope_workspace_id: str | None = None,
     now: datetime,
 ) -> bool:
     """Keep a claimed runtime fail-closed across the auth lifecycle.
@@ -51,6 +52,8 @@ def auth_lifecycle_allows_execution(
         auth_session is not None
         and user is not None
         and auth_session.user_id == lease.user_id
+        and auth_session.workspace_id == lease.workspace_id
+        and (scope_workspace_id is None or auth_session.workspace_id == scope_workspace_id)
         and lease.expires_at > now
         and auth_session.revoked_at is None
         and auth_session.expires_at > now
@@ -58,6 +61,29 @@ def auth_lifecycle_allows_execution(
         and auth_session.authorization_version == scope_generation
         and user.status == "active"
         and user.deleted_at is None
+    )
+
+
+def runtime_control_allows(
+    *,
+    scope: SandboxScope,
+    lease: SandboxLeaseModel,
+    runtime: SandboxRuntimeInstanceModel,
+    expected_generation: int | None = None,
+    now: datetime,
+) -> bool:
+    """Bind reset/interrupt to the caller's current lease and runtime row."""
+    return bool(
+        lease.user_id == scope.owner_user_id
+        and lease.auth_session_id == scope.auth_session_id
+        and lease.workspace_id == scope.workspace_id
+        and lease.state == "active"
+        and lease.expires_at > now
+        and lease.runtime_instance_id == runtime.id
+        and lease.environment_id == runtime.environment_id
+        and lease.generation == runtime.generation
+        and (expected_generation is None or runtime.generation == expected_generation)
+        and runtime.state == RuntimeState.ASSIGNED
     )
 
 
@@ -230,10 +256,9 @@ class WarmPoolManager:
                 ready_count=counts.ready_count,
                 creating_count=counts.creating_count,
             ),
-            "adaptive_target": self.recommended_ready_target(
-                arrival_rate_per_min=settings.NLP_AGENT_SANDBOX_ARRIVAL_RATE_PER_MIN,
-                refill_p95_s=settings.NLP_AGENT_SANDBOX_REFILL_P95_S,
-            ),
+            # Report the target actually selected after reading the durable
+            # metrics/cooldown state, not the static environment estimate.
+            "adaptive_target": target,
         }
 
     async def claim(self, scope: SandboxScope, *, lease_id: str) -> RuntimeClaim | None:
@@ -259,8 +284,20 @@ class WarmPoolManager:
                 lease is None
                 or lease.user_id != scope.owner_user_id
                 or lease.auth_session_id != scope.auth_session_id
+                or lease.workspace_id != scope.workspace_id
                 or lease.state != "active"
                 or lease.expires_at <= _utc_now()
+            ):
+                return None
+            auth_session = await session.get(SessionModel, lease.auth_session_id)
+            user = await session.get(UserModel, lease.user_id)
+            if not auth_lifecycle_allows_execution(
+                lease=lease,
+                auth_session=auth_session,
+                user=user,
+                scope_generation=scope.generation,
+                scope_workspace_id=scope.workspace_id,
+                now=_utc_now(),
             ):
                 return None
             environment = await session.get(SandboxEnvironmentModel, lease.environment_id)
@@ -302,8 +339,11 @@ class WarmPoolManager:
 
     async def reset_runtime(
         self,
-        runtime_id: str,
+        scope: SandboxScope,
         *,
+        lease_id: str,
+        runtime_id: str,
+        generation: int | None = None,
         trace_id: str | None = None,
         span_id: str | None = None,
     ) -> None:
@@ -311,8 +351,28 @@ class WarmPoolManager:
         self._trace("sandbox.manager.reset.started", runtime_id=runtime_id, trace_id=trace_id, span_id=span_id)
         async with self._session_factory.begin() as session:
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
-            if runtime is None or runtime.environment_id is None:
+            lease = await session.get(SandboxLeaseModel, lease_id, with_for_update=True)
+            auth_session = None if lease is None else await session.get(SessionModel, lease.auth_session_id)
+            user = None if lease is None else await session.get(UserModel, lease.user_id)
+            if runtime is None:
                 raise LookupError("sandbox runtime does not exist")
+            if lease is None or not runtime_control_allows(
+                scope=scope,
+                lease=lease,
+                runtime=runtime,
+                expected_generation=generation,
+                now=_utc_now(),
+            ) or not auth_lifecycle_allows_execution(
+                lease=lease,
+                auth_session=auth_session,
+                user=user,
+                scope_generation=scope.generation,
+                scope_workspace_id=scope.workspace_id,
+                now=_utc_now(),
+            ):
+                raise PermissionError("sandbox reset is not authorized for this lease")
+            if runtime.environment_id is None:
+                raise LookupError("sandbox runtime has no environment")
             environment = await session.get(SandboxEnvironmentModel, runtime.environment_id, with_for_update=True)
             if environment is not None:
                 environment.generation += 1
@@ -377,8 +437,11 @@ class WarmPoolManager:
 
     async def interrupt_runtime(
         self,
-        runtime_id: str,
+        scope: SandboxScope,
         *,
+        lease_id: str,
+        runtime_id: str,
+        generation: int | None = None,
         trace_id: str | None = None,
         span_id: str | None = None,
     ) -> None:
@@ -386,8 +449,26 @@ class WarmPoolManager:
         self._trace("sandbox.manager.interrupt.started", runtime_id=runtime_id, trace_id=trace_id, span_id=span_id)
         async with self._session_factory() as session:
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id)
-            if runtime is None or runtime.state != RuntimeState.ASSIGNED:
-                raise LookupError("sandbox runtime is not assigned")
+            lease = await session.get(SandboxLeaseModel, lease_id)
+            auth_session = None if lease is None else await session.get(SessionModel, lease.auth_session_id)
+            user = None if lease is None else await session.get(UserModel, lease.user_id)
+            if runtime is None:
+                raise LookupError("sandbox runtime does not exist")
+            if lease is None or not runtime_control_allows(
+                scope=scope,
+                lease=lease,
+                runtime=runtime,
+                expected_generation=generation,
+                now=_utc_now(),
+            ) or not auth_lifecycle_allows_execution(
+                lease=lease,
+                auth_session=auth_session,
+                user=user,
+                scope_generation=scope.generation,
+                scope_workspace_id=scope.workspace_id,
+                now=_utc_now(),
+            ):
+                raise PermissionError("sandbox interrupt is not authorized for this lease")
             external_id = runtime.external_runtime_id
         if not external_id:
             raise LookupError("sandbox runtime has no Docker container")
@@ -499,7 +580,9 @@ class WarmPoolManager:
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
             if (
                 lease is None or runtime is None or lease.user_id != scope.owner_user_id
-                or lease.auth_session_id != scope.auth_session_id or lease.state != "active"
+                or lease.auth_session_id != scope.auth_session_id
+                or lease.workspace_id != scope.workspace_id
+                or lease.state != "active"
                 or lease.generation != runtime.generation or runtime.generation != generation
                 or runtime.state != RuntimeState.ASSIGNED
                 or runtime.environment_id != lease.environment_id
@@ -512,6 +595,7 @@ class WarmPoolManager:
                 auth_session=auth_session,
                 user=user,
                 scope_generation=scope.generation,
+                scope_workspace_id=scope.workspace_id,
                 now=_utc_now(),
             ):
                 raise PermissionError("sandbox authentication lifecycle is no longer active")

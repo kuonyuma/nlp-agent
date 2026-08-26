@@ -37,12 +37,15 @@ class OutputCollector:
         self._used_bytes += len(content.encode("utf-8"))
         (self._stdout if stream == "stdout" else self._stderr).append(content)
 
-    def to_payload(self) -> dict[str, object]:
-        return {
+    def to_payload(self, *, status: str | None = None) -> dict[str, object]:
+        payload: dict[str, object] = {
             "stdout": "".join(self._stdout),
             "stderr": "".join(self._stderr),
             "truncated": self._truncated,
         }
+        if status is not None:
+            payload["status"] = status
+        return payload
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ def execute(request: ExecuteRequest) -> dict[str, object]:
     client.start_channels()
     output = OutputCollector(limit_bytes=request.output_limit_bytes)
     deadline = time.monotonic() + request.timeout_seconds
+    failed = False
     try:
         message_id = client.execute(request.source, allow_stdin=False, store_history=True)
         while True:
@@ -88,11 +92,12 @@ def execute(request: ExecuteRequest) -> dict[str, object]:
             if message_type == "stream":
                 output.append(content.get("name", "stdout"), content.get("text", ""))
             elif message_type == "error":
+                failed = True
                 output.append("stderr", "\n".join(content.get("traceback", [])) + "\n")
             elif message_type == "execute_result":
                 output.append("stdout", content.get("data", {}).get("text/plain", "") + "\n")
             elif message_type == "status" and content.get("execution_state") == "idle":
-                return output.to_payload()
+                return output.to_payload(status="failed" if failed else "completed")
     finally:
         client.stop_channels()
 
@@ -142,7 +147,8 @@ def scratch(request: ExecuteRequest) -> dict[str, object]:
         output.append("stderr", stderr.getvalue())
     except Exception as error:
         output.append("stderr", f"{type(error).__name__}: {error}\n")
-    return output.to_payload()
+        return output.to_payload(status="failed")
+    return output.to_payload(status="completed")
 
 
 def main() -> int:

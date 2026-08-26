@@ -4,6 +4,8 @@ import asyncio
 import json
 import time
 
+import pytest
+
 
 def test_manager_rpc_client_round_trips_signed_request() -> None:
     from server.sandbox.manager_rpc import RedisSandboxManagerRpcClient
@@ -170,3 +172,42 @@ def test_manager_rpc_server_rejects_expired_requests_after_restart() -> None:
     response = asyncio.run(exercise())
     assert response["ok"] == "0"
     assert "expired" in response["error"]
+
+
+@pytest.mark.parametrize("redis_result", (False, None))
+def test_duplicate_manager_rpc_request_does_not_publish_a_competing_error(redis_result) -> None:
+    from server.sandbox.manager_rpc import RedisSandboxManagerRpcServer, _json, _signature
+
+    class FakeManager:
+        called = False
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.responses = 0
+
+        async def set(self, *_args, **_kwargs):
+            return redis_result
+
+        async def xadd(self, stream, _fields, **_kwargs):
+            if stream.startswith("nova:sandbox:manager:rpc:responses:"):
+                self.responses += 1
+
+        async def expire(self, *_args):
+            return True
+
+    async def exercise() -> int:
+        request_id = "duplicate-request"
+        body = _json({"issued_at": time.time(), "expires_at": time.time() + 30})
+        fields = {
+            "request_id": request_id,
+            "response_stream": f"nova:sandbox:manager:rpc:responses:{request_id}",
+            "method": "capacity_snapshot",
+            "payload": body,
+            "signature": _signature("rpc-secret", request_id, "capacity_snapshot", body),
+        }
+        redis = FakeRedis()
+        server = RedisSandboxManagerRpcServer(redis, manager=FakeManager(), secret="rpc-secret")
+        await server._handle(fields)
+        return redis.responses
+
+    assert asyncio.run(exercise()) == 0

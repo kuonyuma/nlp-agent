@@ -278,13 +278,18 @@ async def test_reset_claim_execute_uses_new_environment_generation() -> None:
             resource_profile_id="python-base",
             ready_target=0,
         )
-        await manager.reset_runtime(old_runtime_id)
         scope = SandboxScope(
             owner_user_id=str(user.id),
             auth_session_id=session_id,
             workspace_id=str(workspace_id),
             generation=1,
             lease_expires_at=now + timedelta(hours=1),
+        )
+        await manager.reset_runtime(
+            scope,
+            lease_id=lease_id,
+            runtime_id=old_runtime_id,
+            generation=1,
         )
         claim = await manager.claim(scope, lease_id=lease_id)
         assert claim is not None

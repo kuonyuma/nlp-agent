@@ -37,6 +37,15 @@ def test_docker_runtime_rejects_mutable_image_references() -> None:
         raise AssertionError("mutable Docker image reference must be rejected")
 
 
+def test_docker_runtime_accepts_an_immutable_local_image_id_for_ci() -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeConfig
+
+    image_id = "sha256:" + "2" * 64
+    with pytest.raises(ValueError):
+        DockerRuntimeConfig(image=image_id)
+    assert DockerRuntimeConfig(image=image_id, allow_local_image_id=True).image == image_id
+
+
 def test_l1_container_command_is_created_not_started() -> None:
     from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import asyncio
 import json
+import re
 from uuid import uuid4
 
 
@@ -43,9 +44,11 @@ class DockerRuntimeConfig:
     tmp_size: str = "256m"
     shm_size: str = "64m"
     runtime: str = "runsc"
+    allow_local_image_id: bool = False
 
     def __post_init__(self) -> None:
-        if "@sha256:" not in self.image:
+        local_image_id = re.fullmatch(r"sha256:[0-9a-fA-F]{64}", self.image) is not None
+        if "@sha256:" not in self.image and not (local_image_id and self.allow_local_image_id):
             raise ValueError("sandbox runtime image must be pinned by immutable digest")
         if self.runtime != "runsc":
             raise ValueError("Phase 3 sandbox runtime must use gVisor runsc")

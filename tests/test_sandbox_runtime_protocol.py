@@ -33,3 +33,12 @@ def test_protocol_rejects_an_invalid_execute_request() -> None:
         assert "source" in str(error)
     else:
         raise AssertionError("empty source must be rejected")
+
+
+def test_scratch_protocol_marks_user_code_errors_as_failed() -> None:
+    runtime = _load_runtime_module()
+    result = runtime.scratch(
+        runtime.ExecuteRequest("raise RuntimeError('boom')", 5, 1024)
+    )
+    assert result["status"] == "failed"
+    assert "RuntimeError" in result["stderr"]

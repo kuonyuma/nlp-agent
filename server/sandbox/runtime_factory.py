@@ -10,7 +10,7 @@ from .runtime_adapters import (
     KataRuntimeConfig,
     SandboxRuntimeAdapter,
 )
-from .scheduling import KubernetesRuntimeAdapter
+from .scheduling import KubernetesRuntimeAdapter, create_kubernetes_runtime_client
 
 
 def create_runtime_adapter(

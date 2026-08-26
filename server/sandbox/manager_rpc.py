@@ -181,19 +181,47 @@ class RedisSandboxManagerRpcClient:
         )
 
     async def reset_runtime(
-        self, runtime_id: str, *, trace_id: str | None = None, span_id: str | None = None
+        self,
+        scope: SandboxScope,
+        *,
+        lease_id: str,
+        runtime_id: str,
+        generation: int | None = None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> None:
         await self._request(
             "reset_runtime",
-            {"runtime_id": runtime_id, "trace_id": trace_id, "span_id": span_id},
+            {
+                "scope": _scope_payload(scope),
+                "lease_id": lease_id,
+                "runtime_id": runtime_id,
+                "generation": generation,
+                "trace_id": trace_id,
+                "span_id": span_id,
+            },
         )
 
     async def interrupt_runtime(
-        self, runtime_id: str, *, trace_id: str | None = None, span_id: str | None = None
+        self,
+        scope: SandboxScope,
+        *,
+        lease_id: str,
+        runtime_id: str,
+        generation: int | None = None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> None:
         await self._request(
             "interrupt_runtime",
-            {"runtime_id": runtime_id, "trace_id": trace_id, "span_id": span_id},
+            {
+                "scope": _scope_payload(scope),
+                "lease_id": lease_id,
+                "runtime_id": runtime_id,
+                "generation": generation,
+                "trace_id": trace_id,
+                "span_id": span_id,
+            },
         )
 
     async def capacity_snapshot(self) -> dict[str, object]:
@@ -270,8 +298,11 @@ class RedisSandboxManagerRpcServer:
                     )
                 except Exception as error:
                     raise RuntimeError("Sandbox Manager RPC replay guard is unavailable") from error
-                if accepted is False:
-                    raise RuntimeError("duplicate Sandbox Manager RPC request")
+                if not accepted:
+                    # Another Manager owns this request.  Do not publish an
+                    # error to the shared response stream: the winning
+                    # Manager's response is the only authoritative result.
+                    return
             payload = json.loads(body)
             if not isinstance(payload, dict):
                 raise ValueError("Sandbox Manager RPC payload must be an object")
@@ -336,14 +367,20 @@ class RedisSandboxManagerRpcServer:
             )
         if method == "reset_runtime":
             await self._manager.reset_runtime(
-                str(payload["runtime_id"]),
+                _scope_from_payload(payload["scope"]),
+                lease_id=str(payload["lease_id"]),
+                runtime_id=str(payload["runtime_id"]),
+                generation=int(payload["generation"]) if payload.get("generation") is not None else None,
                 trace_id=str(payload["trace_id"]) if payload.get("trace_id") else None,
                 span_id=str(payload["span_id"]) if payload.get("span_id") else None,
             )
             return {"ok": True}
         if method == "interrupt_runtime":
             await self._manager.interrupt_runtime(
-                str(payload["runtime_id"]),
+                _scope_from_payload(payload["scope"]),
+                lease_id=str(payload["lease_id"]),
+                runtime_id=str(payload["runtime_id"]),
+                generation=int(payload["generation"]) if payload.get("generation") is not None else None,
                 trace_id=str(payload["trace_id"]) if payload.get("trace_id") else None,
                 span_id=str(payload["span_id"]) if payload.get("span_id") else None,
             )
