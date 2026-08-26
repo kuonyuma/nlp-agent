@@ -308,7 +308,7 @@ class WarmPoolManager:
                 lease.runtime_instance_id = claim.runtime.id
             return claim
 
-    async def destroy_runtime(self, runtime_id: str, *, reason: str) -> None:
+    async def destroy_runtime(self, runtime_id: str, *, reason: str, refill: bool = True) -> None:
         self._trace("sandbox.manager.destroy.started", runtime_id=runtime_id, reason=reason)
         async with self._session_factory.begin() as session:
             runtime = await warm_pool_service.mark_draining(session, runtime_id)
@@ -334,7 +334,12 @@ class WarmPoolManager:
             if runtime is not None:
                 runtime.failure_reason = reason
             await warm_pool_service.mark_destroyed(session, runtime_id)
-        await self.refill()
+        # Reset performs a claim immediately after destroying the old
+        # runtime.  It must not hold that request on a pool-wide advisory lock
+        # while trying to refill; the next regular reconcile will replenish
+        # capacity when needed.
+        if refill:
+            await self.refill()
         self._trace("sandbox.manager.destroy.completed", runtime_id=runtime_id, reason=reason)
 
     async def reset_runtime(
@@ -398,7 +403,7 @@ class WarmPoolManager:
                 # transaction.  A concurrent claim can therefore not reuse
                 # the old assigned runtime during the reset hand-off.
                 environment.active_runtime_id = None
-        await self.destroy_runtime(runtime_id, reason="user.restart")
+        await self.destroy_runtime(runtime_id, reason="user.restart", refill=False)
         self._trace("sandbox.manager.reset.completed", runtime_id=runtime_id, trace_id=trace_id, span_id=span_id)
 
     async def run_scratch(
