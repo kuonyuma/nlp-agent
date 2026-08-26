@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 import time
+from typing import Any
 
 from configs.settings import settings
 from server.infrastructure.mysql.config import DatabaseConfig
@@ -20,6 +21,89 @@ from .manager_rpc import create_sandbox_manager_rpc_server
 from .optimization import AdaptivePoolPolicy
 from .metrics import create_sandbox_adaptive_state_store, create_sandbox_metrics_store
 from .runtime_factory import create_kubernetes_runtime_client, create_runtime_adapter
+
+
+async def process_manager_command(
+    command: dict[str, str], *, command_store: Any, manager: Any, now: float | None = None
+) -> bool:
+    """Apply one command and acknowledge it only after its side effect succeeds.
+
+    The Redis stream cursor is deliberately advanced independently from this
+    acknowledgement.  If Manager or Docker fails, returning ``False`` keeps
+    the command pending so a later loop (or a restarted Manager) can retry it.
+    Pool targets are idempotent, so a crash after ``refill`` and before the
+    acknowledgement is safe to replay.
+    """
+    command_id = command.get("id", "")
+    if not command_id:
+        return False
+    try:
+        if await command_store.is_handled(command_id):
+            return True
+    except Exception:
+        return False
+
+    async def acknowledge() -> bool:
+        try:
+            accepted = await command_store.mark_handled(command_id)
+        except Exception:
+            return False
+        if accepted:
+            return True
+        try:
+            return await command_store.is_handled(command_id)
+        except Exception:
+            return False
+
+    if command_expired(command, now=now):
+        return await acknowledge()
+    if command.get("type") != "pool_target":
+        return await acknowledge()
+    if command.get("profile_id") != "python-base":
+        try:
+            manager._trace(
+                "sandbox.manager.command.unsupported_profile",
+                profile_id=command.get("profile_id"),
+            )
+        except Exception:
+            pass
+        return await acknowledge()
+    try:
+        target = int(command["target"])
+    except (KeyError, ValueError):
+        return await acknowledge()
+    try:
+        await manager.request_target(target)
+    except ValueError:
+        # Invalid operator input cannot become valid on a retry; acknowledge
+        # it after refusing the side effect so it cannot poison the queue.
+        return await acknowledge()
+    except Exception as error:
+        try:
+            manager._trace(
+                "sandbox.manager.command.apply_failed",
+                command_id=command_id,
+                error=type(error).__name__,
+            )
+        except Exception:
+            pass
+        return False
+    try:
+        # Refill is part of the command's side effect.  Do it before the
+        # durable acknowledgement so a failure cannot permanently lose the
+        # requested capacity target.
+        await manager.refill()
+    except Exception as error:
+        try:
+            manager._trace(
+                "sandbox.manager.command.apply_failed",
+                command_id=command_id,
+                error=type(error).__name__,
+            )
+        except Exception:
+            pass
+        return False
+    return await acknowledge()
 
 
 async def run_forever() -> None:
@@ -125,39 +209,21 @@ async def run_forever() -> None:
                 cursor_safe = True
                 retry_commands: list[dict[str, str]] = []
                 for command in due:
-                    command_id = command.get("id")
-                    if command_store is not None and command_id:
-                        try:
-                            if not await command_store.mark_handled(command_id):
-                                continue
-                        except Exception:
-                            # Never apply a command when its durable dedupe
-                            # marker cannot be written.
-                            cursor_safe = False
-                            retry_commands.append(command)
-                            continue
-                    if command_expired(command, now=now.timestamp()):
-                        continue
-                    if command.get("type") != "pool_target":
-                        continue
-                    if command.get("profile_id") != "python-base":
-                        manager._trace(
-                            "sandbox.manager.command.unsupported_profile",
-                            profile_id=command.get("profile_id"),
-                        )
-                        continue
-                    try:
-                        await manager.request_target(int(command["target"]))
-                    except (KeyError, ValueError):
-                        continue
+                    handled = await process_manager_command(
+                        command,
+                        command_store=command_store,
+                        manager=manager,
+                        now=now.timestamp(),
+                    )
+                    if not handled:
+                        cursor_safe = False
+                        retry_commands.append(command)
                 pending_commands.extend(retry_commands)
                 if due and cursor_safe and not pending_commands and command_store is not None:
                     try:
                         await command_store.save_cursor(command_cursor)
                     except Exception:
                         pass
-                if due:
-                    await manager.refill()
             await asyncio.sleep(0.05)
     finally:
         if command_store is not None:

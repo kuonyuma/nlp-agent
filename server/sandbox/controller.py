@@ -270,11 +270,19 @@ async def execute_sandbox(
 @router.get("/executions/{execution_id}/events")
 async def replay_execution_events(
     execution_id: str,
+    db: DbSession,
     principal: Principal,
     claims: DatabaseClaims,
     after_event_id: str | None = None,
 ) -> dict:
     scope = SandboxScope.from_authenticated_request(principal, claims)
+    execution = await db.get(SandboxExecutionModel, execution_id)
+    if (
+        execution is None
+        or str(execution.owner_user_id) != scope.owner_user_id
+        or str(execution.workspace_id) != scope.workspace_id
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return {"execution_id": execution_id, "events": await sandbox_events.replay(execution_id, user_id=scope.owner_user_id, after_event_id=after_event_id)}
 
 

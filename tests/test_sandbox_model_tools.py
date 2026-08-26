@@ -8,12 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 
-def _config(*, user_id: str = "local", session_id: str = "model-session") -> dict:
+def _config(
+    *, user_id: str = "local", session_id: str = "model-session", workspace_id: str = "default"
+) -> dict:
     return {
         "configurable": {
             "thread_id": session_id,
             "user_id": user_id,
-            "workspace_id": "default",
+            "workspace_id": workspace_id,
         }
     }
 
@@ -130,6 +132,45 @@ async def test_model_scratch_does_not_share_interactive_kernel() -> None:
     assert explanation["ok"] is True
     assert explanation["execution"]["status"] == "completed"
     assert any(event["type"] == "execution.completed" for event in explanation["events"])
+
+
+@pytest.mark.asyncio
+async def test_model_explain_execution_is_bound_to_workspace() -> None:
+    from server.sandbox.model_tools import SandboxModelToolService
+
+    service = SandboxModelToolService(mode="inmemory")
+    created = await service.run_scratch(source="print(1)", config=_config(workspace_id="workspace-a"))
+
+    explanation = await service.explain_execution(
+        execution_id=str(created["execution_id"]),
+        config=_config(workspace_id="workspace-b"),
+    )
+
+    assert explanation["ok"] is False
+    assert explanation["code"] == "not_found"
+    assert explanation["error"] == "sandbox execution was not found"
+
+
+@pytest.mark.asyncio
+async def test_failed_model_result_emits_failed_event() -> None:
+    from server.sandbox.model_tools import SandboxModelToolService
+
+    class FailedManager:
+        async def run_scratch(self, **_kwargs: object) -> dict[str, object]:
+            return {"status": "failed", "stdout": "partial", "stderr": "NameError: missing"}
+
+    service = SandboxModelToolService(mode="docker", manager=FailedManager())
+    result = await service.run_scratch(source="print(missing)", config=_config())
+    explanation = await service.explain_execution(
+        execution_id=str(result["execution_id"]), config=_config()
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "failed"
+    assert explanation["execution"]["status"] == "failed"
+    event_types = [event["type"] for event in explanation["events"]]
+    assert "execution.failed" in event_types
+    assert "execution.completed" not in event_types
 
 
 @pytest.mark.asyncio

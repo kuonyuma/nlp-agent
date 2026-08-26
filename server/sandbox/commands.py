@@ -103,6 +103,11 @@ class RedisSandboxManagerCommandStore:
             ex=max(60, settings.NLP_AGENT_SANDBOX_COMMAND_RETENTION_S),
         )
 
+    async def is_handled(self, command_id: str) -> bool:
+        """Check completion without claiming a command before its side effect."""
+        value = await self._client.get(self._handled_key(command_id))
+        return value is not None
+
     async def mark_handled(self, command_id: str) -> bool:
         accepted = await self._client.set(
             self._handled_key(command_id),

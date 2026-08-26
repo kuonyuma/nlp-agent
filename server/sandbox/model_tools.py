@@ -176,6 +176,7 @@ class SandboxModelToolService:
             self._local_executions[execution_id] = {
                 "id": execution_id,
                 "owner_user_id": authorized.context.user_id,
+                "workspace_id": authorized.context.workspace_id,
                 "status": "running",
                 "runtime_instance_id": runtime_id,
                 "started_at": _utc_now().isoformat(),
@@ -250,10 +251,11 @@ class SandboxModelToolService:
                             "stdout_bytes": len(str(result.get("stdout") or "").encode("utf-8")),
                             "stderr_bytes": len(str(result.get("stderr") or "").encode("utf-8")),
                         }
+        failed = bool(error) or status.lower() in {"failed", "error", "timeout", "timed_out"}
         await default_sandbox_event_store.append(
             execution_id,
             user_id=user_id,
-            event_type="execution.failed" if error else "execution.completed",
+            event_type="execution.failed" if failed else "execution.completed",
             payload={"status": status, **({"error": type(error).__name__} if error else {})},
         )
 
@@ -493,12 +495,32 @@ class SandboxModelToolService:
             if authorized is None:
                 return _error("not_authorized", "execution explanation requires an authenticated session")
             local = self._local_executions.get(execution_id)
-            if local is None or local.get("owner_user_id") != authorized.context.user_id:
+            if (
+                local is None
+                or local.get("owner_user_id") != authorized.context.user_id
+                or local.get("workspace_id") != authorized.context.workspace_id
+            ):
                 return _error("not_found", "sandbox execution was not found")
-            return {"ok": True, "execution": {key: value for key, value in local.items() if key != "owner_user_id"}, "events": (await default_sandbox_event_store.replay(execution_id, user_id=authorized.context.user_id))[-50:]}
+            return {
+                "ok": True,
+                "execution": {
+                    key: value
+                    for key, value in local.items()
+                    if key not in {"owner_user_id", "workspace_id"}
+                },
+                "events": (
+                    await default_sandbox_event_store.replay(
+                        execution_id, user_id=authorized.context.user_id
+                    )
+                )[-50:],
+            }
         async with self.session_factory() as session:
             execution = await session.get(SandboxExecutionModel, execution_id)
-            if execution is None or str(execution.owner_user_id) != authorized.context.user_id:
+            if (
+                execution is None
+                or str(execution.owner_user_id) != authorized.context.user_id
+                or str(execution.workspace_id) != authorized.context.workspace_id
+            ):
                 return _error("not_found", "sandbox execution was not found")
             summary = {
                 "id": str(execution.id),

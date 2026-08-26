@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import hashlib
 import hmac
 import json
+import asyncio
 import time
 from asyncio import Task, create_task, gather
 from typing import Any
@@ -24,8 +25,12 @@ from .contracts import SandboxScope
 
 REQUEST_STREAM = "nova:sandbox:manager:rpc:requests"
 RESPONSE_PREFIX = "nova:sandbox:manager:rpc:responses:"
+HANDLED_PREFIX = "nova:sandbox:manager:rpc:handled:"
+RESULT_PREFIX = "nova:sandbox:manager:rpc:result:"
 REQUEST_TTL_SECONDS = 60
 REQUEST_CLOCK_SKEW_SECONDS = 5
+RPC_PROCESSING_TTL_SECONDS = 30
+RPC_RESULT_TTL_SECONDS = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +269,49 @@ class RedisSandboxManagerRpcServer:
         self._cursor = "0-0"
         self._tasks: set[Task[None]] = set()
 
+    async def _publish_response(
+        self, response_stream: str, request_id: str, *, ok: str, payload: str, error: str
+    ) -> None:
+        await self._client.xadd(
+            response_stream,
+            {"request_id": request_id, "ok": ok, "payload": payload, "error": error},
+            maxlen=10,
+            approximate=True,
+        )
+        await self._client.expire(response_stream, 60)
+
+    async def _publish_cached_response(self, response_stream: str, request_id: str) -> bool:
+        get = getattr(self._client, "get", None)
+        if not callable(get):
+            return False
+        try:
+            cached = await get(f"{RESULT_PREFIX}{request_id}")
+            if cached is None:
+                return False
+            result = json.loads(_text(cached))
+            if not isinstance(result, dict):
+                return False
+            await self._publish_response(
+                response_stream,
+                request_id,
+                ok=str(result.get("ok", "0")),
+                payload=str(result.get("payload", "{}")),
+                error=str(result.get("error", "")),
+            )
+            return True
+        except Exception:
+            return False
+
+    async def _renew_processing_lease(self, handled_key: str) -> None:
+        """Keep a live long-running dispatch owned until its result is saved."""
+        interval = max(1, RPC_PROCESSING_TTL_SECONDS // 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._client.expire(handled_key, RPC_PROCESSING_TTL_SECONDS)
+            except Exception:
+                return
+
     async def process_once(self, *, block_ms: int = 100) -> bool:
         rows = await self._client.xread({self._request_stream: self._cursor}, count=1, block=max(1, block_ms))
         if not rows:
@@ -282,52 +330,106 @@ class RedisSandboxManagerRpcServer:
         response_stream = fields.get("response_stream", f"{RESPONSE_PREFIX}{request_id}")
         method = fields.get("method", "")
         body = fields.get("payload", "{}")
+        dedupe = getattr(self._client, "set", None)
+        handled_key = f"{HANDLED_PREFIX}{request_id}"
         try:
             if not hmac.compare_digest(
                 fields.get("signature", ""), _signature(self._secret, request_id, method, body)
             ):
                 raise PermissionError("invalid Sandbox Manager RPC signature")
-            dedupe = getattr(self._client, "set", None)
+        except Exception as error:
+            await self._publish_response(
+                response_stream,
+                request_id,
+                ok="0",
+                payload="{}",
+                error=f"{type(error).__name__}: {error}"[:500],
+            )
+            return
+
+        renew_task: Task[None] | None = None
+        if callable(dedupe):
+            # A result may have been persisted immediately before a Manager
+            # crashed while finalizing the completion marker.  Replay that
+            # response first so expiry of the short processing lease cannot
+            # dispatch the operation a second time.
+            if await self._publish_cached_response(response_stream, request_id):
+                return
+            try:
+                # This is a short processing lease, not completion state.
+                # If the Manager dies before dispatch, another instance can
+                # take over after the lease expires.
+                accepted = await dedupe(
+                    handled_key,
+                    "processing",
+                    nx=True,
+                    ex=RPC_PROCESSING_TTL_SECONDS,
+                )
+            except Exception as error:
+                await self._publish_response(
+                    response_stream,
+                    request_id,
+                    ok="0",
+                    payload="{}",
+                    error=f"RuntimeError: Sandbox Manager RPC replay guard is unavailable: {error}"[:500],
+                )
+                return
+            if not accepted:
+                # A completed request has a durable response record.  An
+                # in-flight request has no response yet and is owned by
+                # another Manager; do not publish a competing error.
+                await self._publish_cached_response(response_stream, request_id)
+                return
+            renew_task = create_task(
+                self._renew_processing_lease(handled_key),
+                name=f"sandbox-manager-rpc-lease:{request_id}",
+            )
+        try:
+            try:
+                payload = json.loads(body)
+                if not isinstance(payload, dict):
+                    raise ValueError("Sandbox Manager RPC payload must be an object")
+                now = time.time()
+                issued_at = payload.get("issued_at")
+                expires_at = payload.get("expires_at")
+                if (
+                    not isinstance(issued_at, (int, float))
+                    or not isinstance(expires_at, (int, float))
+                    or issued_at > now + REQUEST_CLOCK_SKEW_SECONDS
+                    or expires_at <= now
+                    or expires_at - issued_at > REQUEST_TTL_SECONDS + REQUEST_CLOCK_SKEW_SECONDS
+                ):
+                    raise PermissionError("expired or invalid Sandbox Manager RPC request")
+                result = await self._dispatch(method, payload)
+                ok, encoded, error = "1", _json(result), ""
+            except Exception as exc:
+                ok, encoded, error = "0", "{}", f"{type(exc).__name__}: {exc}"[:500]
             if callable(dedupe):
                 try:
-                    accepted = await dedupe(
-                        f"nova:sandbox:manager:rpc:handled:{request_id}",
-                        "1",
-                        nx=True,
-                        ex=600,
+                    # Persist the response before completion state.  A restarted
+                    # Manager can replay this exact response without dispatching
+                    # the operation again, even if the first response publish was
+                    # interrupted by a process crash.
+                    await dedupe(
+                        f"{RESULT_PREFIX}{request_id}",
+                        _json({"ok": ok, "payload": encoded, "error": error}),
+                        ex=RPC_RESULT_TTL_SECONDS,
                     )
-                except Exception as error:
-                    raise RuntimeError("Sandbox Manager RPC replay guard is unavailable") from error
-                if not accepted:
-                    # Another Manager owns this request.  Do not publish an
-                    # error to the shared response stream: the winning
-                    # Manager's response is the only authoritative result.
-                    return
-            payload = json.loads(body)
-            if not isinstance(payload, dict):
-                raise ValueError("Sandbox Manager RPC payload must be an object")
-            now = time.time()
-            issued_at = payload.get("issued_at")
-            expires_at = payload.get("expires_at")
-            if (
-                not isinstance(issued_at, (int, float))
-                or not isinstance(expires_at, (int, float))
-                or issued_at > now + REQUEST_CLOCK_SKEW_SECONDS
-                or expires_at <= now
-                or expires_at - issued_at > REQUEST_TTL_SECONDS + REQUEST_CLOCK_SKEW_SECONDS
-            ):
-                raise PermissionError("expired or invalid Sandbox Manager RPC request")
-            result = await self._dispatch(method, payload)
-            ok, encoded, error = "1", _json(result), ""
-        except Exception as exc:
-            ok, encoded, error = "0", "{}", f"{type(exc).__name__}: {exc}"[:500]
-        await self._client.xadd(
-            response_stream,
-            {"request_id": request_id, "ok": ok, "payload": encoded, "error": error},
-            maxlen=10,
-            approximate=True,
-        )
-        await self._client.expire(response_stream, 60)
+                    await dedupe(
+                        handled_key,
+                        "done",
+                        ex=RPC_RESULT_TTL_SECONDS,
+                    )
+                except Exception:
+                    # Keep the short processing lease.  The response is still
+                    # published to the current caller, while another Manager can
+                    # retry after the lease expires if Redis persistence failed.
+                    pass
+            await self._publish_response(response_stream, request_id, ok=ok, payload=encoded, error=error)
+        finally:
+            if renew_task is not None:
+                renew_task.cancel()
+                await gather(renew_task, return_exceptions=True)
 
     async def _dispatch(self, method: str, payload: dict[str, object]) -> dict[str, object]:
         trace = getattr(self._manager, "_trace", None)
