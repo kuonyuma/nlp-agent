@@ -166,7 +166,7 @@ jobs:
             --update-matrix \
             --measure-manager-claim | tee sandbox-manager-claim-benchmark.json
       - name: Verify Docker reconcile destroys orphan runtimes
-        run: pytest tests/test_sandbox_manager_docker_integration.py -q
+        run: pytest tests/test_sandbox_manager_docker_integration.py -vv -s
       - uses: actions/upload-artifact@v4
         with:
           name: sandbox-manager-claim-benchmark
