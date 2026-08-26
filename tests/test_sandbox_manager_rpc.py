@@ -42,10 +42,35 @@ def test_manager_rpc_client_round_trips_signed_request() -> None:
             ]
 
     async def exercise() -> dict[str, object]:
-        client = RedisSandboxManagerRpcClient(FakeRedis(), secret="rpc-secret", timeout_seconds=1)
+        client = RedisSandboxManagerRpcClient(FakeRedis(), secret="rpc-secret", timeout_seconds=20)
         return await client.run_scratch(source="print(1)")
 
     assert asyncio.run(exercise()) == {"status": "completed"}
+
+
+def test_manager_rpc_scratch_timeout_requires_response_budget() -> None:
+    from server.sandbox.manager_rpc import RedisSandboxManagerRpcClient
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.response_stream = ""
+
+        async def xadd(self, stream, fields, **_kwargs):
+            self.response_stream = stream if stream.startswith("nova:sandbox:manager:rpc:responses:") else fields["response_stream"]
+
+        async def xread(self, streams, **_kwargs):
+            stream = next(iter(streams))
+            if stream != self.response_stream:
+                return []
+            return [(stream, [("1-0", {"request_id": stream.rsplit(":", 1)[-1], "ok": "1", "payload": "{}", "error": ""})])]
+
+    async def exercise() -> dict[str, object]:
+        client = RedisSandboxManagerRpcClient(FakeRedis(), secret="rpc-secret", timeout_seconds=64)
+        with pytest.raises(ValueError, match="RPC timeout"):
+            await client.run_scratch(source="print(1)", timeout_seconds=60)
+        return await client.run_scratch(source="print(1)", timeout_seconds=59)
+
+    assert asyncio.run(exercise()) == {}
 
 
 def test_manager_rpc_server_dispatches_claim_without_docker_in_web_process() -> None:
@@ -277,7 +302,7 @@ def test_manager_rpc_persists_result_after_dispatch_for_crash_recovery() -> None
     redis = asyncio.run(exercise())
     kinds = [kind for kind, _value in redis.order]
     assert kinds == ["set", "dispatch", "set", "set"]
-    assert "processing" in redis.order[0][1]
+    assert redis.order[0][1].rsplit("|", 2)[1] != "processing"
     assert f"|{RPC_PROCESSING_TTL_SECONDS}" in redis.order[0][1]
     assert ":result:" in redis.order[2][1]
     assert "|done|600" in redis.order[3][1]
@@ -365,7 +390,7 @@ def test_manager_rpc_duplicate_takes_over_after_processing_owner_expires() -> No
         async def get(self, key):
             if key.startswith(HANDLED_PREFIX):
                 self.processing_reads += 1
-                if self.processing_reads >= 2:
+                if self.processing_reads == 2:
                     self.values.pop(key, None)
             return self.values.get(key)
 
@@ -405,3 +430,100 @@ def test_manager_rpc_duplicate_takes_over_after_processing_owner_expires() -> No
     assert len(redis.responses) == 1
     assert redis.responses[0]["ok"] == "1"
     assert any(key.startswith(RESULT_PREFIX) for key in redis.values)
+
+
+def test_manager_rpc_does_not_publish_after_processing_owner_is_fenced() -> None:
+    from server.sandbox.manager_rpc import HANDLED_PREFIX, RedisSandboxManagerRpcServer, _json, _signature
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+            self.responses: list[dict[str, str]] = []
+
+        async def set(self, key, value, *, nx=False, ex=None):
+            del ex
+            if nx and key in self.values:
+                return False
+            self.values[key] = str(value)
+            return True
+
+        async def get(self, key):
+            return self.values.get(key)
+
+        async def eval(self, script, numkeys, *args):
+            assert numkeys == 2
+            handled_key, result_key = args[:2]
+            owner, encoded, ttl = args[2:]
+            del script, ttl
+            if self.values.get(handled_key) != owner:
+                return 0
+            self.values[result_key] = encoded
+            self.values[handled_key] = "done"
+            return 1
+
+        async def xadd(self, stream, fields, **_kwargs):
+            if stream.startswith("nova:sandbox:manager:rpc:responses:"):
+                self.responses.append(fields)
+
+        async def expire(self, *_args):
+            return True
+
+    class FakeManager:
+        def __init__(self, redis_client: FakeRedis) -> None:
+            self.redis = redis_client
+
+        async def capacity_snapshot(self):
+            handled = next(key for key in self.redis.values if key.startswith(HANDLED_PREFIX))
+            self.redis.values[handled] = "owner-from-another-manager"
+            return {"target": 2}
+
+    async def exercise() -> tuple[FakeRedis, FakeManager]:
+        request_id = "fenced-request"
+        now = time.time()
+        body = _json({"issued_at": now, "expires_at": now + 30})
+        fields = {
+            "request_id": request_id,
+            "response_stream": f"nova:sandbox:manager:rpc:responses:{request_id}",
+            "method": "capacity_snapshot",
+            "payload": body,
+            "signature": _signature("rpc-secret", request_id, "capacity_snapshot", body),
+        }
+        redis = FakeRedis()
+        manager = FakeManager(redis)
+        server = RedisSandboxManagerRpcServer(redis, manager=manager, secret="rpc-secret")
+        await server._handle(fields)
+        return redis, manager
+
+    redis, _manager = asyncio.run(exercise())
+    assert redis.responses == []
+
+
+def test_manager_rpc_renewal_uses_owner_fenced_cas(monkeypatch) -> None:
+    import server.sandbox.manager_rpc as manager_rpc
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.eval_call: tuple[object, ...] | None = None
+
+        async def eval(self, *args):
+            self.eval_call = args
+            return 0
+
+    async def immediate_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(manager_rpc.asyncio, "sleep", immediate_sleep)
+    redis = FakeRedis()
+    server = manager_rpc.RedisSandboxManagerRpcServer(
+        redis, manager=object(), secret="rpc-secret"
+    )
+    asyncio.run(server._renew_processing_lease("handled-key", "owner-token"))
+
+    assert redis.eval_call is not None
+    script, numkeys, handled_key, owner_token, ttl = redis.eval_call
+    assert numkeys == 1
+    assert handled_key == "handled-key"
+    assert owner_token == "owner-token"
+    assert str(ttl) == str(manager_rpc.RPC_PROCESSING_TTL_SECONDS)
+    assert "GET" in script
+    assert "EXPIRE" in script

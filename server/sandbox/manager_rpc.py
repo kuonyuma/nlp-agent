@@ -27,12 +27,32 @@ REQUEST_STREAM = "nova:sandbox:manager:rpc:requests"
 RESPONSE_PREFIX = "nova:sandbox:manager:rpc:responses:"
 HANDLED_PREFIX = "nova:sandbox:manager:rpc:handled:"
 RESULT_PREFIX = "nova:sandbox:manager:rpc:result:"
-REQUEST_TTL_SECONDS = 60
+# A signed request must remain valid for the full 60-second Scratch ceiling
+# plus queueing/transport headroom.
+REQUEST_TTL_SECONDS = 90
 REQUEST_CLOCK_SKEW_SECONDS = 5
 # Keep takeover below the Web RPC timeout; heartbeat renewal covers healthy
 # dispatches that run longer (for example a 15-second scratch execution).
 RPC_PROCESSING_TTL_SECONDS = 10
 RPC_RESULT_TTL_SECONDS = 600
+SANDBOX_SCRATCH_MAX_TIMEOUT_SECONDS = 60
+RPC_RESPONSE_HEADROOM_SECONDS = 5
+
+_RENEW_PROCESSING_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+_COMPLETE_PROCESSING_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+redis.call('SET', KEYS[1], 'done', 'EX', ARGV[3])
+return 1
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +114,7 @@ class RedisSandboxManagerRpcClient:
         *,
         secret: str,
         request_stream: str = REQUEST_STREAM,
-        timeout_seconds: float = 20.0,
+        timeout_seconds: float = 75.0,
     ) -> None:
         self._client = client
         self._secret = secret
@@ -243,6 +263,18 @@ class RedisSandboxManagerRpcClient:
         trace_id: str | None = None,
         span_id: str | None = None,
     ) -> dict[str, object]:
+        if (
+            not isinstance(timeout_seconds, int)
+            or not 1 <= timeout_seconds <= SANDBOX_SCRATCH_MAX_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                "Sandbox Scratch timeout_seconds must be between 1 and "
+                f"{SANDBOX_SCRATCH_MAX_TIMEOUT_SECONDS}"
+            )
+        if timeout_seconds + RPC_RESPONSE_HEADROOM_SECONDS > self._timeout_seconds:
+            raise ValueError(
+                "Sandbox Scratch timeout exceeds the configured Manager RPC timeout"
+            )
         return await self._request(
             "run_scratch",
             {
@@ -304,15 +336,67 @@ class RedisSandboxManagerRpcServer:
         except Exception:
             return False
 
-    async def _renew_processing_lease(self, handled_key: str) -> None:
-        """Keep a live long-running dispatch owned until its result is saved."""
+    async def _renew_processing_lease(self, handled_key: str, owner_token: str) -> None:
+        """Keep a live dispatch lease only while this Manager owns it."""
+        renew = getattr(self._client, "eval", None)
+        if not callable(renew):
+            return
         interval = max(1, RPC_PROCESSING_TTL_SECONDS // 3)
         while True:
             await asyncio.sleep(interval)
             try:
-                await self._client.expire(handled_key, RPC_PROCESSING_TTL_SECONDS)
+                renewed = await renew(
+                    _RENEW_PROCESSING_SCRIPT,
+                    1,
+                    handled_key,
+                    owner_token,
+                    str(RPC_PROCESSING_TTL_SECONDS),
+                )
+                if not renewed:
+                    return
             except Exception:
                 return
+
+    async def _complete_processing(
+        self,
+        handled_key: str,
+        result_key: str,
+        owner_token: str,
+        encoded_result: str,
+    ) -> bool:
+        """Persist a result and mark completion only for the current owner."""
+        eval_fn = getattr(self._client, "eval", None)
+        if callable(eval_fn):
+            try:
+                completed = await eval_fn(
+                    _COMPLETE_PROCESSING_SCRIPT,
+                    2,
+                    handled_key,
+                    result_key,
+                    owner_token,
+                    encoded_result,
+                    str(RPC_RESULT_TTL_SECONDS),
+                )
+                return bool(completed)
+            except Exception:
+                return False
+
+        # Test doubles and older Redis-compatible clients may not expose
+        # EVAL. Production Redis uses the atomic Lua branch above.
+        get = getattr(self._client, "get", None)
+        set_value = getattr(self._client, "set", None)
+        if not callable(get) or not callable(set_value):
+            return False
+        try:
+            if _text(await get(handled_key)) != owner_token:
+                return False
+            await set_value(result_key, encoded_result, ex=RPC_RESULT_TTL_SECONDS)
+            if _text(await get(handled_key)) != owner_token:
+                return False
+            await set_value(handled_key, "done", ex=RPC_RESULT_TTL_SECONDS)
+            return True
+        except Exception:
+            return False
 
     async def _wait_for_processing_recovery(
         self, fields: dict[str, str], handled_key: str
@@ -370,6 +454,7 @@ class RedisSandboxManagerRpcServer:
         body = fields.get("payload", "{}")
         dedupe = getattr(self._client, "set", None)
         handled_key = f"{HANDLED_PREFIX}{request_id}"
+        owner_token = uuid4().hex
         try:
             if not hmac.compare_digest(
                 fields.get("signature", ""), _signature(self._secret, request_id, method, body)
@@ -399,7 +484,7 @@ class RedisSandboxManagerRpcServer:
                 # take over after the lease expires.
                 accepted = await dedupe(
                     handled_key,
-                    "processing",
+                    owner_token,
                     nx=True,
                     ex=RPC_PROCESSING_TTL_SECONDS,
                 )
@@ -420,7 +505,7 @@ class RedisSandboxManagerRpcServer:
                 await self._wait_for_processing_recovery(fields, handled_key)
                 return
             renew_task = create_task(
-                self._renew_processing_lease(handled_key),
+                self._renew_processing_lease(handled_key, owner_token),
                 name=f"sandbox-manager-rpc-lease:{request_id}",
             )
         try:
@@ -444,26 +529,18 @@ class RedisSandboxManagerRpcServer:
             except Exception as exc:
                 ok, encoded, error = "0", "{}", f"{type(exc).__name__}: {exc}"[:500]
             if callable(dedupe):
-                try:
-                    # Persist the response before completion state.  A restarted
-                    # Manager can replay this exact response without dispatching
-                    # the operation again, even if the first response publish was
-                    # interrupted by a process crash.
-                    await dedupe(
-                        f"{RESULT_PREFIX}{request_id}",
-                        _json({"ok": ok, "payload": encoded, "error": error}),
-                        ex=RPC_RESULT_TTL_SECONDS,
-                    )
-                    await dedupe(
-                        handled_key,
-                        "done",
-                        ex=RPC_RESULT_TTL_SECONDS,
-                    )
-                except Exception:
-                    # Keep the short processing lease.  The response is still
-                    # published to the current caller, while another Manager can
-                    # retry after the lease expires if Redis persistence failed.
-                    pass
+                completed = await self._complete_processing(
+                    handled_key,
+                    f"{RESULT_PREFIX}{request_id}",
+                    owner_token,
+                    _json({"ok": ok, "payload": encoded, "error": error}),
+                )
+                if not completed:
+                    # A stale Manager must not publish or overwrite a result
+                    # after another Manager has taken the lease. The current
+                    # owner (or a later takeover) will publish the response.
+                    await self._publish_cached_response(response_stream, request_id)
+                    return
             await self._publish_response(response_stream, request_id, ok=ok, payload=encoded, error=error)
         finally:
             if renew_task is not None:
@@ -529,9 +606,18 @@ class RedisSandboxManagerRpcServer:
         if method == "capacity_snapshot":
             return dict(await self._manager.capacity_snapshot())
         if method == "run_scratch":
+            timeout_seconds = payload.get("timeout_seconds", 15)
+            if (
+                type(timeout_seconds) is not int
+                or not 1 <= timeout_seconds <= SANDBOX_SCRATCH_MAX_TIMEOUT_SECONDS
+            ):
+                raise ValueError(
+                    "Sandbox Scratch timeout_seconds must be between 1 and "
+                    f"{SANDBOX_SCRATCH_MAX_TIMEOUT_SECONDS}"
+                )
             return await self._manager.run_scratch(
                 source=str(payload["source"]),
-                timeout_seconds=int(payload.get("timeout_seconds", 15)),
+                timeout_seconds=timeout_seconds,
                 output_limit_bytes=int(payload.get("output_limit_bytes", 1_000_000)),
                 trace_id=str(payload["trace_id"]) if payload.get("trace_id") else None,
                 span_id=str(payload["span_id"]) if payload.get("span_id") else None,
