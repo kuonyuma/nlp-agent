@@ -50,7 +50,7 @@ function AssistantMessage({ message, showReasoning, onFollowUp }: {
 function UserMessage({ message }: { message: ChatMessage }) {
   let content = message.content;
   const attachments = [...(message.attachments || [])];
-  
+
   const markerIdx = content.indexOf("---附件---");
   if (markerIdx !== -1) {
     const attachmentBlock = content.slice(markerIdx);
