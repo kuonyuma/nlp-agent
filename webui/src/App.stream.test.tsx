@@ -112,7 +112,7 @@ describe("student stream rendering", () => {
     await waitFor(() => expect(stream.lastModelProfile()).toBe("qwen"));
   });
 
-  it("creates the deferred session when the first action is an image upload", async () => {
+  it("creates the deferred session when the first action is an image paste", async () => {
     stream.listTurns.mockClear();
     stream.uploadAttachment.mockClear();
     Object.defineProperty(URL, "createObjectURL", {
@@ -126,10 +126,18 @@ describe("student stream rendering", () => {
     render(<App />);
     const uploadButton = await screen.findByRole("button", { name: "上传附件" });
     const file = new File(["image"], "first-image.png", { type: "image/png" });
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: {
+        items: [{ kind: "file", type: file.type, getAsFile: () => file }],
+        files: [file],
+      },
+    });
 
     expect(uploadButton).toBeEnabled();
-    fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    fireEvent(screen.getByRole("textbox", { name: "学习问题" }), paste);
 
+    expect(paste.defaultPrevented).toBe(true);
     await waitFor(() => expect(stream.uploadAttachment).toHaveBeenCalledWith("session_1", file));
     expect(screen.getByRole("img", { name: "first-image.png" })).toBeVisible();
     expect(stream.listTurns).not.toHaveBeenCalled();
