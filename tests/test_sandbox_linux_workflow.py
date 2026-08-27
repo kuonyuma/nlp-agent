@@ -28,3 +28,13 @@ def test_linux_smoke_uses_the_registered_gvisor_runtime() -> None:
     assert "feature/sandbox-phase3-develop" in workflow
     assert "pip install -e ." not in workflow
     assert "pip install -r requirements.txt" in workflow
+
+
+def test_matrix_writeback_dispatches_main_ci_for_the_new_branch_head() -> None:
+    workflow = Path(".github/workflows/sandbox-linux.yml").read_text(encoding="utf-8")
+    persistence = workflow.split("      - name: Persist preload compatibility matrix", 1)[1]
+
+    assert "actions: write" in workflow
+    assert 'git commit -m "ci(sandbox): update preload compatibility matrix"' in persistence
+    assert "[skip ci]" not in persistence
+    assert 'gh workflow run CI --ref "${GITHUB_REF_NAME}"' in persistence

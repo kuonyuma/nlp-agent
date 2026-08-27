@@ -118,6 +118,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     env:
       NLP_AGENT_DATABASE_URL: mysql+aiomysql://root:root@127.0.0.1:3306/pro_nlp
       RUN_SANDBOX_DOCKER_MANAGER_INTEGRATION: '1'
@@ -183,6 +184,8 @@ jobs:
             configs/sandbox_preload_matrix.json
       - name: Persist preload compatibility matrix
         if: github.event_name == 'push' && github.ref == 'refs/heads/feature/sandbox-phase3-develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -190,8 +193,9 @@ jobs:
             exit 0
           fi
           git add configs/sandbox_preload_matrix.json
-          git commit -m "ci(sandbox): update preload compatibility matrix [skip ci]"
+          git commit -m "ci(sandbox): update preload compatibility matrix"
           git push origin HEAD:${GITHUB_REF_NAME}
+          gh workflow run CI --ref "${GITHUB_REF_NAME}"
       - name: Remove MySQL test container
         if: always()
         run: docker rm --force nova-ci-mysql || true
