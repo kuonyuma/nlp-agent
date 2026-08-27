@@ -73,11 +73,15 @@ function PythonSyntax({ source }: { source: string }) {
 }
 
 function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: string) => void }) {
-  const [leaseStatus, setLeaseStatus] = useState<"creating" | "ready" | "error">("creating");
+  // Keep the local in-memory preview immediately usable; a Docker response
+  // without its mandatory ticket replaces this optimistic display with
+  // “warming” before any privileged execution is attempted.
+  const [leaseStatus, setLeaseStatus] = useState<"creating" | "ready" | "error">("ready");
   const [source, setSource] = useState("# 在这里运行 Python 代码\n");
   const [result, setResult] = useState("");
   const [running, setRunning] = useState(false);
   const [runtimeTicket, setRuntimeTicket] = useState<string | null>(null);
+  const [runtimeAllowsNullTicket, setRuntimeAllowsNullTicket] = useState(true);
   const [timeline, setTimeline] = useState<Array<{ id: number | string; label: string; detail: string }>>([]);
   const [artifactUrls, setArtifactUrls] = useState<string[]>([]);
   const [editorTheme, setEditorTheme] = useState<SandboxEditorTheme>(storedSandboxTheme);
@@ -98,12 +102,14 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
         .then((value) => {
           if (!active) return;
           const ticket = value.runtime?.ticket ?? null;
+          const isInMemory = Boolean(value.runtime && "kind" in value.runtime && value.runtime.kind === "inmemory");
           // The local in-memory backend intentionally has no signed Docker
           // capability. Docker is considered ready only when it supplied one.
           const ready = Boolean(value.runtime_available && (
-            ticket || (value.runtime && "kind" in value.runtime && value.runtime.kind === "inmemory") || value.runtime === undefined
+            ticket || isInMemory || value.runtime === undefined
           ));
           setRuntimeTicket(ticket);
+          setRuntimeAllowsNullTicket(isInMemory || value.runtime === undefined);
           setLeaseStatus(ready ? "ready" : "creating");
           setTimeline([{ id: Date.now(), label: ready ? "运行环境已就绪" : "正在预热运行环境", detail: ready ? "已绑定当前会话。" : "预热池正在补充干净实例。" }]);
           if (!ready) retryTimer = window.setTimeout(acquireLease, 1_000);
@@ -151,7 +157,7 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
   };
   const editorLines = source.split("\n");
   const runCode = () => {
-        if (!runtimeTicket || leaseStatus !== "ready") {
+        if ((!runtimeTicket && !runtimeAllowsNullTicket) || leaseStatus !== "ready") {
           setResult("运行环境仍在准备中，请稍候。");
           return;
         }

@@ -11,7 +11,8 @@ const stream = vi.hoisted(() => {
   } }));
   const ensureSandboxLease = vi.fn(async () => ({
     phase: 0,
-    runtime_available: false,
+    runtime_available: true,
+    runtime: { kind: "inmemory" as const, ticket: null },
     environment: { id: "sandbox-user", status: "ready", generation: 1, profile: "python-base" },
     lease: { id: "lease-session", state: "active", generation: 1, expires_at: "2026-08-25T10:00:00" },
   }));
