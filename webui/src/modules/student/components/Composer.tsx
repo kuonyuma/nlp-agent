@@ -130,7 +130,6 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
     addAndUploadFile(file);
   };
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!canUploadAttachments) return;
     const itemImages = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
       .map((item) => item.getAsFile())
@@ -143,6 +142,7 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
     // An image clipboard can also expose text/html or text/plain fallbacks.
     // Treat the image as the user's intent and avoid inserting those fallbacks.
     event.preventDefault();
+    if (!canUploadAttachments) return;
     images.forEach((file, index) => addAndUploadFile(file, pastedImageName(file, index)));
   };
 
