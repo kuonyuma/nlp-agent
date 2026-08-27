@@ -311,12 +311,26 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
   </section>;
 }
 
-const DEFAULT_DOCK_WIDTH = 560;
-const MIN_DOCK_WIDTH = 380;
-const MAX_DOCK_VIEWPORT_RATIO = 0.88;
+const DEFAULT_DOCK_WIDTH = 420;
+const MIN_DOCK_WIDTH = 320;
+const MIN_THREAD_WIDTH = 560;
+const DESKTOP_SIDEBAR_WIDTH = 252;
+const MOBILE_DOCK_VIEWPORT_RATIO = 0.92;
 
 function getMaxDockWidth() {
-  return Math.max(MIN_DOCK_WIDTH, Math.floor(window.innerWidth * MAX_DOCK_VIEWPORT_RATIO));
+  const viewportWidth = window.innerWidth;
+  if (viewportWidth <= 900) {
+    return Math.max(
+      MIN_DOCK_WIDTH,
+      Math.floor(viewportWidth * MOBILE_DOCK_VIEWPORT_RATIO),
+    );
+  }
+
+  const sidebarWidth = viewportWidth > 1024 ? DESKTOP_SIDEBAR_WIDTH : 0;
+  return Math.max(
+    MIN_DOCK_WIDTH,
+    viewportWidth - sidebarWidth - MIN_THREAD_WIDTH,
+  );
 }
 
 function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }) {
@@ -345,7 +359,9 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   onExplainCode: (source: string) => void;
   learningPanel: ReactNode;
 }) {
-  const [width, setWidth] = useState(DEFAULT_DOCK_WIDTH);
+  const [width, setWidth] = useState(() =>
+  Math.min(DEFAULT_DOCK_WIDTH, getMaxDockWidth()),
+);
   const [resizing, setResizing] = useState(false);
   const [maxWidth, setMaxWidth] = useState(getMaxDockWidth);
   const resizeStart = useRef<{ pointerX: number; width: number } | null>(null);
@@ -402,7 +418,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     const delta = event.key === "ArrowLeft" ? 24 : -24;
     setWidth((current) => Math.min(maxWidth, Math.max(MIN_DOCK_WIDTH, current + delta)));
   };
-  const dockStyle = { "--tool-dock-width": `${width}px` } as CSSProperties;
+ const dockStyle = { "--tool-dock-width": `${width}px` } as CSSProperties;
   const showHome = openTools.length === 0;
 
   return <aside className={["tool-dock", open && "open", expanded && "expanded", resizing && "resizing"].filter(Boolean).join(" ")} aria-label="工具侧栏" style={dockStyle}>
