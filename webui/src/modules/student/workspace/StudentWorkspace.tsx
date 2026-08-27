@@ -74,6 +74,9 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
   const openTool = (tool: ToolDockTool) => {
     setOpenTools((current) => current.includes(tool) ? current : [...current, tool]);
     setActiveTool(tool);
+    // The sandbox has its own editor layout, but remains a normal resizable
+    // dock until the user explicitly asks for full workbench mode.
+    setToolDockExpanded(false);
   };
   const closeTool = (tool: ToolDockTool) => {
     const next = openTools.filter((item) => item !== tool);
@@ -161,6 +164,12 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
       onOpenTool={openTool}
       onCloseTool={closeTool}
       onActiveToolChange={setActiveTool}
+      onExplainCode={(source) => {
+        setToolDockOpen(false);
+        setToolDockExpanded(false);
+        setToolMenuOpen(false);
+        void workspace.send("请解释以下 Python 代码：\n\n```python\n" + source + "\n```");
+      }}
       learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
     />
     <div className="student-school-logo"><SchoolLogo /></div>
