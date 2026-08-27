@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -25,6 +26,40 @@ def _docker_runtime_args() -> list[str]:
     return [] if not runtime else ["--runtime", runtime]
 
 
+def _run_docker(args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run Docker in its own process group so timeout cleanup cannot deadlock pytest."""
+    process = subprocess.Popen(
+        ["docker", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+        raise
+    return subprocess.CompletedProcess(["docker", *args], process.returncode, stdout, stderr)
+
+
+def _remove_container(name: str) -> None:
+    try:
+        _run_docker(["rm", "--force", name], timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        # Cleanup is best effort; the runner is ephemeral and the test result
+        # from the operation itself remains authoritative.
+        pass
+
+
 @pytest.mark.asyncio
 async def test_manager_destroys_unregistered_managed_container() -> None:
     from server.infrastructure.mysql import DatabaseConfig, create_engine, create_session_factory
@@ -34,10 +69,12 @@ async def test_manager_destroys_unregistered_managed_container() -> None:
     name = f"nova-manager-orphan-{uuid4().hex}"
     engine = create_engine(DatabaseConfig(os.environ["NLP_AGENT_DATABASE_URL"], pool_size=1, max_overflow=0))
     try:
-        container = subprocess.run(
-            ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), TEST_IMAGE, "sleep", "300"],
-            check=True, capture_output=True, text=True, timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
+        container = _run_docker(
+            ["run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), TEST_IMAGE, "sleep", "300"],
+            timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
         )
+        if container.returncode != 0:
+            raise subprocess.CalledProcessError(container.returncode, container.args, container.stdout, container.stderr)
         container_id = container.stdout.strip()
         assert container_id
         manager = WarmPoolManager(
@@ -48,10 +85,10 @@ async def test_manager_destroys_unregistered_managed_container() -> None:
         )
         actions = await manager.reconcile()
         assert container_id in actions.destroy_orphans
-        remaining = subprocess.run(["docker", "inspect", name], capture_output=True, text=True, timeout=30)
+        remaining = _run_docker(["inspect", name], timeout=30)
         assert remaining.returncode != 0
     finally:
-        subprocess.run(["docker", "rm", "--force", name], capture_output=True, text=True, timeout=30)
+        _remove_container(name)
         await engine.dispose()
 
 
@@ -79,10 +116,12 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
     factory = create_session_factory(engine)
     now = datetime.now(UTC).replace(tzinfo=None)
     try:
-        container = subprocess.run(
-            ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), TEST_IMAGE, "sleep", "300"],
-            check=True, capture_output=True, text=True, timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
+        container = _run_docker(
+            ["run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), TEST_IMAGE, "sleep", "300"],
+            timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
         )
+        if container.returncode != 0:
+            raise subprocess.CalledProcessError(container.returncode, container.args, container.stdout, container.stderr)
         container_id = container.stdout.strip()
         assert container_id
         async with factory.begin() as session:
@@ -161,10 +200,10 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
             )
         actions = await manager.reconcile()
         assert name not in actions.destroy_orphans
-        remaining = subprocess.run(["docker", "inspect", name], capture_output=True, text=True, timeout=30)
+        remaining = _run_docker(["inspect", name], timeout=30)
         assert remaining.returncode != 0
     finally:
-        subprocess.run(["docker", "rm", "--force", name], capture_output=True, text=True, timeout=30)
+        _remove_container(name)
         await engine.dispose()
 
 

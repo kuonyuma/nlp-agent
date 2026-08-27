@@ -109,6 +109,26 @@ def test_destroy_fails_closed_when_docker_returns_nonzero() -> None:
     asyncio.run(exercise())
 
 
+def test_docker_timeout_reaps_cli_without_waiting_on_inherited_pipes() -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+
+    adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image="registry.example/nova@sha256:" + "9" * 64))
+
+    async def exercise() -> None:
+        with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn:
+            process = AsyncMock()
+            process.communicate.side_effect = TimeoutError()
+            process.kill = MagicMock()
+            process.wait = AsyncMock(return_value=None)
+            spawn.return_value = process
+            with pytest.raises(TimeoutError, match="Docker sandbox command timed out"):
+                await adapter.managed_runtime_ids()
+            process.kill.assert_called_once_with()
+            process.wait.assert_awaited_once_with()
+
+    asyncio.run(exercise())
+
+
 def test_managed_runtime_listing_preserves_full_container_ids() -> None:
     from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
 

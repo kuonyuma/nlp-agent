@@ -14,14 +14,28 @@ from uuid import uuid4
 
 
 DOCKER_COMMAND_TIMEOUT_SECONDS = 15
+PROCESS_REAP_TIMEOUT_SECONDS = 2
+
+
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    """Stop a Docker CLI child without waiting forever on inherited pipes."""
+    try:
+        process.kill()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=PROCESS_REAP_TIMEOUT_SECONDS)
+    except (TimeoutError, ProcessLookupError):
+        # The Docker daemon owns the container lifecycle.  A stuck CLI must
+        # never hold the Manager event loop hostage; reconciliation can retry.
+        pass
 
 
 async def _communicate(process: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
     try:
         return await asyncio.wait_for(process.communicate(), timeout=DOCKER_COMMAND_TIMEOUT_SECONDS)
     except TimeoutError as error:
-        process.kill()
-        await process.communicate()
+        await _kill_and_reap(process)
         raise TimeoutError("Docker sandbox command timed out") from error
 
 
@@ -29,8 +43,7 @@ async def _wait(process: asyncio.subprocess.Process) -> None:
     try:
         await asyncio.wait_for(process.wait(), timeout=DOCKER_COMMAND_TIMEOUT_SECONDS)
     except TimeoutError as error:
-        process.kill()
-        await process.wait()
+        await _kill_and_reap(process)
         raise TimeoutError("Docker sandbox command timed out") from error
 
 
