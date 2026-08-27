@@ -166,6 +166,10 @@ describe("student stream rendering", () => {
     expect(screen.getByRole("tab", { name: "浏览器" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "终端" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "代码沙箱" })).toBeVisible();
+    const panels = [...document.querySelectorAll<HTMLElement>(".tool-dock-panel")];
+    expect(panels).toHaveLength(5);
+    expect(panels.every((panel) => !panel.hasAttribute("hidden"))).toBe(true);
+    expect(document.querySelector(".tool-dock-panels")?.getAttribute("style")).toContain("--tool-dock-panel-count: 5");
   });
 
   it("opens the Phase 0 code sandbox as a first-class right-workbench page", async () => {
@@ -207,11 +211,18 @@ describe("student stream rendering", () => {
 
     expect(screen.getByRole("tab", { name: "知识教材" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "代码沙箱" })).toBeVisible();
+    const openPanels = [...document.querySelectorAll<HTMLElement>(".tool-dock-panel")];
+    expect(openPanels).toHaveLength(2);
+    expect(openPanels.every((panel) => !panel.hasAttribute("hidden"))).toBe(true);
+    expect(screen.getByRole("region", { name: "代码工作台" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "知识教材" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "还原工具面板" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "沙箱代码" })).toHaveValue("import torch\nprint(torch.__version__)");
     await waitFor(() => expect(stream.ensureSandboxLease).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole("button", { name: "关闭工具侧栏" }));
     fireEvent.click(screen.getByRole("button", { name: "打开工具侧栏" }));
+    expect(screen.getByRole("button", { name: "还原工具面板" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: "沙箱代码" })).toHaveValue("import torch\nprint(torch.__version__)");
   }, 10000);
 
@@ -353,7 +364,7 @@ describe("student stream rendering", () => {
     const separator = screen.getByRole("separator", { name: "调整工具侧栏宽度" });
     expect(separator).toHaveAttribute("aria-valuenow", "420");
     const maxWidth = Number(separator.getAttribute("aria-valuemax"));
-    expect(maxWidth).toBe(window.innerWidth - 560);
+      expect(maxWidth).toBe(window.innerWidth - 440);
     fireEvent.pointerDown(separator, { clientX: 480 });
     fireEvent.pointerMove(window, { clientX: 360 });
     fireEvent.pointerUp(window);

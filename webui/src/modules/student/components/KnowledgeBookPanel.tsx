@@ -5,6 +5,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { api } from "@/platform/http/api";
 import type { LearningBookNavigationItem, LearningBookPage } from "@/shared/types";
 
+import { demoLearningBookNavigation, demoLearningBookPages } from "./knowledgeBookDemo";
 import { indexMarkdownHeadings, readKnowledgeBookUrl, replaceKnowledgeBookUrl } from "./knowledgeBook";
 import { MarkdownContent } from "./MarkdownContent";
 
@@ -122,6 +123,7 @@ function keepFocusInDrawer(event: ReactKeyboardEvent<HTMLElement>) {
 export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: { workspaceId: string; onAskNova?: (prompt: string) => void; onOpenInSandbox?: (code: string, language: string) => void }) {
   const [initialViewState] = useState(() => readBookViewState(workspaceId));
   const [initialDeepLink] = useState(() => readKnowledgeBookUrl(window.location.search));
+  const demoMode = initialDeepLink.demo;
   const [navigation, setNavigation] = useState<LearningBookNavigationItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialDeepLink.pointId ?? initialViewState.selectedId);
   const [page, setPage] = useState<LearningBookPage | null>(null);
@@ -197,11 +199,12 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     setLoadingNavigation(true);
     setError(null);
     try {
-      const response = await api.getLearningBookNavigation(workspaceId);
-      setNavigation(response.items);
-      const orderedItems = orderNavigation(response.items);
-      setSelectedId((current) => current && response.items.some((item) => item.knowledge_point_id === current) ? current : orderedItems[0]?.knowledge_point_id ?? null);
+      const items = demoMode ? demoLearningBookNavigation : (await api.getLearningBookNavigation(workspaceId)).items;
+      setNavigation(items);
+      const orderedItems = orderNavigation(items);
+      setSelectedId((current) => current && items.some((item) => item.knowledge_point_id === current) ? current : orderedItems[0]?.knowledge_point_id ?? null);
       setExpandedTopics((current) => {
+        if (demoMode) return new Set(demoLearningBookNavigation.map((item) => item.topic_id));
         const next = new Set(current);
         if (!next.size && orderedItems[0]) next.add(orderedItems[0].topic_id);
         return next;
@@ -211,7 +214,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     } finally {
       setLoadingNavigation(false);
     }
-  }, [workspaceId]);
+  }, [demoMode, workspaceId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadNavigation(), 0);
@@ -228,7 +231,10 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
     const timer = window.setTimeout(() => {
       setLoadingPage(true);
       setError(null);
-      void api.getLearningBookPage(workspaceId, selectedId).then((response) => {
+      const request = demoMode
+        ? Promise.resolve({ page: demoLearningBookPages[selectedId] ?? null })
+        : api.getLearningBookPage(workspaceId, selectedId);
+      void request.then((response) => {
         if (!current) return;
         setPage(response.page);
         setActiveHeadingId(null);
@@ -239,7 +245,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
       });
     }, 0);
     return () => { current = false; window.clearTimeout(timer); };
-  }, [pageReloadToken, selectedId, workspaceId]);
+  }, [demoMode, pageReloadToken, selectedId, workspaceId]);
 
   useEffect(() => {
     const root = contentRef.current;
@@ -377,7 +383,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
 
   return <section className="knowledge-book-panel" aria-label="知识教材">
     <header className="knowledge-book-toolbar">
-      <div className="knowledge-book-brand"><Menu size={16} /><strong>知识教材</strong><span>{visiblePage?.topic_name ?? "教师发布的实操内容"}</span></div>
+      <div className="knowledge-book-brand"><Menu size={16} /><strong>知识教材</strong>{demoMode && <small className="knowledge-book-demo-badge">演示教材</small>}<span>{visiblePage?.topic_name ?? "教师发布的实操内容"}</span></div>
       <div className="knowledge-book-toolbar-actions">
         <button ref={leftToggleRef} type="button" className="knowledge-book-outline-toggle left" aria-label="打开教材目录" aria-expanded={leftOpen} onClick={() => setLeftOpen((value) => !value)}>{leftOpen ? <PanelLeftClose size={15} /> : <Menu size={15} />}<span>大纲</span></button>
         <button ref={rightToggleRef} type="button" className="knowledge-book-outline-toggle right" aria-label="打开本页目录" aria-expanded={rightOpen} onClick={() => setRightOpen((value) => !value)}>{rightOpen ? <PanelRightClose size={15} /> : <PanelRightClose size={15} />}<span>本页</span></button>

@@ -19,6 +19,11 @@ describe("knowledge book Markdown headings", () => {
       tool: "knowledge-book",
       pointId: "softmax",
       headingId: "核心概念",
+      demo: false,
     });
+  });
+
+  it("reads the explicit demo教材 switch", () => {
+    expect(readKnowledgeBookUrl("?tool=knowledge-book&bookDemo=1").demo).toBe(true);
   });
 });

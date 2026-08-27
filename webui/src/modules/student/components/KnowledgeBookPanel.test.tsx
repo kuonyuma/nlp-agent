@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LearningBookNavigationItem, LearningBookPage } from "@/shared/types";
 
@@ -36,6 +36,10 @@ describe("KnowledgeBookPanel", () => {
     window.history.replaceState({}, "", "/");
     vi.mocked(api.getLearningBookNavigation).mockResolvedValue({ workspace_id: "workspace-1", items: navigation });
     vi.mocked(api.getLearningBookPage).mockImplementation((_workspaceId, knowledgePointId) => Promise.resolve({ page: { ...page, knowledge_point_id: knowledgePointId, title: knowledgePointId === "point-2" ? "句法分析" : page.title } }));
+  });
+
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
   });
 
   it("loads the published navigation and renders page headings for the right outline", async () => {
@@ -142,5 +146,21 @@ describe("KnowledgeBookPanel", () => {
     await user.click(screen.getByRole("button", { name: "下一节" }));
 
     await waitFor(() => expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-1"));
+  });
+
+  it("renders the explicit demo教材 with expanded topics and PyTorch code", async () => {
+    vi.mocked(api.getLearningBookNavigation).mockClear();
+    vi.mocked(api.getLearningBookPage).mockClear();
+    window.history.replaceState({}, "", "/?tool=knowledge-book&bookDemo=1");
+
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByRole("heading", { name: "张量与批次" })).toBeInTheDocument();
+    expect(screen.getByText("演示教材")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /1\. NLP 基础/ })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "分词与词表" })).toBeVisible();
+    expect(await screen.findByText("import", { exact: true })).toBeVisible();
+    expect(api.getLearningBookNavigation).not.toHaveBeenCalled();
+    expect(api.getLearningBookPage).not.toHaveBeenCalled();
   });
 });

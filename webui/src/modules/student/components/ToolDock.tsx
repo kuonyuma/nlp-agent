@@ -459,8 +459,8 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
             <kbd>{item.shortcut}</kbd>
           </button>;
         })}
-      </nav> : <div className="tool-dock-panels">
-        {openTools.map((tool) => <div key={tool} className="tool-dock-panel" hidden={tool !== activeTool} aria-hidden={tool !== activeTool}>
+      </nav> : <div className="tool-dock-panels" style={{ "--tool-dock-panel-count": Math.max(1, openTools.length) } as CSSProperties}>
+        {openTools.map((tool) => <div key={tool} className="tool-dock-panel" data-active={tool === activeTool ? "true" : "false"}>
           {tool === "learning" ? learningPanel : tool === "book" ? knowledgeBookPanel : tool === "sandbox" ? <SandboxPhaseZeroPanel onExplainCode={onExplainCode} initialSource={sandboxSource} /> : <EmptyToolPanel tool={tool} />}
         </div>)}
       </div>}

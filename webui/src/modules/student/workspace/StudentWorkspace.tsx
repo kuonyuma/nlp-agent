@@ -75,11 +75,9 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
   const { scrollRef, onScroll } = useSessionScrollRestoration(workspace.activeSessionId, workspace.messages, workspace.loadingMessages);
   const setCollapsed = (collapsed: boolean) => { setSidebarCollapsed(collapsed); };
   const openTool = (tool: ToolDockTool) => {
+    if (openTools.length > 0 && !openTools.includes(tool)) setToolDockExpanded(true);
     setOpenTools((current) => current.includes(tool) ? current : [...current, tool]);
     setActiveTool(tool);
-    // The sandbox has its own editor layout, but remains a normal resizable
-    // dock until the user explicitly asks for full workbench mode.
-    setToolDockExpanded(false);
   };
   const openCodeInSandbox = useCallback((code: string, language: string) => {
     if (!/^(?:python|pytorch|py)$/i.test(language)) return;
@@ -87,7 +85,9 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
     setSandboxSource(code);
     setToolDockOpen(true);
     setToolMenuOpen(false);
-    setToolDockExpanded(false);
+    // Code and its explanation are a co-reading workflow: give both panels
+    // the full workbench width as soon as a lesson opens code in the sandbox.
+    setToolDockExpanded(true);
     setOpenTools((current) => current.includes("sandbox") ? current : [...current, "sandbox"]);
     setActiveTool("sandbox");
   }, [onOpenInSandbox]);
@@ -97,6 +97,7 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
     if (activeTool === tool) setActiveTool(next[next.length - 1] ?? null);
   };
   const toggleToolDock = () => {
+    if (!toolDockOpen && openTools.length > 1) setToolDockExpanded(true);
     setToolDockOpen((current) => {
       if (current) {
         setToolDockExpanded(false);

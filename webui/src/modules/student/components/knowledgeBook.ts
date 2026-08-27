@@ -13,6 +13,7 @@ export interface KnowledgeBookUrlState {
   tool: string | null;
   pointId: string | null;
   headingId: string | null;
+  demo: boolean;
 }
 
 export function readKnowledgeBookUrl(search: string): KnowledgeBookUrlState {
@@ -21,6 +22,7 @@ export function readKnowledgeBookUrl(search: string): KnowledgeBookUrlState {
     tool: params.get("tool"),
     pointId: params.get("bookPoint"),
     headingId: params.get("bookHeading"),
+    demo: params.get("bookDemo") === "1" || params.get("bookDemo") === "true",
   };
 }
 
