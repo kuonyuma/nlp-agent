@@ -10,11 +10,14 @@ from uuid import uuid4
 
 import pytest
 
+from scripts.benchmark_sandbox_startup import manager_claim_probe_image
+
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_SANDBOX_DOCKER_MANAGER_INTEGRATION") != "1",
     reason="Docker manager integration is enabled in CI only",
 )
 DOCKER_COMMAND_TIMEOUT_SECONDS = 120
+TEST_IMAGE = manager_claim_probe_image()
 
 
 def _docker_runtime_args() -> list[str]:
@@ -32,7 +35,7 @@ async def test_manager_destroys_unregistered_managed_container() -> None:
     engine = create_engine(DatabaseConfig(os.environ["NLP_AGENT_DATABASE_URL"], pool_size=1, max_overflow=0))
     try:
         container = subprocess.run(
-            ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), "alpine:3.20", "sleep", "300"],
+            ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), TEST_IMAGE, "sleep", "300"],
             check=True, capture_output=True, text=True, timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
         )
         container_id = container.stdout.strip()
@@ -77,7 +80,7 @@ async def test_manager_rejects_and_reclaims_runtime_after_auth_lifecycle_change(
     now = datetime.now(UTC).replace(tzinfo=None)
     try:
         container = subprocess.run(
-            ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), "alpine:3.20", "sleep", "300"],
+            ["docker", "run", "--detach", "--name", name, "--label", "nova.sandbox.managed=true", *_docker_runtime_args(), TEST_IMAGE, "sleep", "300"],
             check=True, capture_output=True, text=True, timeout=DOCKER_COMMAND_TIMEOUT_SECONDS,
         )
         container_id = container.stdout.strip()

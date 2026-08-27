@@ -57,14 +57,71 @@ class ManagerClaimProbe:
         await self.engine.dispose()
 
 
+async def seed_manager_claim_probe_records(
+    session,
+    *,
+    user,
+    workspace_id: str,
+    session_id: str,
+    environment_id: str,
+    lease_id: str,
+    now: datetime,
+) -> None:
+    """Insert probe parents before the lease row so MySQL FKs are visible."""
+    from server.infrastructure.mysql.models import (
+        SandboxEnvironmentModel,
+        SandboxLeaseModel,
+        SessionModel,
+    )
+
+    expires_at = now.replace(microsecond=0) + timedelta(hours=1)
+    session.add(
+        SessionModel(
+            id=session_id,
+            user_id=user.id,
+            workspace_id=workspace_id,
+            token_hash=f"benchmark-token-{session_id}",
+            csrf_hash=f"benchmark-csrf-{session_id}",
+            authorization_version=user.authorization_version,
+            expires_at=expires_at,
+        )
+    )
+    session.add(
+        SandboxEnvironmentModel(
+            id=environment_id,
+            owner_user_id=user.id,
+            resource_profile_id="python-base",
+            generation=1,
+        )
+    )
+    # Flush the referenced session/environment before inserting the lease.
+    # MySQL enforces these foreign keys immediately and does not defer them.
+    await session.flush()
+    session.add(
+        SandboxLeaseModel(
+            id=lease_id,
+            environment_id=environment_id,
+            user_id=user.id,
+            auth_session_id=session_id,
+            workspace_id=workspace_id,
+            generation=1,
+            state="active",
+            expires_at=expires_at,
+        )
+    )
+    await session.flush()
+
+
+def manager_claim_probe_image() -> str:
+    """Return the local CI image used by manager integration containers."""
+    return os.getenv("NLP_AGENT_SANDBOX_MANAGER_TEST_IMAGE", "alpine:3.20").strip() or "alpine:3.20"
+
+
 async def create_manager_claim_probe(adapter: DockerRuntimeAdapter) -> ManagerClaimProbe:
     from sqlalchemy import select
 
     from server.infrastructure.mysql import DatabaseConfig, create_engine, create_session_factory
     from server.infrastructure.mysql.models import (
-        SandboxEnvironmentModel,
-        SandboxLeaseModel,
-        SessionModel,
         WorkspaceMemberModel,
     )
     from server.user.schemas import UserCreate
@@ -90,38 +147,15 @@ async def create_manager_claim_probe(adapter: DockerRuntimeAdapter) -> ManagerCl
         session_id = str(uuid4())
         environment_id = str(uuid4())
         lease_id = str(uuid4())
-        session.add(
-            SessionModel(
-                id=session_id,
-                user_id=user.id,
-                workspace_id=workspace_id,
-                token_hash=f"benchmark-token-{session_id}",
-                csrf_hash=f"benchmark-csrf-{session_id}",
-                authorization_version=user.authorization_version,
-                expires_at=now.replace(microsecond=0) + timedelta(hours=1),
-            )
+        await seed_manager_claim_probe_records(
+            session,
+            user=user,
+            workspace_id=str(workspace_id),
+            session_id=session_id,
+            environment_id=environment_id,
+            lease_id=lease_id,
+            now=now,
         )
-        session.add(
-            SandboxEnvironmentModel(
-                id=environment_id,
-                owner_user_id=user.id,
-                resource_profile_id="python-base",
-                generation=1,
-            )
-        )
-        session.add(
-            SandboxLeaseModel(
-                id=lease_id,
-                environment_id=environment_id,
-                user_id=user.id,
-                auth_session_id=session_id,
-                workspace_id=workspace_id,
-                generation=1,
-                state="active",
-                expires_at=now.replace(microsecond=0) + timedelta(hours=1),
-            )
-        )
-        await session.flush()
     scope = SandboxScope(
         owner_user_id=str(user.id),
         auth_session_id=session_id,
