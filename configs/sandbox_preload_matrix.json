@@ -2,11 +2,45 @@
   "version": 1,
   "profiles": {
     "python-base": {
-      "modules": ["numpy", "pandas", "matplotlib"],
-      "python_version": "3.11",
-      "runtime_version": "nova-runtime",
+      "profile_id": "python-base",
       "image_digest": "",
-      "status": "pending-linux-benchmark"
+      "python_version": "3.11.16",
+      "runtime_version": "nova-runtime",
+      "modules": [
+        "numpy",
+        "pandas",
+        "matplotlib"
+      ],
+      "status": "incompatible",
+      "notes": "missing modules: matplotlib, numpy, pandas",
+      "image_id": "sha256:40fbb3fd2cc1cfab1b7b8ca106734df667a7caf55442e4be6d38a71ca929f0c4",
+      "measured_at": "2026-08-27T07:17:15.439426+00:00",
+      "benchmark": {
+        "iterations": 3,
+        "image_cached": true,
+        "stage_percentiles_ms": {
+          "create_ms": {
+            "p50": 23.56,
+            "p95": 23.99
+          },
+          "start_ms": {
+            "p50": 115.71,
+            "p95": 117.35
+          },
+          "kernel_ready_ms": {
+            "p50": 2126.2,
+            "p95": 2196.44
+          },
+          "claim_ms": {
+            "p50": 391.59,
+            "p95": 432.22
+          },
+          "first_output_ms": {
+            "p50": 389.59,
+            "p95": 389.76
+          }
+        }
+      }
     }
   }
 }
