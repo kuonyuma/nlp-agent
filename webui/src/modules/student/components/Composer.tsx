@@ -1,5 +1,5 @@
 import { ArrowUp, GraduationCap, Plus, RotateCcw, Square, X } from "lucide-react";
-import { useState, useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useState, useRef, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 
 import { uploadAttachment } from "@/platform/http/api";
 import type { ChatAttachment } from "@/shared/types";
@@ -10,6 +10,16 @@ const prompts = ["用简单语言解释", "举一个实际例子", "逐步推导
 interface ComposerAttachment extends ChatAttachment {
   clientId: string;
   sourceFile: File;
+}
+
+function pastedImageName(file: File, index: number): string {
+  if (file.name.trim()) return file.name;
+  const extension = file.type === "image/jpeg"
+    ? "jpg"
+    : file.type.startsWith("image/")
+      ? file.type.slice("image/".length).replace("+xml", "") || "png"
+      : "png";
+  return `pasted-image${index === 0 ? "" : `-${index + 1}`}.${extension}`;
 }
 
 function uploadErrorMessage(reason: unknown): string {
@@ -34,6 +44,7 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsReady = attachments.every((attachment) => attachment.status === "ready");
   const readyAttachments = attachments.filter((attachment) => attachment.status === "ready");
+  const canUploadAttachments = !disabled && !running && Boolean(sessionId || onEnsureSession);
 
   const sendValue = (value: string) => {
     const trimmed = value.trim();
@@ -95,16 +106,13 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
       return current.filter((item) => item.clientId !== clientId);
     });
   };
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    event.target.value = "";
-
+  const addAndUploadFile = (file: File, displayName = file.name || "image") => {
+    if (!canUploadAttachments) return;
     const newAttachment: ComposerAttachment = {
       clientId: createUuid(),
       sourceFile: file,
       fileName: "",
-      displayName: file.name,
+      displayName,
       url: URL.createObjectURL(file),
       mediaType: file.type,
       width: 0,
@@ -114,6 +122,28 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
 
     setAttachments((prev) => [...prev, newAttachment]);
     void upload(newAttachment);
+  };
+  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    addAndUploadFile(file);
+  };
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!canUploadAttachments) return;
+    const itemImages = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    const images = itemImages.length > 0
+      ? itemImages
+      : Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+    if (images.length === 0) return;
+
+    // An image clipboard can also expose text/html or text/plain fallbacks.
+    // Treat the image as the user's intent and avoid inserting those fallbacks.
+    event.preventDefault();
+    images.forEach((file, index) => addAndUploadFile(file, pastedImageName(file, index)));
   };
 
   return <div className={`composer-wrap ${centered ? "centered" : ""}`}>
@@ -131,10 +161,10 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
           ))}
         </div>
       )}
-      <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={keyDown} disabled={disabled} rows={centered ? 3 : 1} placeholder="问一个 NLP 问题……" aria-label="学习问题" />
+      <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={keyDown} onPaste={handlePaste} disabled={disabled} rows={centered ? 3 : 1} placeholder="问一个 NLP 问题……" aria-label="学习问题" />
       <div className="composer-toolbar">
         <input type="file" ref={fileInputRef} hidden accept="image/jpeg,image/png,image/webp" onChange={handleFileSelect} />
-        <button type="button" className="attachment-button" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: "4px", display: "flex", alignItems: "center" }} onClick={() => fileInputRef.current?.click()} disabled={disabled || running || (!sessionId && !onEnsureSession)} aria-label="上传附件"><Plus size={18} /></button>
+        <button type="button" className="attachment-button" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", padding: "4px", display: "flex", alignItems: "center" }} onClick={() => fileInputRef.current?.click()} disabled={!canUploadAttachments} aria-label="上传附件"><Plus size={18} /></button>
         <span><GraduationCap size={15} />Nova · LSNU NLP Learning Agent</span>
         {contextControl}
         {running ? <button className="send-button stop" type="button" onClick={onCancel} aria-label="停止生成"><Square size={14} fill="currentColor" /></button> : <button className="send-button" type="button" onClick={submit} disabled={disabled || !attachmentsReady || (!content.trim() && readyAttachments.length === 0)} aria-label="发送"><ArrowUp size={18} /></button>}

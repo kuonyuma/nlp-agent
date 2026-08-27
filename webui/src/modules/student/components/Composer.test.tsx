@@ -5,6 +5,30 @@ import { Composer } from "./Composer";
 
 vi.mock("@/platform/http/api", () => ({ uploadAttachment: vi.fn() }));
 
+function clipboardFileItem(file: File): DataTransferItem {
+  return {
+    kind: "file",
+    type: file.type,
+    getAsFile: () => file,
+  } as DataTransferItem;
+}
+
+function clipboardTextItem(): DataTransferItem {
+  return {
+    kind: "string",
+    type: "text/plain",
+    getAsFile: () => null,
+  } as DataTransferItem;
+}
+
+function createPasteEvent(items: DataTransferItem[], files: File[] = []): Event {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { items, files },
+  });
+  return event;
+}
+
 describe("Composer", () => {
   beforeEach(() => {
     vi.mocked(uploadAttachment).mockReset();
@@ -122,6 +146,68 @@ describe("Composer", () => {
     expect(screen.getByLabelText("发送")).toBeEnabled();
   });
 
+  it("uploads every pasted image and suppresses clipboard fallback text", async () => {
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      file_name: "safe-image.png",
+      url: "/api/v1/uploads/sess-1/safe-image.png",
+      media_type: "image/png",
+      size_bytes: 100,
+      width: 120,
+      height: 80,
+      sha256: "a".repeat(64),
+    });
+    render(<Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId="sess-1" />);
+    const firstImage = new File(["first"], "", { type: "image/png" });
+    const secondImage = new File(["second"], "diagram.webp", { type: "image/webp" });
+    const paste = createPasteEvent([
+      clipboardFileItem(firstImage),
+      clipboardTextItem(),
+      clipboardFileItem(secondImage),
+    ]);
+
+    fireEvent(screen.getByLabelText("学习问题"), paste);
+
+    expect(paste.defaultPrevented).toBe(true);
+    await waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(2));
+    expect(uploadAttachment).toHaveBeenNthCalledWith(1, "sess-1", firstImage);
+    expect(uploadAttachment).toHaveBeenNthCalledWith(2, "sess-1", secondImage);
+    expect(screen.getByRole("img", { name: "pasted-image.png" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "diagram.webp" })).toBeVisible();
+  });
+
+  it("leaves text-only paste to the native textarea behavior", () => {
+    render(<Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId="sess-1" />);
+    const paste = createPasteEvent([clipboardTextItem()]);
+
+    fireEvent(screen.getByLabelText("学习问题"), paste);
+
+    expect(paste.defaultPrevented).toBe(false);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it("does not upload pasted images while a turn is running", () => {
+    const onEnsureSession = vi.fn().mockResolvedValue("session-new");
+    render(<Composer disabled={false} running onSend={vi.fn()} onCancel={vi.fn()} sessionId={null} onEnsureSession={onEnsureSession} />);
+    const image = new File(["image"], "running.png", { type: "image/png" });
+
+    fireEvent(screen.getByLabelText("学习问题"), createPasteEvent([clipboardFileItem(image)]));
+
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(onEnsureSession).not.toHaveBeenCalled();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("does not let paste bypass an unavailable attachment upload", () => {
+    render(<Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId={null} />);
+    const image = new File(["image"], "signed-out.png", { type: "image/png" });
+
+    fireEvent(screen.getByLabelText("学习问题"), createPasteEvent([clipboardFileItem(image)]));
+
+    expect(screen.getByRole("button", { name: "上传附件" })).toBeDisabled();
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
   it("places attachment upload before branding and learning settings before send", () => {
     const { container } = render(
       <Composer
@@ -205,16 +291,16 @@ describe("Composer", () => {
     expect(screen.getByLabelText("发送")).toBeDisabled();
   });
 
-  it("shows the server rejection reason for a failed upload", async () => {
+  it("shows the server rejection reason for a failed pasted upload", async () => {
     vi.mocked(uploadAttachment).mockRejectedValueOnce(
       Object.assign(new Error("仅支持 JPEG、PNG 或 WebP 图片"), { status: 415 }),
     );
-    const { container } = render(
+    render(
       <Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId="sess-1" />
     );
     const file = new File(["unsupported"], "image.gif", { type: "image/gif" });
 
-    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    fireEvent(screen.getByLabelText("学习问题"), createPasteEvent([clipboardFileItem(file)]));
 
     expect(await screen.findByRole("status")).toHaveTextContent("仅支持 JPEG、PNG 或 WebP 图片");
   });
