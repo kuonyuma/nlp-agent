@@ -2,11 +2,14 @@
 
 import asyncio
 import json
+import logging
 import secrets
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, WebSocket, status
 from fastapi.exceptions import RequestValidationError

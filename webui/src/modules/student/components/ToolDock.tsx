@@ -98,7 +98,11 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
         .then((value) => {
           if (!active) return;
           const ticket = value.runtime?.ticket ?? null;
-          const ready = Boolean(value.runtime_available && ticket);
+          // The local in-memory backend intentionally has no signed Docker
+          // capability. Docker is considered ready only when it supplied one.
+          const ready = Boolean(value.runtime_available && (
+            ticket || (value.runtime && "kind" in value.runtime && value.runtime.kind === "inmemory") || value.runtime === undefined
+          ));
           setRuntimeTicket(ticket);
           setLeaseStatus(ready ? "ready" : "creating");
           setTimeline([{ id: Date.now(), label: ready ? "运行环境已就绪" : "正在预热运行环境", detail: ready ? "已绑定当前会话。" : "预热池正在补充干净实例。" }]);
@@ -288,7 +292,7 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
       <header>
         <div><Terminal size={15} /><strong>输出</strong><span>{running ? "运行中" : result ? "最近一次运行" : "等待运行"}</span></div>
         <div className="sandbox-phase-zero-actions">
-          <button type="button" disabled={running || !runtimeTicket || leaseStatus !== "ready"} onClick={runCode}><Play size={14} />{running ? "运行中…" : "运行代码"}</button>
+          <button type="button" disabled={running || leaseStatus !== "ready"} onClick={runCode}><Play size={14} />{running ? "运行中…" : "运行代码"}</button>
           <button type="button" className="secondary" disabled={running} onClick={() => {
             void api.restartSandbox(runtimeTicket).then(() => { setRuntimeTicket(null); setResult("运行环境已重置，请重新打开沙箱。"); setTimeline((current) => [...current, { id: Date.now(), label: "运行环境已重置", detail: "Kernel 内存状态已清空。" }]); }).catch(() => setResult("当前运行环境不可用。"));
           }}><RotateCcw size={14} />重置</button>
