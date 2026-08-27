@@ -13,31 +13,31 @@
       ],
       "status": "incompatible",
       "notes": "missing modules: matplotlib, numpy, pandas",
-      "image_id": "sha256:57f39c60fb22d045b89f5e67ce0d247c801effa627ff225420187be9a9d60d51",
-      "measured_at": "2026-08-27T07:32:26.592126+00:00",
+      "image_id": "sha256:78d431b244cdb467059ae0108f8ea01adb98c8665408c5df8060995e4421044d",
+      "measured_at": "2026-08-27T07:36:05.599031+00:00",
       "benchmark": {
         "iterations": 3,
         "image_cached": true,
         "stage_percentiles_ms": {
           "create_ms": {
-            "p50": 19.97,
-            "p95": 21.75
+            "p50": 22.14,
+            "p95": 22.88
           },
           "start_ms": {
-            "p50": 95.37,
-            "p95": 319.23
+            "p50": 112.69,
+            "p95": 130.29
           },
           "kernel_ready_ms": {
-            "p50": 1541.72,
-            "p95": 1576.98
+            "p50": 1988.98,
+            "p95": 2004.9
           },
           "claim_ms": {
-            "p50": 327.86,
-            "p95": 402.92
+            "p50": 399.89,
+            "p95": 402.27
           },
           "first_output_ms": {
-            "p50": 300.3,
-            "p95": 332.7
+            "p50": 380.26,
+            "p95": 380.81
           }
         }
       }
