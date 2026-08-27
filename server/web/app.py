@@ -245,16 +245,21 @@ def create_app(
             factory = gateway.authorization_session_factory
             if factory is None:
                 return
-            try:
-                while True:
+            while True:
+                try:
                     await sandbox_lifecycle_service.reconcile_expired_leases(factory)
                     store_root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
                     if store_root:
                         await purge_expired_artifacts(factory, store_root=Path(store_root))
                     await record_sandbox_capacity_sample(factory)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Reconciliation is a periodic repair loop. One transient
+                    # DB/Redis/filesystem failure must not kill all later runs.
+                    logger.exception("sandbox reconciliation pass failed")
+                finally:
                     await asyncio.sleep(sandbox_reconcile_interval_s)
-            except asyncio.CancelledError:
-                raise
 
         sandbox_reconciler = (
             asyncio.create_task(reconcile_sandbox_leases(), name="sandbox-lease-reconciler")
@@ -969,6 +974,9 @@ def create_app(
         accepted = await request.app.state.gateway.submit_turn(
             principal,
             SubmitTurnRequest(**body.model_dump()),
+            auth_session_id=(
+                _claims.session_id if isinstance(_claims, DatabaseSessionClaims) else None
+            ),
         )
         return accepted.model_dump(mode="json")
 

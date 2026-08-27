@@ -527,3 +527,53 @@ def test_manager_rpc_renewal_uses_owner_fenced_cas(monkeypatch) -> None:
     assert str(ttl) == str(manager_rpc.RPC_PROCESSING_TTL_SECONDS)
     assert "GET" in script
     assert "EXPIRE" in script
+
+
+def test_manager_rpc_removes_completed_source_payload_from_request_stream() -> None:
+    from server.sandbox.manager_rpc import RedisSandboxManagerRpcServer, _json, _signature
+
+    class FakeManager:
+        async def capacity_snapshot(self):
+            return {"target": 1}
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+            self.deleted: list[tuple[str, str]] = []
+
+        async def get(self, key):
+            return self.values.get(key)
+
+        async def set(self, key, value, *, nx=False, ex=None):
+            if nx and key in self.values:
+                return False
+            self.values[key] = str(value)
+            return True
+
+        async def xadd(self, *_args, **_kwargs):
+            return "1-0"
+
+        async def expire(self, *_args):
+            return True
+
+        async def xdel(self, stream, message_id):
+            self.deleted.append((stream, message_id))
+            return 1
+
+    async def exercise() -> list[tuple[str, str]]:
+        request_id = "source-retention-request"
+        body = _json({"issued_at": time.time(), "expires_at": time.time() + 30})
+        fields = {
+            "request_id": request_id,
+            "response_stream": f"nova:sandbox:manager:rpc:responses:{request_id}",
+            "method": "capacity_snapshot",
+            "payload": body,
+            "signature": _signature("rpc-secret", request_id, "capacity_snapshot", body),
+            "_stream_message_id": "17-1",
+        }
+        redis = FakeRedis()
+        server = RedisSandboxManagerRpcServer(redis, manager=FakeManager(), secret="rpc-secret")
+        await server._handle(fields)
+        return redis.deleted
+
+    assert asyncio.run(exercise()) == [("nova:sandbox:manager:rpc:requests", "17-1")]

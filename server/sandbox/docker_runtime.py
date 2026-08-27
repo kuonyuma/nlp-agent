@@ -214,7 +214,8 @@ class DockerRuntimeAdapter:
         """Run a model experiment in a fresh hardened process, never a user kernel."""
         if not 1 <= timeout_seconds <= 60:
             raise ValueError("timeout_seconds must be between 1 and 60")
-        command = list(self.create_command(name=f"nova-scratch-{uuid4().hex}", claim_nonce=""))
+        name = f"nova-scratch-{uuid4().hex}"
+        command = list(self.create_command(name=name, claim_nonce=""))
         command[2:3] = ["--rm"]
         command.extend(("python", "/opt/nova-runtime/nova_runtime.py", "scratch", "--timeout-seconds", str(timeout_seconds), "--output-limit-bytes", str(output_limit_bytes)))
         process = await asyncio.create_subprocess_exec(
@@ -229,6 +230,20 @@ class DockerRuntimeAdapter:
         except TimeoutError as error:
             process.kill()
             await process.communicate()
+            # Killing the local Docker CLI does not imply the detached daemon
+            # stopped the container. Force removal is therefore mandatory on
+            # the known, Manager-generated name.
+            try:
+                cleanup = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "--force", name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await _communicate(cleanup)
+            except Exception:
+                # The original timeout remains authoritative; reconciliation
+                # will also find any managed container that survived cleanup.
+                pass
             raise TimeoutError("sandbox scratch execution timed out") from error
         if process.returncode != 0:
             raise RuntimeError(stderr.decode("utf-8", "replace").strip())

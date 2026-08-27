@@ -92,10 +92,27 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
 
   useEffect(() => {
     let active = true;
-    void api.ensureSandboxLease()
-      .then((value) => { if (active) { setRuntimeTicket(value.runtime?.ticket ?? null); setLeaseStatus(value.runtime_available ? "ready" : "creating"); setTimeline([{ id: Date.now(), label: value.runtime_available ? "运行环境已就绪" : "正在预热运行环境", detail: value.runtime_available ? "已绑定当前会话。" : "预热池正在补充干净实例。" }]); } })
-      .catch(() => { if (active) { setLeaseStatus("error"); setTimeline([{ id: Date.now(), label: "无法建立运行环境", detail: "请稍后重试。" }]); } });
-    return () => { active = false; };
+    let retryTimer: number | undefined;
+    const acquireLease = () => {
+      void api.ensureSandboxLease()
+        .then((value) => {
+          if (!active) return;
+          const ticket = value.runtime?.ticket ?? null;
+          const ready = Boolean(value.runtime_available && ticket);
+          setRuntimeTicket(ticket);
+          setLeaseStatus(ready ? "ready" : "creating");
+          setTimeline([{ id: Date.now(), label: ready ? "运行环境已就绪" : "正在预热运行环境", detail: ready ? "已绑定当前会话。" : "预热池正在补充干净实例。" }]);
+          if (!ready) retryTimer = window.setTimeout(acquireLease, 1_000);
+        })
+        .catch(() => {
+          if (!active) return;
+          setLeaseStatus("error");
+          setTimeline([{ id: Date.now(), label: "无法建立运行环境", detail: "正在重试连接。" }]);
+          retryTimer = window.setTimeout(acquireLease, 2_000);
+        });
+    };
+    acquireLease();
+    return () => { active = false; if (retryTimer !== undefined) window.clearTimeout(retryTimer); };
   }, []);
 
   useEffect(() => {
@@ -130,6 +147,10 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
   };
   const editorLines = source.split("\n");
   const runCode = () => {
+        if (!runtimeTicket || leaseStatus !== "ready") {
+          setResult("运行环境仍在准备中，请稍候。");
+          return;
+        }
         setRunning(true); setTimeline((current) => [...current, { id: Date.now(), label: "开始执行", detail: "正在向隔离 Kernel 发送代码。" }]);
         void api.executeSandbox(source, runtimeTicket)
           .then(async (value) => { if (value.ticket) setRuntimeTicket(value.ticket); setResult(value.stdout || value.stderr || "运行完成。"); if (value.artifacts) setArtifactUrls((await Promise.all(value.artifacts.map((artifact) => api.getSandboxArtifactUrl(artifact.id).then((access) => access.url).catch(() => null)))).filter((url): url is string => Boolean(url))); if (value.execution_id) { const replay = await api.replaySandboxEvents(value.execution_id); setTimeline(replay.events.map((event) => ({ id: event.event_id, label: event.type === "execution.output" ? "运行输出" : event.type === "execution.completed" ? "执行完成" : "开始执行", detail: event.payload.text ?? "运行状态已恢复。" }))); } else setTimeline((current) => [...current, { id: Date.now(), label: "执行完成", detail: value.stderr ? "运行返回错误输出。" : "已收到 Kernel 输出。" }]); })
@@ -267,7 +288,7 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
       <header>
         <div><Terminal size={15} /><strong>输出</strong><span>{running ? "运行中" : result ? "最近一次运行" : "等待运行"}</span></div>
         <div className="sandbox-phase-zero-actions">
-          <button type="button" disabled={running} onClick={runCode}><Play size={14} />{running ? "运行中…" : "运行代码"}</button>
+          <button type="button" disabled={running || !runtimeTicket || leaseStatus !== "ready"} onClick={runCode}><Play size={14} />{running ? "运行中…" : "运行代码"}</button>
           <button type="button" className="secondary" disabled={running} onClick={() => {
             void api.restartSandbox(runtimeTicket).then(() => { setRuntimeTicket(null); setResult("运行环境已重置，请重新打开沙箱。"); setTimeline((current) => [...current, { id: Date.now(), label: "运行环境已重置", detail: "Kernel 内存状态已清空。" }]); }).catch(() => setResult("当前运行环境不可用。"));
           }}><RotateCcw size={14} />重置</button>

@@ -32,6 +32,11 @@ def refill_deficit(*, target: int, ready_count: int, creating_count: int) -> int
     return max(0, target - ready_count - creating_count)
 
 
+def ready_state_after_kernel_check(current_state: str) -> str:
+    """Both L0 and cached-image L1 creation paths become claimable after health."""
+    return RuntimeState.READY_UNBOUND if current_state in {"creating", "created"} else current_state
+
+
 def auth_lifecycle_allows_execution(
     *,
     lease: SandboxLeaseModel,
@@ -217,14 +222,15 @@ class WarmPoolManager:
         """Create only the deficit. Docker runs outside every database transaction."""
         self._trace("sandbox.manager.refill.started", profile=self._resource_profile_id)
         lock_name = f"nova.sandbox.pool.{self._resource_profile_id}"
+        reserved_runtime_ids: list[str] = []
         async with self._session_factory() as lock_session:
             acquired = await lock_session.scalar(text("SELECT GET_LOCK(:name, 0)"), {"name": lock_name})
             if not acquired:
                 return 0
             try:
-                # Reuse the advisory-lock connection for this read/write
-                # transaction. A small MySQL pool must not deadlock while the
-                # lock session is held waiting for a second connection.
+                # Reserve rows on the advisory-lock connection before Docker
+                # I/O.  Releasing the lock before provisioning avoids asking
+                # a one-connection MySQL pool for a second connection.
                 await self._fail_stale_creating(lock_session)
                 counts = await self._counts(lock_session)
                 target = await self._effective_ready_target()
@@ -234,12 +240,28 @@ class WarmPoolManager:
                     creating_count=counts.creating_count,
                 )
                 for _ in range(deficit):
-                    await self._create_one()
+                    runtime_id = str(uuid4())
+                    lock_session.add(
+                        SandboxRuntimeInstanceModel(
+                            id=runtime_id,
+                            runtime_kind=self._runtime_kind,
+                            image_digest=self._docker.image_digest,
+                            resource_profile_id=self._resource_profile_id,
+                            state="creating",
+                        )
+                    )
+                    reserved_runtime_ids.append(runtime_id)
                 await lock_session.commit()
-                self._trace("sandbox.manager.refill.completed", profile=self._resource_profile_id, created=deficit)
-                return deficit
             finally:
                 await lock_session.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": lock_name})
+        for runtime_id in reserved_runtime_ids:
+            await self._create_one(runtime_id=runtime_id)
+        self._trace(
+            "sandbox.manager.refill.completed",
+            profile=self._resource_profile_id,
+            created=len(reserved_runtime_ids),
+        )
+        return len(reserved_runtime_ids)
 
     async def capacity_snapshot(self) -> dict[str, int | str]:
         """Management-plane capacity data for dashboards and alert thresholds."""
@@ -672,18 +694,19 @@ class WarmPoolManager:
             runtime.state = RuntimeState.FAILED
             runtime.failure_reason = "pool.create.timeout"
 
-    async def _create_one(self) -> None:
-        runtime_id = str(uuid4())
-        async with self._session_factory.begin() as session:
-            session.add(
-                SandboxRuntimeInstanceModel(
-                    id=runtime_id,
-                    runtime_kind=self._runtime_kind,
-                    image_digest=self._docker.image_digest,
-                    resource_profile_id=self._resource_profile_id,
-                    state="creating",
+    async def _create_one(self, *, runtime_id: str | None = None) -> None:
+        if runtime_id is None:
+            runtime_id = str(uuid4())
+            async with self._session_factory.begin() as session:
+                session.add(
+                    SandboxRuntimeInstanceModel(
+                        id=runtime_id,
+                        runtime_kind=self._runtime_kind,
+                        image_digest=self._docker.image_digest,
+                        resource_profile_id=self._resource_profile_id,
+                        state="creating",
+                    )
                 )
-            )
         try:
             self._faults.fail_if_configured("docker.create")
             name = runtime_container_name(runtime_id)
@@ -712,9 +735,9 @@ class WarmPoolManager:
             return
         async with self._session_factory.begin() as session:
             runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
-            if runtime is not None and runtime.state == "creating":
+            if runtime is not None and runtime.state in {"creating", "created"}:
                 runtime.external_runtime_id = external_id
-                runtime.state = RuntimeState.READY_UNBOUND
+                runtime.state = ready_state_after_kernel_check(runtime.state)
                 runtime.last_heartbeat_at = _utc_now()
 
     @dataclass(frozen=True)

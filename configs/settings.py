@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # precise frame-ancestors policy without trusting request Host headers.
     NLP_AGENT_SANDBOX_APPLICATION_ORIGIN: str = ""
     NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT: str = ""
+    NLP_AGENT_SANDBOX_ARTIFACT_TTL_S: int = 3600
     NLP_AGENT_SANDBOX_PROJECT_STORAGE_ENABLED: bool = False
     NLP_AGENT_SANDBOX_PROJECT_STORAGE_ROOT: str = ""
     NLP_AGENT_SANDBOX_SNAPSHOTS_ENABLED: bool = False

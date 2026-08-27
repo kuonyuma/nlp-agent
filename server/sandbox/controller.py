@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from server.web.protocol import control_event
 from .contracts import SandboxScope
 from .service import sandbox_lifecycle_service
 from .inmemory_runtime import InMemoryRuntime
+from .artifact_persistence import persist_runtime_artifacts
 
 
 router = APIRouter(prefix="/api/v1/sandbox", tags=["sandbox"])
@@ -181,6 +183,14 @@ async def execute_sandbox(
     await request.app.state.hub.broadcast(control_event("sandbox.execution.started", payload={"execution_id": execution_id, "seq": 1}), user_id=scope.owner_user_id)
     try:
         result = await _sandbox_gateway(request).execute(scope, source=body.source, ticket=body.ticket)
+        persisted_artifacts = []
+        store_root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
+        if store_root:
+            persisted_artifacts = persist_runtime_artifacts(
+                db=db, execution_id=execution_id, owner_user_id=scope.owner_user_id,
+                payload=result.get("artifacts"), store_root=Path(store_root),
+                ttl_seconds=settings.NLP_AGENT_SANDBOX_ARTIFACT_TTL_S,
+            )
         for stream, output in execution_output_streams(result):
             event = await sandbox_events.append(
                 execution_id,
@@ -226,7 +236,7 @@ async def execute_sandbox(
                 user_id=scope.owner_user_id,
             )
         await db.commit()
-        return {**result, "execution_id": execution_id}
+        return {**result, "execution_id": execution_id, "artifacts": [{"id": artifact.id, "name": artifact.locator.rsplit("/", 1)[-1], "mime_type": artifact.mime_type} for artifact in persisted_artifacts]}
     except PermissionError as error:
         execution.status = "failed"
         execution.exit_reason = str(error)[:128]

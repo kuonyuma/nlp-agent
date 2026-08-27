@@ -71,3 +71,16 @@ def test_expired_artifact_content_is_not_served(monkeypatch, tmp_path) -> None:
     ticket = ArtifactAccessSigner("test-artifact-secret").issue(artifact_id="artifact-a", owner_user_id="user-a")
 
     assert TestClient(app).get(f"/api/v1/sandbox/artifacts/artifact-a/content?ticket={ticket}").status_code == 404
+
+
+def test_artifact_content_origin_must_match_the_configured_artifact_origin() -> None:
+    from server.sandbox.artifacts import artifact_request_origin_matches
+
+    assert artifact_request_origin_matches(
+        "https://artifacts.example.test",
+        configured_origin="https://artifacts.example.test",
+    )
+    assert not artifact_request_origin_matches(
+        "https://nova.example.test",
+        configured_origin="https://artifacts.example.test",
+    )

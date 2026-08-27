@@ -84,6 +84,15 @@ def validate_artifact_origin(origin: str, *, application_origin: str) -> str:
     return f"{parsed_origin.scheme}://{parsed_origin.netloc}"
 
 
+def artifact_request_origin_matches(request_origin: str, *, configured_origin: str) -> bool:
+    """Accept content delivery only on the configured isolated HTTPS origin."""
+    actual = urlsplit(request_origin)
+    configured = urlsplit(configured_origin)
+    if actual.scheme != "https" or configured.scheme != "https":
+        return False
+    return actual.netloc.rstrip(".").lower() == configured.netloc.rstrip(".").lower()
+
+
 def resolve_artifact_path(store_root: Path, locator: str) -> Path:
     """Resolve a database locator without allowing traversal or symlink escape."""
     relative = Path(locator)

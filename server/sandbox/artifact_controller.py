@@ -12,7 +12,7 @@ from server.infrastructure.mysql.models import SandboxArtifactModel
 from server.web.database_auth import DatabaseSessionClaims
 
 from .artifact_delivery import build_artifact_response, issue_artifact_access_url
-from .artifacts import ArtifactAccessSigner, artifact_expired
+from .artifacts import ArtifactAccessSigner, artifact_expired, artifact_request_origin_matches
 
 router = APIRouter(prefix="/api/v1/sandbox/artifacts", tags=["sandbox-artifacts"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
@@ -42,7 +42,15 @@ async def issue_artifact_access(artifact_id: str, request: Request, db: DbSessio
 
 
 @router.get("/{artifact_id}/content")
-async def get_artifact_content(artifact_id: str, ticket: str, db: DbSession):
+async def get_artifact_content(artifact_id: str, ticket: str, request: Request, db: DbSession):
+    artifact_origin = settings.NLP_AGENT_SANDBOX_ARTIFACT_ORIGIN.strip()
+    forwarded_scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    request_origin = f"{forwarded_scheme}://{request.headers.get('host', '')}"
+    if (
+        request.headers.get("x-nova-artifact-delivery") != "1"
+        or not artifact_request_origin_matches(request_origin, configured_origin=artifact_origin)
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     artifact = await db.get(SandboxArtifactModel, artifact_id)
     if artifact is None or artifact_expired(getattr(artifact, "expires_at", None)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)

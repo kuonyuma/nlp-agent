@@ -435,13 +435,17 @@ class RedisSandboxManagerRpcServer:
             await asyncio.sleep(min(1.0, remaining))
 
     async def process_once(self, *, block_ms: int = 100) -> bool:
-        rows = await self._client.xread({self._request_stream: self._cursor}, count=1, block=max(1, block_ms))
+        # Consume a bounded batch so a Manager restart cannot spend minutes
+        # replaying retained request payloads one-by-one.  Each request is
+        # still protected by its signed expiry and ownership lease.
+        rows = await self._client.xread({self._request_stream: self._cursor}, count=100, block=max(1, block_ms))
         if not rows:
             return False
         for _stream, messages in rows:
             for message_id, raw_fields in messages:
                 self._cursor = _text(message_id)
                 fields = {_text(key): _text(value) for key, value in raw_fields.items()}
+                fields["_stream_message_id"] = self._cursor
                 task = create_task(self._handle(fields), name=f"sandbox-manager-rpc:{fields.get('request_id', '')}")
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
@@ -542,6 +546,15 @@ class RedisSandboxManagerRpcServer:
                     await self._publish_cached_response(response_stream, request_id)
                     return
             await self._publish_response(response_stream, request_id, ok=ok, payload=encoded, error=error)
+            message_id = fields.get("_stream_message_id")
+            delete = getattr(self._client, "xdel", None)
+            if message_id and callable(delete):
+                try:
+                    await delete(self._request_stream, message_id)
+                except Exception:
+                    # Retention is best-effort after the durable result is
+                    # recorded; a later trim may remove any residual payload.
+                    pass
         finally:
             if renew_task is not None:
                 renew_task.cancel()

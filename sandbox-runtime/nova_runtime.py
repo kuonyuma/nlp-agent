@@ -7,13 +7,20 @@ no network port and does not receive platform credentials.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import mimetypes
+from pathlib import Path
+import signal
 import sys
 import time
 from dataclasses import dataclass
 from typing import Literal
 
 KERNEL_CONNECTION_FILE = "/run/nova/kernel.json"
+ARTIFACT_DIRECTORY = Path("/workspace/artifacts")
+MAX_ARTIFACT_FILES = 16
+MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 
 
 class OutputCollector:
@@ -97,7 +104,9 @@ def execute(request: ExecuteRequest) -> dict[str, object]:
             elif message_type == "execute_result":
                 output.append("stdout", content.get("data", {}).get("text/plain", "") + "\n")
             elif message_type == "status" and content.get("execution_state") == "idle":
-                return output.to_payload(status="failed" if failed else "completed")
+                result = output.to_payload(status="failed" if failed else "completed")
+                result["artifacts"] = collect_workspace_artifacts()
+                return result
     finally:
         client.stop_channels()
 
@@ -135,6 +144,15 @@ def scratch(request: ExecuteRequest) -> dict[str, object]:
     """Execute in a fresh process: intentionally no access to Interactive Kernel state."""
     output = OutputCollector(limit_bytes=request.output_limit_bytes)
     namespace = {"__builtins__": __builtins__}
+    def deadline_exceeded(_signum: int, _frame: object) -> None:
+        raise TimeoutError("scratch execution timed out")
+
+    alarm_enabled = hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM")
+    previous_handler = None
+    previous_timer: tuple[float, float] | None = None
+    if alarm_enabled:
+        previous_handler = signal.signal(signal.SIGALRM, deadline_exceeded)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, request.timeout_seconds)
     try:
         import contextlib
         import io
@@ -147,8 +165,44 @@ def scratch(request: ExecuteRequest) -> dict[str, object]:
         output.append("stderr", stderr.getvalue())
     except Exception as error:
         output.append("stderr", f"{type(error).__name__}: {error}\n")
-        return output.to_payload(status="failed")
-    return output.to_payload(status="completed")
+        result = output.to_payload(status="failed")
+        result["artifacts"] = collect_workspace_artifacts()
+        return result
+    finally:
+        if alarm_enabled:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if previous_handler is not None:
+                signal.signal(signal.SIGALRM, previous_handler)
+            if previous_timer is not None and previous_timer[0] > 0:
+                signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+    result = output.to_payload(status="completed")
+    result["artifacts"] = collect_workspace_artifacts()
+    return result
+
+
+def collect_workspace_artifacts(root: Path = ARTIFACT_DIRECTORY) -> list[dict[str, str]]:
+    """Return a bounded, explicit artifact directory; never arbitrary files."""
+    if not root.is_dir():
+        return []
+    collected: list[dict[str, str]] = []
+    used = 0
+    for path in sorted(root.rglob("*")):
+        if len(collected) >= MAX_ARTIFACT_FILES or not path.is_file() or path.is_symlink():
+            continue
+        try:
+            relative = path.relative_to(root)
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if len(data) > MAX_ARTIFACT_BYTES or used + len(data) > MAX_ARTIFACT_BYTES:
+            continue
+        used += len(data)
+        collected.append({
+            "name": relative.as_posix(),
+            "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            "content_b64": base64.b64encode(data).decode("ascii"),
+        })
+    return collected
 
 
 def main() -> int:

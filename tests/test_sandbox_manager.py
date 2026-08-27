@@ -34,6 +34,13 @@ def test_refill_plan_counts_only_pristine_ready_slots() -> None:
     assert refill_deficit(target=2, ready_count=3, creating_count=0) == 0
 
 
+def test_kernel_ready_finalization_promotes_cached_image_slots() -> None:
+    from server.sandbox.manager import ready_state_after_kernel_check
+
+    assert ready_state_after_kernel_check("creating") == "ready_unbound"
+    assert ready_state_after_kernel_check("created") == "ready_unbound"
+
+
 def test_manager_reconcile_never_adopts_an_orphaned_container() -> None:
     from server.sandbox.manager import reconcile_actions
 

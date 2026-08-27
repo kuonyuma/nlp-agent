@@ -90,6 +90,68 @@ async def test_database_scratch_does_not_require_interactive_lease() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_tools_authorize_with_login_session_not_conversation_id() -> None:
+    from server.infrastructure.mysql.models import SessionModel, UserModel
+    from server.sandbox.model_tools import SandboxModelToolService
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+
+    class FakeSession:
+        requested_session_id: str | None = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, model, identifier, **_kwargs):
+            if model is SessionModel:
+                self.requested_session_id = identifier
+                if identifier != "login-session-9":
+                    return None
+                return SimpleNamespace(
+                    id=identifier,
+                    user_id="user-1",
+                    workspace_id="workspace-1",
+                    revoked_at=None,
+                    expires_at=now + timedelta(minutes=5),
+                    authorization_version=1,
+                )
+            if model is UserModel:
+                return SimpleNamespace(
+                    id="user-1", authorization_version=1, status="active", deleted_at=None
+                )
+            return None
+
+        async def scalar(self, _statement):
+            return None
+
+    class Factory:
+        def __init__(self) -> None:
+            self.session = FakeSession()
+
+        def __call__(self):
+            return self.session
+
+    factory = Factory()
+    service = SandboxModelToolService(mode="inmemory", session_factory=factory)
+    authorized = await service._authorize(
+        {
+            "configurable": {
+                "thread_id": "conversation-42",
+                "auth_session_id": "login-session-9",
+                "user_id": "user-1",
+                "workspace_id": "workspace-1",
+            }
+        }
+    )
+
+    assert authorized is not None
+    assert factory.session.requested_session_id == "login-session-9"
+
+
+@pytest.mark.asyncio
 async def test_model_scratch_does_not_share_interactive_kernel() -> None:
     from server.sandbox.model_tools import SandboxModelToolService
 

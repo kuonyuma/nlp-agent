@@ -94,8 +94,19 @@ class SandboxModelToolService:
                 return None
             return _AuthorizedModelContext(context, None, None, None, None)
 
+        # In-memory mode is the test/local compatibility backend and has no
+        # independently authenticated transport. Docker production must carry
+        # the login session explicitly; it must never substitute thread_id.
+        auth_session_id = context.auth_session_id or (
+            context.session_id if self.mode == "inmemory" else None
+        )
+        if not auth_session_id:
+            # A conversation thread is not a login session.  In production
+            # absence of the separately propagated identity must fail closed.
+            return None
+
         async with self.session_factory() as session:
-            auth_session = await session.get(SessionModel, context.session_id)
+            auth_session = await session.get(SessionModel, auth_session_id)
             user = await session.get(UserModel, context.user_id)
             if auth_session is None or user is None:
                 return None
@@ -121,7 +132,7 @@ class SandboxModelToolService:
                     select(SandboxLeaseModel).where(
                         SandboxLeaseModel.environment_id == environment.id,
                         SandboxLeaseModel.user_id == context.user_id,
-                        SandboxLeaseModel.auth_session_id == context.session_id,
+                        SandboxLeaseModel.auth_session_id == auth_session_id,
                         SandboxLeaseModel.state == "active",
                         SandboxLeaseModel.expires_at > now,
                     )
@@ -130,7 +141,7 @@ class SandboxModelToolService:
                 return None
             scope = SandboxScope(
                 owner_user_id=context.user_id,
-                auth_session_id=context.session_id,
+                auth_session_id=auth_session_id,
                 workspace_id=context.workspace_id,
                 generation=auth_session.authorization_version,
                 lease_expires_at=auth_session.expires_at,
@@ -274,7 +285,7 @@ class SandboxModelToolService:
             payload = self._confirmation_signer.verify(
                 confirmation_token,
                 user_id=authorized.context.user_id,
-                session_id=authorized.context.session_id,
+                session_id=authorized.scope.auth_session_id if authorized.scope else authorized.context.session_id,
                 tool_name=tool_name,
                 code_hash=code_hash,
             )

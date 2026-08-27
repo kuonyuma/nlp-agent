@@ -278,16 +278,18 @@ class BackendGateway:
         )
 
     async def submit_turn(
-        self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest
+        self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest, *, auth_session_id: str | None = None
     ) -> TurnAccepted:
         self._require_started()
         async with self._session_turn_locks[request.session_id]:
-            return await self._submit_turn_locked(principal, request)
+            return await self._submit_turn_locked(principal, request, auth_session_id=auth_session_id)
 
     async def _submit_turn_locked(
-        self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest
+        self, principal: AuthenticatedPrincipal, request: SubmitTurnRequest, *, auth_session_id: str | None = None
     ) -> TurnAccepted:
         context = await self.sessions.resolve(principal, request.session_id)
+        if auth_session_id:
+            context = context.model_copy(update={"auth_session_id": auth_session_id})
         authorization_service.require(principal, Permission.AGENT_TURN_SUBMIT, workspace_id=context.workspace_id)
         if request.model_profile is not None:
             from core.model_runtime.factory import get_global_model_factory

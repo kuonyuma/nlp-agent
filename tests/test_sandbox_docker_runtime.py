@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -126,3 +126,32 @@ def test_managed_runtime_listing_preserves_full_container_ids() -> None:
     ids, command = asyncio.run(exercise())
     assert ids == {"full-container-id"}
     assert command == ("docker", "ps", "--all", "--no-trunc", "--quiet", "--filter", "label=nova.sandbox.managed=true")
+
+
+def test_scratch_timeout_force_removes_the_named_container() -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+
+    adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image="registry.example/nova@sha256:" + "3" * 64))
+
+    async def exercise() -> tuple[tuple[object, ...], ...]:
+        with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn, patch(
+            "server.sandbox.docker_runtime.asyncio.wait_for",
+            new=AsyncMock(side_effect=[TimeoutError(), (b"", b"")]),
+        ):
+            run_process = AsyncMock()
+            cleanup_process = AsyncMock()
+            run_process.stdin = MagicMock()
+            run_process.stdin.drain = AsyncMock()
+            run_process.kill = MagicMock()
+            cleanup_process.stdin = None
+            run_process.communicate.return_value = (b"", b"")
+            cleanup_process.communicate.return_value = (b"", b"")
+            spawn.side_effect = [run_process, cleanup_process]
+            with pytest.raises(TimeoutError, match="scratch execution timed out"):
+                await adapter.run_scratch(source="while True: pass", timeout_seconds=1)
+            return tuple(call.args for call in spawn.call_args_list)
+
+    commands = asyncio.run(exercise())
+    assert len(commands) == 2
+    assert commands[1][:3] == ("docker", "rm", "--force")
+    assert commands[1][3].startswith("nova-scratch-")
