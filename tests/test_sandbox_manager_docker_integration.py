@@ -60,6 +60,16 @@ def _remove_container(name: str) -> None:
         pass
 
 
+def _dump_pending_tasks(label: str) -> None:
+    """Keep CI diagnostics useful when an async resource survives a test."""
+    current = asyncio.current_task()
+    for task in asyncio.all_tasks():
+        if task is current or task.done():
+            continue
+        print(f"Pending asyncio task after {label}: {task!r}", flush=True)
+        task.print_stack()
+
+
 @pytest.mark.asyncio
 async def test_manager_destroys_unregistered_managed_container() -> None:
     from server.infrastructure.mysql import DatabaseConfig, create_engine, create_session_factory
@@ -90,6 +100,7 @@ async def test_manager_destroys_unregistered_managed_container() -> None:
     finally:
         _remove_container(name)
         await engine.dispose()
+        _dump_pending_tasks("orphan reconcile")
 
 
 @pytest.mark.asyncio
