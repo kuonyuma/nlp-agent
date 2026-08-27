@@ -21,6 +21,15 @@ DOCKER_COMMAND_TIMEOUT_SECONDS = 120
 TEST_IMAGE = manager_claim_probe_image()
 
 
+@pytest.fixture(autouse=True)
+async def _close_global_telemetry_after_test():
+    """Stop the Manager's process-wide writer before pytest closes its loop."""
+    yield
+    from core.observability.runtime import global_telemetry
+
+    await global_telemetry.close()
+
+
 def _docker_runtime_args() -> list[str]:
     runtime = os.getenv("NLP_AGENT_DOCKER_RUNTIME")
     return [] if not runtime else ["--runtime", runtime]
@@ -60,16 +69,6 @@ def _remove_container(name: str) -> None:
         pass
 
 
-def _dump_pending_tasks(label: str) -> None:
-    """Keep CI diagnostics useful when an async resource survives a test."""
-    current = asyncio.current_task()
-    for task in asyncio.all_tasks():
-        if task is current or task.done():
-            continue
-        print(f"Pending asyncio task after {label}: {task!r}", flush=True)
-        task.print_stack()
-
-
 @pytest.mark.asyncio
 async def test_manager_destroys_unregistered_managed_container() -> None:
     from server.infrastructure.mysql import DatabaseConfig, create_engine, create_session_factory
@@ -100,7 +99,6 @@ async def test_manager_destroys_unregistered_managed_container() -> None:
     finally:
         _remove_container(name)
         await engine.dispose()
-        _dump_pending_tasks("orphan reconcile")
 
 
 @pytest.mark.asyncio
