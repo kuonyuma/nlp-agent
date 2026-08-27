@@ -156,15 +156,16 @@ def test_scratch_sends_json_request_to_the_container_stdin() -> None:
 
     adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image="registry.example/nova@sha256:" + "4" * 64))
 
-    async def exercise() -> object:
+    async def exercise() -> tuple[object, object]:
         with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn:
             process = AsyncMock()
             process.returncode = 0
             process.communicate.return_value = (b'{"status":"completed"}', b"")
             spawn.return_value = process
             await adapter.run_scratch(source="print(1)", timeout_seconds=1)
-            return process.communicate.await_args
+            return process.communicate.await_args, spawn.call_args
 
-    communicate_call = asyncio.run(exercise())
+    communicate_call, spawn_call = asyncio.run(exercise())
     assert communicate_call is not None
     assert communicate_call.kwargs["input"] == b'{"source": "print(1)"}'
+    assert "--interactive" in spawn_call.args

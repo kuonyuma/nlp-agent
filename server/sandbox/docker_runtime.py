@@ -217,6 +217,7 @@ class DockerRuntimeAdapter:
         name = f"nova-scratch-{uuid4().hex}"
         command = list(self.create_command(name=name, claim_nonce=""))
         command[2:3] = ["--rm"]
+        command.insert(2, "--interactive")
         command.extend(("python", "/opt/nova-runtime/nova_runtime.py", "scratch", "--timeout-seconds", str(timeout_seconds), "--output-limit-bytes", str(output_limit_bytes)))
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
