@@ -38,3 +38,9 @@ def test_publish_workflow_builds_and_publishes_the_runtime_image() -> None:
     assert "context: sandbox-runtime" in workflow
     assert "id: build_runtime" in workflow
     assert "runtime_digest" in workflow
+
+
+def test_ci_workflow_can_be_dispatched_after_a_skip_ci_metadata_commit() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "  workflow_dispatch:" in workflow
