@@ -169,7 +169,12 @@ jobs:
             --update-matrix \
             --measure-manager-claim | tee sandbox-manager-claim-benchmark.json
       - name: Verify Docker reconcile destroys orphan runtimes
-        run: timeout --signal=TERM --kill-after=15s 10m pytest tests/test_sandbox_manager_docker_integration.py -vv -s -o faulthandler_timeout=60
+        run: |
+          mapfile -t TESTS < <(pytest tests/test_sandbox_manager_docker_integration.py --collect-only -q | sed -n '/::/p')
+          for test in "${TESTS[@]}"; do
+            echo "Running Manager integration test: ${test}"
+            timeout --signal=TERM --kill-after=15s 120s pytest "${test}" -vv -s -o faulthandler_timeout=30
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: sandbox-manager-claim-benchmark
