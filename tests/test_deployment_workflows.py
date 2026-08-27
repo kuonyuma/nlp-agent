@@ -42,6 +42,21 @@ def test_publish_workflow_builds_and_publishes_the_runtime_image() -> None:
     assert "runtime_digest" in workflow
 
 
+def test_publish_workflow_recovers_squash_merges_and_supports_manual_replay() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "publish-test-image.yml").read_text(
+        encoding="utf-8"
+    )
+
+    # Squash merge messages can contain a historical ``[skip ci]`` marker,
+    # which suppresses the subsequent develop push event.  The deployment
+    # workflow must therefore have a merged-PR fallback and an operator
+    # replay path for the already-merged commit.
+    assert "  workflow_dispatch:" in workflow
+    assert "  pull_request:" in workflow
+    assert "    types: [closed]" in workflow
+    assert "github.event.pull_request.merged == true" in workflow
+
+
 def test_deploy_workflows_overlay_published_digests_without_mutating_server_env() -> None:
     for workflow_path in WORKFLOW_PATHS:
         workflow = workflow_path.read_text(encoding="utf-8")
