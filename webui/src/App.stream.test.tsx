@@ -27,6 +27,8 @@ const stream = vi.hoisted(() => {
     lease: { id: "lease-session", state: "active", generation: 1, expires_at: "2026-08-25T10:00:00" },
   }));
   const executeSandbox = vi.fn(async () => ({ status: "completed", stdout: "2\n", stderr: "" }));
+  const getLearningBookNavigation = vi.fn().mockResolvedValue({ workspace_id: "default", items: [] });
+  const getLearningBookPage = vi.fn().mockResolvedValue({ page: null });
   return {
     lastRequestId: () => lastRequestId,
     lastModelProfile: () => lastModelProfile,
@@ -36,6 +38,8 @@ const stream = vi.hoisted(() => {
     updateSettings,
     ensureSandboxLease,
     executeSandbox,
+    getLearningBookNavigation,
+    getLearningBookPage,
     emit(event: Record<string, unknown>) { onEvent?.(event); },
     StudentSocket: class {
       constructor(event: (value: Record<string, unknown>) => void, private readonly onStatus: (status: "connected") => void) { onEvent = event; }
@@ -71,6 +75,8 @@ vi.mock("@/platform/http/api", () => ({
     deleteSession: vi.fn(), updateSettings: stream.updateSettings,
     ensureSandboxLease: stream.ensureSandboxLease,
     executeSandbox: stream.executeSandbox,
+    getLearningBookNavigation: stream.getLearningBookNavigation,
+    getLearningBookPage: stream.getLearningBookPage,
   },
 }));
 
@@ -174,6 +180,40 @@ describe("student stream rendering", () => {
     expect(screen.getByText(/当前会话使用隔离运行环境/)).toBeVisible();
     await waitFor(() => expect(stream.ensureSandboxLease).toHaveBeenCalledTimes(1));
   });
+
+  it("opens lesson Python code in the real sandbox while retaining the book tab", async () => {
+    stream.ensureSandboxLease.mockClear();
+    stream.getLearningBookNavigation.mockResolvedValue({
+      workspace_id: "default",
+      items: [{ topic_id: "topic-1", topic_name: "基础", knowledge_point_id: "point-1", title: "词法分析", sort_order: 1, revision: 1 }],
+    });
+    stream.getLearningBookPage.mockResolvedValue({
+      page: {
+        workspace_id: "default",
+        topic_id: "topic-1",
+        topic_name: "基础",
+        knowledge_point_id: "point-1",
+        title: "词法分析",
+        content_markdown: "## 示例\n\n```python\nimport torch\nprint(torch.__version__)\n```",
+        revision: 1,
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开知识教材工具" }));
+    await screen.findByText("print(torch.__version__)");
+    fireEvent.click(screen.getByRole("button", { name: "在沙箱中打开" }));
+
+    expect(screen.getByRole("tab", { name: "知识教材" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "代码沙箱" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "沙箱代码" })).toHaveValue("import torch\nprint(torch.__version__)");
+    await waitFor(() => expect(stream.ensureSandboxLease).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开工具侧栏" }));
+    expect(screen.getByRole("textbox", { name: "沙箱代码" })).toHaveValue("import torch\nprint(torch.__version__)");
+  }, 10000);
 
   it("keeps the kernel status in the environment strip when the workbench is expanded", async () => {
     render(<App />);

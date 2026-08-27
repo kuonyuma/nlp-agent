@@ -18,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.mysql import BIGINT, DATETIME
+from sqlalchemy.dialects.mysql import BIGINT, DATETIME, MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampedModel
@@ -355,6 +355,45 @@ class KnowledgePointModel(TimestampedModel, Base):
     markdown: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="enabled")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class KnowledgePageModel(TimestampedModel, Base):
+    """Long-form teacher-authored book content, separate from prompt context."""
+
+    __tablename__ = "nlp_knowledge_pages"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "knowledge_point_id",
+            name="uq_nlp_knowledge_pages_workspace_point",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_point_id: Mapped[str] = mapped_column(UUID, nullable=False)
+    draft_markdown: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False, server_default="")
+    published_markdown: Mapped[str | None] = mapped_column(MEDIUMTEXT)
+    revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+    published_revision: Mapped[int | None] = mapped_column(BIGINT(unsigned=True))
+
+
+class KnowledgeBookAssetModel(TimestampedModel, Base):
+    """Validated local image assets referenced by published book pages."""
+
+    __tablename__ = "nlp_knowledge_book_assets"
+
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), primary_key=True
+    )
+    asset_path: Mapped[str] = mapped_column(String(512, collation="utf8mb4_bin"), primary_key=True)
+    media_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    draft_content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    published_content: Mapped[bytes | None] = mapped_column(LargeBinary)
+    size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64, collation="ascii_bin"), nullable=False)
 
 
 class TeachingBlueprintModel(TimestampedModel, Base):

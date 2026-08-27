@@ -1,10 +1,10 @@
-import { BookOpenCheck, Code2, Contrast, Copy, Download, FileText, Globe2, MessageSquareText, Moon, Play, Plus, RotateCcw, Sun, Terminal, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { BookOpenCheck, BookOpenText, Code2, Contrast, Copy, Download, FileText, Globe2, MessageSquareText, Moon, Play, Plus, RotateCcw, Sun, Terminal, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { api } from "@/platform/http/api";
 import { SandboxArtifactFrame } from "./SandboxArtifactFrame";
 
-export type ToolDockTool = "files" | "learning" | "browser" | "terminal" | "sandbox";
+export type ToolDockTool = "files" | "learning" | "book" | "browser" | "terminal" | "sandbox";
 
 const tools: Array<{
   id: ToolDockTool;
@@ -16,12 +16,13 @@ const tools: Array<{
 }> = [
   { id: "files", label: "文件", buttonLabel: "打开文件工具", shortcut: "Ctrl+P", icon: FileText, description: "代码工作区将在这里打开。" },
   { id: "learning", label: "学习记录", buttonLabel: "打开学习记录工具", shortcut: "Ctrl+Alt+S", icon: BookOpenCheck, description: "查看本次对话的学习目标、概念与进度。" },
+  { id: "book", label: "知识教材", buttonLabel: "打开知识教材工具", shortcut: "Ctrl+Alt+B", icon: BookOpenText, description: "阅读教师发布的知识点教材与实操内容。" },
   { id: "browser", label: "浏览器", buttonLabel: "打开浏览器工具", shortcut: "Ctrl+T", icon: Globe2, description: "后续可在这里安全查看学习资料与网页。" },
   { id: "terminal", label: "终端", buttonLabel: "打开终端工具", shortcut: "Ctrl+~", icon: Terminal, description: "代码沙箱接入后将在这里显示终端与运行输出。" },
   { id: "sandbox", label: "代码沙箱", buttonLabel: "打开代码沙箱工具", shortcut: "Ctrl+Alt+R", icon: Code2, description: "为当前登录用户准备独立的代码运行环境。" },
 ];
 
-function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning"> }) {
+function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning" | "book" | "sandbox"> }) {
   const item = tools.find((candidate) => candidate.id === tool)!;
   const Icon = item.icon;
   return <section className="tool-dock-empty-panel">
@@ -72,12 +73,12 @@ function PythonSyntax({ source }: { source: string }) {
   return <>{fragments}</>;
 }
 
-function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: string) => void }) {
+function SandboxPhaseZeroPanel({ onExplainCode, initialSource }: { onExplainCode: (source: string) => void; initialSource?: string | null }) {
   // Keep the local in-memory preview immediately usable; a Docker response
   // without its mandatory ticket replaces this optimistic display with
   // “warming” before any privileged execution is attempted.
   const [leaseStatus, setLeaseStatus] = useState<"creating" | "ready" | "error">("ready");
-  const [source, setSource] = useState("# 在这里运行 Python 代码\n");
+  const [source, setSource] = useState(() => initialSource ?? "# 在这里运行 Python 代码\n");
   const [result, setResult] = useState("");
   const [running, setRunning] = useState(false);
   const [runtimeTicket, setRuntimeTicket] = useState<string | null>(null);
@@ -93,6 +94,12 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
   const [editorScrollLeft, setEditorScrollLeft] = useState(0);
   const outputResizeStart = useRef<{ pointerY: number; height: number } | null>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (initialSource === undefined || initialSource === null) return undefined;
+    const timer = window.setTimeout(() => setSource(initialSource), 0);
+    return () => window.clearTimeout(timer);
+  }, [initialSource]);
 
   useEffect(() => {
     let active = true;
@@ -346,7 +353,7 @@ function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }
   </nav>;
 }
 
-export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, onExplainCode, learningPanel }: {
+export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, onExplainCode, learningPanel, knowledgeBookPanel, sandboxSource }: {
   open: boolean;
   expanded: boolean;
   openTools: ToolDockTool[];
@@ -358,6 +365,8 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   onActiveToolChange: (tool: ToolDockTool | null) => void;
   onExplainCode: (source: string) => void;
   learningPanel: ReactNode;
+  knowledgeBookPanel: ReactNode;
+  sandboxSource?: string | null;
 }) {
   const [width, setWidth] = useState(() =>
   Math.min(DEFAULT_DOCK_WIDTH, getMaxDockWidth()),
@@ -422,7 +431,7 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   const showHome = openTools.length === 0;
 
   return <aside className={["tool-dock", open && "open", expanded && "expanded", resizing && "resizing"].filter(Boolean).join(" ")} aria-label="工具侧栏" style={dockStyle}>
-    {open && <div className="tool-dock-surface">
+    <div className="tool-dock-surface" hidden={!open} aria-hidden={!open}>
       {!expanded && <div className="tool-dock-resize-handle" role="separator" aria-label="调整工具侧栏宽度" aria-orientation="vertical" aria-valuemin={MIN_DOCK_WIDTH} aria-valuemax={maxWidth} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={beginResize} onKeyDown={resizeWithKeyboard} />}
       {openTools.length > 0 && <header className="tool-dock-tabs" role="tablist" aria-label="已打开的工具">
         <div ref={tabStripRef} className="tool-dock-tab-strip">
@@ -450,7 +459,11 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
             <kbd>{item.shortcut}</kbd>
           </button>;
         })}
-      </nav> : activeTool === "learning" ? learningPanel : activeTool === "sandbox" ? <SandboxPhaseZeroPanel onExplainCode={onExplainCode} /> : activeTool ? <EmptyToolPanel tool={activeTool} /> : null}
-    </div>}
+      </nav> : <div className="tool-dock-panels">
+        {openTools.map((tool) => <div key={tool} className="tool-dock-panel" hidden={tool !== activeTool} aria-hidden={tool !== activeTool}>
+          {tool === "learning" ? learningPanel : tool === "book" ? knowledgeBookPanel : tool === "sandbox" ? <SandboxPhaseZeroPanel onExplainCode={onExplainCode} initialSource={sandboxSource} /> : <EmptyToolPanel tool={tool} />}
+        </div>)}
+      </div>}
+    </div>
   </aside>;
 }

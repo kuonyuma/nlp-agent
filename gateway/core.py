@@ -696,6 +696,128 @@ class BackendGateway:
         )
         return await asyncio.to_thread(self.repository.update_teaching_catalog, workspace_id, catalog)
 
+    async def get_knowledge_page(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+    ) -> dict[str, Any] | None:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_READ_WORKSPACE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.get_knowledge_page, workspace_id, knowledge_point_id
+        )
+
+    async def list_knowledge_pages(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+    ) -> list[dict[str, Any]]:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_READ_WORKSPACE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(self.repository.list_knowledge_pages, workspace_id)
+
+    async def get_published_knowledge_page(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+    ) -> dict[str, Any] | None:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_READ_WORKSPACE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.get_published_knowledge_page,
+            workspace_id,
+            knowledge_point_id,
+        )
+
+    async def update_knowledge_page(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+        draft_markdown: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_MANAGE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.update_knowledge_page,
+            workspace_id,
+            knowledge_point_id,
+            draft_markdown,
+            expected_revision=expected_revision,
+        )
+
+    async def publish_knowledge_page(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        knowledge_point_id: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_MANAGE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.publish_knowledge_page,
+            workspace_id,
+            knowledge_point_id,
+            expected_revision=expected_revision,
+        )
+
+    async def apply_knowledge_book_import(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        pages: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_MANAGE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.apply_knowledge_book_import,
+            workspace_id,
+            pages,
+            assets,
+        )
+
+    async def get_knowledge_book_asset(
+        self,
+        principal: AuthenticatedPrincipal,
+        workspace_id: str,
+        asset_path: str,
+    ) -> dict[str, Any] | None:
+        authorization_service.require(
+            principal,
+            Permission.LEARNING_CONTENT_READ_WORKSPACE,
+            workspace_id=workspace_id,
+        )
+        return await asyncio.to_thread(
+            self.repository.get_knowledge_book_asset,
+            workspace_id,
+            asset_path,
+        )
+
     async def stream_events(
         self,
         principal: AuthenticatedPrincipal,
