@@ -183,7 +183,10 @@ jobs:
             sandbox-manager-claim-benchmark.json
             configs/sandbox_preload_matrix.json
       - name: Persist preload compatibility matrix
-        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/sandbox-phase3-develop'
+        # A matrix writeback creates a new branch head.  Never write it back
+        # again when the triggering push is the bot's own commit, otherwise
+        # PR checks keep spawning action-required runs for every benchmark.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/sandbox-phase3-develop' && github.actor != 'github-actions[bot]'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
