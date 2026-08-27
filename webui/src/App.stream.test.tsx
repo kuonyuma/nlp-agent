@@ -4,6 +4,16 @@ const stream = vi.hoisted(() => {
   let onEvent: ((event: Record<string, unknown>) => void) | undefined;
   let lastRequestId = "";
   let lastModelProfile = "";
+  const listTurns = vi.fn().mockResolvedValue({ items: [] });
+  const uploadAttachment = vi.fn(async (sessionId: string, file: File) => ({
+    file_name: "safe-image.png",
+    url: `/api/v1/uploads/${sessionId}/safe-image.png`,
+    media_type: file.type,
+    size_bytes: file.size,
+    width: 120,
+    height: 80,
+    sha256: "a".repeat(64),
+  }));
   const updateSettings = vi.fn(async (patch: Record<string, unknown>) => ({ settings: {
     locale: "zh-CN", theme: "system",content_font_size: "medium", reduce_motion: false, show_reasoning: false,
     stream_render_interval_ms: 30, model_profile: "deepseek", ...patch,
@@ -11,6 +21,8 @@ const stream = vi.hoisted(() => {
   return {
     lastRequestId: () => lastRequestId,
     lastModelProfile: () => lastModelProfile,
+    listTurns,
+    uploadAttachment,
     updateSettings,
     emit(event: Record<string, unknown>) { onEvent?.(event); },
     StudentSocket: class {
@@ -28,6 +40,7 @@ const stream = vi.hoisted(() => {
 vi.mock("@/platform/realtime/client", () => ({ StudentSocket: stream.StudentSocket }));
 vi.mock("@/platform/http/api", () => ({
   ensureAuth: vi.fn().mockResolvedValue({}),
+  uploadAttachment: stream.uploadAttachment,
   api: {
     listSessions: vi.fn().mockResolvedValue({ items: [] }),
     getSettings: vi.fn().mockResolvedValue({
@@ -42,7 +55,7 @@ vi.mock("@/platform/http/api", () => ({
     }),
     getLearningCatalog: vi.fn().mockResolvedValue({ catalog: { topics: [] } }),
     createSession: vi.fn().mockResolvedValue({ session_id: "session_1", user_id: "user", workspace_id: "default", channel: "web" }),
-    listTurns: vi.fn().mockResolvedValue({ items: [] }),
+    listTurns: stream.listTurns,
     deleteSession: vi.fn(), updateSettings: stream.updateSettings,
   },
 }));
@@ -83,6 +96,29 @@ describe("student stream rendering", () => {
     fireEvent.change(input, { target: { value: "解释 Qwen" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(stream.lastModelProfile()).toBe("qwen"));
+  });
+
+  it("creates the deferred session when the first action is an image upload", async () => {
+    stream.listTurns.mockClear();
+    stream.uploadAttachment.mockClear();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:first-image-preview"),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    render(<App />);
+    const uploadButton = await screen.findByRole("button", { name: "上传附件" });
+    const file = new File(["image"], "first-image.png", { type: "image/png" });
+
+    expect(uploadButton).toBeEnabled();
+    fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [file] } });
+
+    await waitFor(() => expect(stream.uploadAttachment).toHaveBeenCalledWith("session_1", file));
+    expect(screen.getByRole("img", { name: "first-image.png" })).toBeVisible();
+    expect(stream.listTurns).not.toHaveBeenCalled();
   });
 
   it("keeps every available tool as a closable tab in the right workbench dock", async () => {
