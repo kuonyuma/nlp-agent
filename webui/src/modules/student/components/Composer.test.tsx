@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { uploadAttachment } from "@/platform/http/api";
 import { Composer } from "./Composer";
@@ -125,7 +125,7 @@ describe("Composer", () => {
       height: 80,
       sha256: "a".repeat(64),
     });
-    const { container } = render(
+    const { container, rerender } = render(
       <Composer
         disabled={false}
         running={false}
@@ -143,6 +143,16 @@ describe("Composer", () => {
     await waitFor(() => expect(uploadAttachment).toHaveBeenCalledWith("session-new", file));
     expect(onEnsureSession).toHaveBeenCalledOnce();
     expect(screen.getByRole("img", { name: "first-image.png" })).toBeVisible();
+    rerender(
+      <Composer
+        disabled={false}
+        running={false}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        sessionId="session-new"
+        onEnsureSession={onEnsureSession}
+      />
+    );
     expect(screen.getByLabelText("发送")).toBeEnabled();
   });
 
@@ -189,9 +199,12 @@ describe("Composer", () => {
     const onEnsureSession = vi.fn().mockResolvedValue("session-new");
     render(<Composer disabled={false} running onSend={vi.fn()} onCancel={vi.fn()} sessionId={null} onEnsureSession={onEnsureSession} />);
     const image = new File(["image"], "running.png", { type: "image/png" });
+    const paste = createPasteEvent([clipboardFileItem(image)]);
 
-    fireEvent(screen.getByLabelText("学习问题"), createPasteEvent([clipboardFileItem(image)]));
+    fireEvent(screen.getByLabelText("学习问题"), paste);
 
+    expect(paste.defaultPrevented).toBe(true);
+    expect(screen.getByRole("alert")).toHaveTextContent("当前正在生成，暂不能上传图片");
     expect(uploadAttachment).not.toHaveBeenCalled();
     expect(onEnsureSession).not.toHaveBeenCalled();
     expect(URL.createObjectURL).not.toHaveBeenCalled();
@@ -200,12 +213,85 @@ describe("Composer", () => {
   it("does not let paste bypass an unavailable attachment upload", () => {
     render(<Composer disabled={false} running={false} onSend={vi.fn()} onCancel={vi.fn()} sessionId={null} />);
     const image = new File(["image"], "signed-out.png", { type: "image/png" });
+    const paste = createPasteEvent([clipboardFileItem(image)]);
 
-    fireEvent(screen.getByLabelText("学习问题"), createPasteEvent([clipboardFileItem(image)]));
+    fireEvent(screen.getByLabelText("学习问题"), paste);
 
+    expect(paste.defaultPrevented).toBe(true);
+    expect(screen.getByRole("alert")).toHaveTextContent("请先登录后再上传图片");
     expect(screen.getByRole("button", { name: "上传附件" })).toBeDisabled();
     expect(uploadAttachment).not.toHaveBeenCalled();
     expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("clears an in-flight attachment when the composer conversation scope changes", async () => {
+    let resolveUpload!: (response: {
+      file_name: string;
+      url: string;
+      media_type: string;
+      size_bytes: number;
+      width: number;
+      height: number;
+      sha256: string;
+    }) => void;
+    vi.mocked(uploadAttachment).mockReturnValue(new Promise((resolve) => { resolveUpload = resolve; }));
+    const onSend = vi.fn();
+    const composer = (scope: number, sessionId: string) => (
+      <Composer key={scope} disabled={false} running={false} onSend={onSend} onCancel={vi.fn()} sessionId={sessionId} />
+    );
+    const { container, rerender } = render(composer(0, "session-a"));
+    const file = new File(["old-image"], "old-session.png", { type: "image/png" });
+
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    expect(screen.getByRole("img", { name: "old-session.png" })).toBeVisible();
+
+    rerender(composer(1, "session-b"));
+
+    expect(screen.queryByRole("img", { name: "old-session.png" })).not.toBeInTheDocument();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:attachment-preview");
+    fireEvent.change(screen.getByLabelText("学习问题"), { target: { value: "新会话问题" } });
+    fireEvent.click(screen.getByLabelText("发送"));
+    expect(onSend).toHaveBeenCalledWith("新会话问题");
+
+    await act(async () => {
+      resolveUpload({
+        file_name: "old-safe.png",
+        url: "/api/v1/uploads/session-a/old-safe.png",
+        media_type: "image/png",
+        size_bytes: 100,
+        width: 120,
+        height: 80,
+        sha256: "a".repeat(64),
+      });
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send an attachment whose owner session no longer matches", async () => {
+    const onSend = vi.fn();
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      file_name: "session-a.png",
+      url: "/api/v1/uploads/session-a/session-a.png",
+      media_type: "image/png",
+      size_bytes: 100,
+      width: 120,
+      height: 80,
+      sha256: "a".repeat(64),
+    });
+    const { container, rerender } = render(
+      <Composer disabled={false} running={false} onSend={onSend} onCancel={vi.fn()} sessionId="session-a" />
+    );
+    const file = new File(["image"], "session-a.png", { type: "image/png" });
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByLabelText("发送")).toBeEnabled());
+
+    rerender(<Composer disabled={false} running={false} onSend={onSend} onCancel={vi.fn()} sessionId="session-b" />);
+    fireEvent.change(screen.getByLabelText("学习问题"), { target: { value: "不能携带旧附件" } });
+
+    expect(screen.getByLabelText("发送")).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("发送"));
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it("places attachment upload before branding and learning settings before send", () => {

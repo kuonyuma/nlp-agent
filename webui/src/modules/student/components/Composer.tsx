@@ -1,5 +1,5 @@
 import { ArrowUp, GraduationCap, Plus, RotateCcw, Square, X } from "lucide-react";
-import { useState, useRef, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useState, useRef, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 
 import { uploadAttachment } from "@/platform/http/api";
 import type { ChatAttachment } from "@/shared/types";
@@ -10,6 +10,7 @@ const prompts = ["用简单语言解释", "举一个实际例子", "逐步推导
 interface ComposerAttachment extends ChatAttachment {
   clientId: string;
   sourceFile: File;
+  ownerSessionId: string | null;
 }
 
 function pastedImageName(file: File, index: number): string {
@@ -41,10 +42,26 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
 }) {
   const [content, setContent] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [pasteNotice, setPasteNotice] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const attachmentsReady = attachments.every((attachment) => attachment.status === "ready");
-  const readyAttachments = attachments.filter((attachment) => attachment.status === "ready");
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
+  const attachmentsReady = attachments.every((attachment) => attachment.status === "ready" && attachment.ownerSessionId === sessionId);
+  const readyAttachments = attachments.filter((attachment) => attachment.status === "ready" && attachment.ownerSessionId === sessionId);
   const canUploadAttachments = !disabled && !running && Boolean(sessionId || onEnsureSession);
+
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  useEffect(() => () => {
+    attachmentsRef.current.forEach((attachment) => {
+      if (attachment.url.startsWith("blob:") && typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(attachment.url);
+      }
+    });
+  }, []);
+  useEffect(() => {
+    if (canUploadAttachments) setPasteNotice("");
+  }, [canUploadAttachments]);
 
   const sendValue = (value: string) => {
     const trimmed = value.trim();
@@ -75,8 +92,11 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
       ? { ...item, status: "uploading", errorMessage: undefined }
       : item));
     try {
-      const uploadSessionId = sessionId ?? await onEnsureSession?.();
+      const uploadSessionId = attachment.ownerSessionId ?? sessionId ?? await onEnsureSession?.();
       if (!uploadSessionId) throw new Error("A conversation is required before uploading an attachment");
+      setAttachments((current) => current.map((item) => item.clientId === attachment.clientId
+        ? { ...item, ownerSessionId: uploadSessionId }
+        : item));
       const response = await uploadAttachment(uploadSessionId, attachment.sourceFile);
       if (attachment.url.startsWith("blob:") && typeof URL.revokeObjectURL === "function") {
         URL.revokeObjectURL(attachment.url);
@@ -111,6 +131,7 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
     const newAttachment: ComposerAttachment = {
       clientId: createUuid(),
       sourceFile: file,
+      ownerSessionId: sessionId ?? null,
       fileName: "",
       displayName,
       url: URL.createObjectURL(file),
@@ -121,6 +142,7 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
     };
 
     setAttachments((prev) => [...prev, newAttachment]);
+    setPasteNotice("");
     void upload(newAttachment);
   };
   const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => {
@@ -142,7 +164,14 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
     // An image clipboard can also expose text/html or text/plain fallbacks.
     // Treat the image as the user's intent and avoid inserting those fallbacks.
     event.preventDefault();
-    if (!canUploadAttachments) return;
+    if (!canUploadAttachments) {
+      setPasteNotice(running
+        ? "当前正在生成，暂不能上传图片"
+        : disabled
+          ? "当前处于离线状态，暂不能上传图片"
+          : "请先登录后再上传图片");
+      return;
+    }
     images.forEach((file, index) => addAndUploadFile(file, pastedImageName(file, index)));
   };
 
@@ -161,6 +190,7 @@ export function Composer({ sessionId, disabled, running, centered = false, onSen
           ))}
         </div>
       )}
+      {pasteNotice && <p className="composer-upload-notice" role="alert">{pasteNotice}</p>}
       <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={keyDown} onPaste={handlePaste} disabled={disabled} rows={centered ? 3 : 1} placeholder="问一个 NLP 问题……" aria-label="学习问题" />
       <div className="composer-toolbar">
         <input type="file" ref={fileInputRef} hidden accept="image/jpeg,image/png,image/webp" onChange={handleFileSelect} />
