@@ -221,12 +221,14 @@ class DockerRuntimeAdapter:
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        assert process.stdin is not None
-        process.stdin.write(json.dumps({"source": source}).encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
+        payload = json.dumps({"source": source}).encode("utf-8")
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds + 3)
+            # Let asyncio own the stdin lifecycle.  Manually closing the pipe
+            # before communicate() can race the subprocess transport and leave
+            # the runtime reading an empty stream (JSON decode failure).
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=payload), timeout=timeout_seconds + 3
+            )
         except TimeoutError as error:
             process.kill()
             await process.communicate()

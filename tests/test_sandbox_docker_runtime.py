@@ -134,17 +134,11 @@ def test_scratch_timeout_force_removes_the_named_container() -> None:
     adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image="registry.example/nova@sha256:" + "3" * 64))
 
     async def exercise() -> tuple[tuple[object, ...], ...]:
-        with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn, patch(
-            "server.sandbox.docker_runtime.asyncio.wait_for",
-            new=AsyncMock(side_effect=[TimeoutError(), (b"", b"")]),
-        ):
+        with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn:
             run_process = AsyncMock()
             cleanup_process = AsyncMock()
-            run_process.stdin = MagicMock()
-            run_process.stdin.drain = AsyncMock()
             run_process.kill = MagicMock()
-            cleanup_process.stdin = None
-            run_process.communicate.return_value = (b"", b"")
+            run_process.communicate = AsyncMock(side_effect=[TimeoutError(), (b"", b"")])
             cleanup_process.communicate.return_value = (b"", b"")
             spawn.side_effect = [run_process, cleanup_process]
             with pytest.raises(TimeoutError, match="scratch execution timed out"):
@@ -155,3 +149,22 @@ def test_scratch_timeout_force_removes_the_named_container() -> None:
     assert len(commands) == 2
     assert commands[1][:3] == ("docker", "rm", "--force")
     assert commands[1][3].startswith("nova-scratch-")
+
+
+def test_scratch_sends_json_request_to_the_container_stdin() -> None:
+    from server.sandbox.docker_runtime import DockerRuntimeAdapter, DockerRuntimeConfig
+
+    adapter = DockerRuntimeAdapter(DockerRuntimeConfig(image="registry.example/nova@sha256:" + "4" * 64))
+
+    async def exercise() -> object:
+        with patch("server.sandbox.docker_runtime.asyncio.create_subprocess_exec") as spawn:
+            process = AsyncMock()
+            process.returncode = 0
+            process.communicate.return_value = (b'{"status":"completed"}', b"")
+            spawn.return_value = process
+            await adapter.run_scratch(source="print(1)", timeout_seconds=1)
+            return process.communicate.await_args
+
+    communicate_call = asyncio.run(exercise())
+    assert communicate_call is not None
+    assert communicate_call.kwargs["input"] == b'{"source": "print(1)"}'
