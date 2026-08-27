@@ -6,6 +6,7 @@ The HTTP application uses leases; a separately deployed Manager owns this class.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -35,6 +36,72 @@ def refill_deficit(*, target: int, ready_count: int, creating_count: int) -> int
 def ready_state_after_kernel_check(current_state: str) -> str:
     """Both L0 and cached-image L1 creation paths become claimable after health."""
     return RuntimeState.READY_UNBOUND if current_state in {"creating", "created"} else current_state
+
+
+KERNEL_READY_TIMEOUT_SECONDS = 30.0
+KERNEL_READY_POLL_INTERVAL_SECONDS = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class KernelReadinessResult:
+    """Outcome of the bounded guest health-probe window."""
+
+    ready: bool
+    failure_reason: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.ready
+
+
+async def wait_for_kernel_ready(
+    adapter: SandboxRuntimeAdapter,
+    external_runtime_id: str,
+    *,
+    timeout_seconds: float = KERNEL_READY_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = KERNEL_READY_POLL_INTERVAL_SECONDS,
+) -> KernelReadinessResult:
+    """Poll the guest health protocol while a newly started runtime boots.
+
+    ``docker start`` only means that the container process has been launched;
+    the runtime's Python kernel can take several seconds to initialize.  A
+    transient non-zero health probe (or a short-lived Docker exec error) is
+    therefore a not-ready result, not a reason to destroy the slot immediately.
+    The deadline bounds the total wait so a genuinely broken image still gets
+    failed and reconciled.
+    """
+    timeout = max(0.0, float(timeout_seconds))
+    if timeout == 0.0:
+        return KernelReadinessResult(False, "kernel readiness timeout after 0 seconds")
+    poll_interval = max(0.0, float(poll_interval_seconds))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    attempts = 0
+    last_error: Exception | None = None
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0.0:
+            break
+        attempts += 1
+        try:
+            if await asyncio.wait_for(
+                adapter.kernel_ready(external_runtime_id), timeout=remaining
+            ):
+                return KernelReadinessResult(True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # During guest boot Docker may report a failed exec or a missing
+            # interpreter.  Keep probing until the bounded startup deadline.
+            last_error = error
+        remaining = deadline - loop.time()
+        if remaining <= 0.0:
+            break
+        await asyncio.sleep(min(poll_interval, remaining))
+    if last_error is not None:
+        reason = f"{type(last_error).__name__}: {last_error}".strip()
+    else:
+        reason = f"kernel health probe timed out after {timeout:.1f}s ({attempts} attempts)"
+    return KernelReadinessResult(False, reason[:500])
 
 
 def auth_lifecycle_allows_execution(
@@ -722,10 +789,18 @@ class WarmPoolManager:
                 # L0 fallback: Docker resolves the pinned digest, then this
                 # slot proceeds through the same L3 readiness gate.
                 external_id = await self._docker.create_ready(name=name, claim_nonce="")
-            if not await self._docker.kernel_ready(external_id):
+            readiness = await wait_for_kernel_ready(self._docker, external_id)
+            if not readiness:
+                self._trace(
+                    "sandbox.manager.kernel.not.ready",
+                    runtime_id=runtime_id,
+                    failure_reason=readiness.failure_reason,
+                )
                 self._faults.fail_if_configured("docker.destroy")
                 await self._docker.destroy(external_id)
-                raise RuntimeError("new sandbox kernel did not become ready")
+                raise RuntimeError(
+                    readiness.failure_reason or "new sandbox kernel did not become ready"
+                )
         except Exception as error:
             async with self._session_factory.begin() as session:
                 runtime = await session.get(SandboxRuntimeInstanceModel, runtime_id, with_for_update=True)
