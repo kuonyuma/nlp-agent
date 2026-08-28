@@ -1,7 +1,7 @@
 """store validated knowledge-book image assets
 
-Revision ID: 20260825_26
-Revises: 20260825_25
+Revision ID: 20260827_31_book_assets
+Revises: 20260827_30_book_pages
 """
 
 from alembic import op
@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.mysql import BIGINT, DATETIME, LONGBLOB
 
 
-revision = "20260825_26"
-down_revision = "20260825_25"
+revision = "20260827_31_book_assets"
+down_revision = "20260827_30_book_pages"
 branch_labels = None
 depends_on = None
 

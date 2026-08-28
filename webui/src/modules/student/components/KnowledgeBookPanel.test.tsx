@@ -52,6 +52,17 @@ describe("KnowledgeBookPanel", () => {
     expect(api.getLearningBookPage).toHaveBeenCalledWith("workspace-1", "point-1");
   });
 
+  it("lets Markdown own the article title without showing teacher-only metadata", async () => {
+    vi.mocked(api.getLearningBookPage).mockResolvedValue({
+      page: { ...page, content_markdown: "# 词法分析\n\n## 核心概念\n\n正文" },
+    });
+    render(<KnowledgeBookPanel workspaceId="workspace-1" />);
+
+    expect(await screen.findByRole("heading", { name: "词法分析" })).toBeInTheDocument();
+    expect(screen.queryByText("教师教材 · 第 1 节")).not.toBeInTheDocument();
+    expect(screen.queryByText("基础", { selector: "header p" })).not.toBeInTheDocument();
+  });
+
   it("shows an explicit empty state when the teacher has not published a page", async () => {
     vi.mocked(api.getLearningBookNavigation).mockResolvedValue({ workspace_id: "workspace-1", items: [] });
 

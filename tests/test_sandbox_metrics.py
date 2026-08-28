@@ -33,3 +33,16 @@ def test_redis_metrics_store_keeps_bounded_history() -> None:
     history, latest = asyncio.run(exercise())
     assert [item["ready"] for item in history] == [1, 2]
     assert latest == {"timestamp": 2.0, "ready": 2}
+
+
+def test_redis_metrics_store_can_read_history_without_recording_a_sample() -> None:
+    from server.sandbox.metrics import RedisSandboxMetricsStore
+
+    class ReadOnlyFakeRedis:
+        async def zrange(self, _key, start, end):
+            assert (start, end) == (-60, -1)
+            return ['{"timestamp":1.0,"ready":1}']
+
+    history = asyncio.run(RedisSandboxMetricsStore(ReadOnlyFakeRedis()).recent())
+
+    assert history == [{"timestamp": 1.0, "ready": 1}]

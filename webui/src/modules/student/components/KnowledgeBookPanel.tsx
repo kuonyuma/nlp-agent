@@ -142,7 +142,6 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   const contentRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
   const selectionActionRef = useRef<HTMLButtonElement>(null);
-  const pageTitleRef = useRef<HTMLHeadingElement>(null);
   const leftDrawerRef = useRef<HTMLElement>(null);
   const rightDrawerRef = useRef<HTMLElement>(null);
   const leftToggleRef = useRef<HTMLButtonElement>(null);
@@ -155,6 +154,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
   const orderedNavigation = useMemo(() => orderNavigation(navigation), [navigation]);
   const visiblePage = page?.knowledge_point_id === selectedId ? page : null;
   const headingIndex = useMemo(() => indexMarkdownHeadings(visiblePage?.content_markdown ?? ""), [visiblePage?.content_markdown]);
+  const markdownHasTitle = useMemo(() => /^(?: {0,3})#(?!#)[ \t]+.+/m.test(visiblePage?.content_markdown ?? ""), [visiblePage?.content_markdown]);
   const filteredTopicGroups = useMemo(() => {
     const query = navigationQuery.trim().toLocaleLowerCase();
     if (!query) return topicGroups;
@@ -269,7 +269,7 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
       const root = contentRef.current;
       const savedScrollTop = scrollPositionsRef.current[visiblePage.knowledge_point_id] ?? 0;
       if (root && savedScrollTop > 0) root.scrollTo?.({ top: savedScrollTop, behavior: "auto" });
-      pageTitleRef.current?.focus({ preventScroll: true });
+      articleRef.current?.focus({ preventScroll: true });
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadingPage, visiblePage]);
@@ -406,8 +406,8 @@ export function KnowledgeBookPanel({ workspaceId, onAskNova, onOpenInSandbox }: 
       <main className="knowledge-book-main">
         {error && <div className="knowledge-book-error" role="alert"><span>{error}</span><button type="button" onClick={() => selectedId ? setPageReloadToken((value) => value + 1) : void loadNavigation()}>重试</button></div>}
         <div className="knowledge-book-page-scroll" ref={contentRef} onScroll={handlePageScroll}>
-          {loadingPage ? <div className="knowledge-book-state"><span className="spin">⟳</span><p>正在打开知识点……</p></div> : visiblePage ? <article ref={articleRef} className="knowledge-book-article" onPointerUp={updateSelectionPrompt} onKeyUp={updateSelectionPrompt}>
-            <header><p>{visiblePage.topic_name}</p><h1 ref={pageTitleRef} tabIndex={-1}>{visiblePage.title}</h1><small>教师教材 · 第 {selectedIndex + 1} 节</small></header>
+          {loadingPage ? <div className="knowledge-book-state"><span className="spin">⟳</span><p>正在打开知识点……</p></div> : visiblePage ? <article ref={articleRef} tabIndex={-1} className="knowledge-book-article" onPointerUp={updateSelectionPrompt} onKeyUp={updateSelectionPrompt}>
+            {!markdownHasTitle && <header className="knowledge-book-fallback-title"><h1>{visiblePage.title}</h1></header>}
             <MarkdownContent headingIds={headingIndex.headingIds} codeActions={{ onAskNova: onAskNova ? (code, language) => onAskNova(buildCodePrompt(visiblePage, code, language, headingIndex.headings.find((item) => item.id === activeHeadingId)?.text)) : undefined, onOpenInSandbox }}>{visiblePage.content_markdown}</MarkdownContent>
             <footer className="knowledge-book-page-nav">
               <button type="button" disabled={selectedIndex <= 0} onClick={() => selectKnowledgePoint(orderedNavigation[selectedIndex - 1].knowledge_point_id)}>上一节</button>

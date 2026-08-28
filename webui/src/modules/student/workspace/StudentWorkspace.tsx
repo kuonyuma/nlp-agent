@@ -14,7 +14,7 @@ import { MessageList } from "@/modules/student/components/MessageList";
 import { SettingsDialog } from "@/modules/student/components/SettingsDialog";
 import { SchoolLogo } from "@/shared/ui/SchoolLogo";
 import { Sidebar, SidebarToggle } from "@/modules/student/components/Sidebar";
-import { ToolDock, type ToolDockTool } from "@/modules/student/components/ToolDock";
+import { ToolDock, type ToolDockTabDropPosition, type ToolDockTool } from "@/modules/student/components/ToolDock";
 import { useStudentWorkspace } from "@/modules/student/workspace/public";
 import { useSessionScrollRestoration } from "@/modules/student/workspace/hooks/useSessionScrollRestoration";
 import type { CourseTopic, TeacherCatalog } from "@/shared/types";
@@ -75,9 +75,18 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
   const { scrollRef, onScroll } = useSessionScrollRestoration(workspace.activeSessionId, workspace.messages, workspace.loadingMessages);
   const setCollapsed = (collapsed: boolean) => { setSidebarCollapsed(collapsed); };
   const openTool = (tool: ToolDockTool) => {
-    if (openTools.length > 0 && !openTools.includes(tool)) setToolDockExpanded(true);
     setOpenTools((current) => current.includes(tool) ? current : [...current, tool]);
     setActiveTool(tool);
+  };
+  const reorderTools = (draggedTool: ToolDockTool, targetTool: ToolDockTool, position: ToolDockTabDropPosition) => {
+    setOpenTools((current) => {
+      const draggedIndex = current.indexOf(draggedTool);
+      const targetIndex = current.indexOf(targetTool);
+      if (draggedIndex < 0 || targetIndex < 0 || draggedTool === targetTool) return current;
+      const next = current.filter((tool) => tool !== draggedTool);
+      next.splice(next.indexOf(targetTool) + (position === "after" ? 1 : 0), 0, draggedTool);
+      return next;
+    });
   };
   const openCodeInSandbox = useCallback((code: string, language: string) => {
     if (!/^(?:python|pytorch|py)$/i.test(language)) return;
@@ -85,9 +94,6 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
     setSandboxSource(code);
     setToolDockOpen(true);
     setToolMenuOpen(false);
-    // Code and its explanation are a co-reading workflow: give both panels
-    // the full workbench width as soon as a lesson opens code in the sandbox.
-    setToolDockExpanded(true);
     setOpenTools((current) => current.includes("sandbox") ? current : [...current, "sandbox"]);
     setActiveTool("sandbox");
   }, [onOpenInSandbox]);
@@ -97,7 +103,6 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
     if (activeTool === tool) setActiveTool(next[next.length - 1] ?? null);
   };
   const toggleToolDock = () => {
-    if (!toolDockOpen && openTools.length > 1) setToolDockExpanded(true);
     setToolDockOpen((current) => {
       if (current) {
         setToolDockExpanded(false);
@@ -176,6 +181,7 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
       toolMenuOpen={toolMenuOpen}
       onToolMenuOpenChange={setToolMenuOpen}
       onOpenTool={openTool}
+      onReorderTools={reorderTools}
       onCloseTool={closeTool}
       onActiveToolChange={setActiveTool}
       onExplainCode={(source) => {

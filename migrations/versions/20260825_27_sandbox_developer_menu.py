@@ -3,7 +3,8 @@
 from alembic import context, op
 import sqlalchemy as sa
 
-from server.rbac.catalog import MENU_CATALOG, menu_id, menu_row, role_id
+from core.rbac import Permission
+from server.rbac.catalog import menu_id, menu_row, role_id
 
 
 revision = "20260825_27"
@@ -12,8 +13,20 @@ branch_labels = None
 depends_on = None
 
 
+# This migration must remain reproducible after the menu is moved to the
+# monitor plane.  Do not read a mutable current catalog for historical data.
+LEGACY_SANDBOX_MENU_ITEM = (
+    "developer.sandbox",
+    "代码沙箱",
+    "/developer/sandbox",
+    "sandbox",
+    Permission.SYSTEM_RUNTIME_MONITOR,
+    95,
+)
+
+
 def upgrade() -> None:
-    item = next(item for item in MENU_CATALOG if item[0] == "developer.sandbox")
+    item = LEGACY_SANDBOX_MENU_ITEM
     # ``bulk_insert`` only emits columns declared on the lightweight table
     # object.  Keep this projection in sync with ``MenuModel``; declaring just
     # ``id`` silently dropped all required menu fields and failed on MySQL's

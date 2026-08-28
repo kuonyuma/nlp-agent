@@ -374,7 +374,9 @@ class KnowledgePageModel(TimestampedModel, Base):
         UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), nullable=False
     )
     knowledge_point_id: Mapped[str] = mapped_column(UUID, nullable=False)
-    draft_markdown: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False, server_default="")
+    # MySQL 8.4 rejects defaults on TEXT/MEDIUMTEXT columns; repositories
+    # provide the empty draft explicitly when creating a page.
+    draft_markdown: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
     published_markdown: Mapped[str | None] = mapped_column(MEDIUMTEXT)
     revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
     published_revision: Mapped[int | None] = mapped_column(BIGINT(unsigned=True))

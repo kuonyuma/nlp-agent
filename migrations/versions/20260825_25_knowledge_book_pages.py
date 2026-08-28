@@ -1,6 +1,6 @@
 """store long-form knowledge book drafts and published pages
 
-Revision ID: 20260825_25
+Revision ID: 20260827_30_book_pages
 Revises: 20260820_24
 """
 
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.mysql import BIGINT, DATETIME, MEDIUMTEXT
 
 
-revision = "20260825_25"
+revision = "20260827_30_book_pages"
 down_revision = "20260820_24"
 branch_labels = None
 depends_on = None
@@ -29,7 +29,9 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("knowledge_point_id", UUID, nullable=False),
-        sa.Column("draft_markdown", MEDIUMTEXT(), nullable=False, server_default=""),
+        # MySQL 8.4 rejects defaults on TEXT/MEDIUMTEXT columns.  The
+        # repository always supplies an explicit empty string for a new draft.
+        sa.Column("draft_markdown", MEDIUMTEXT(), nullable=False),
         sa.Column("published_markdown", MEDIUMTEXT(), nullable=True),
         sa.Column("revision", BIGINT(unsigned=True), nullable=False, server_default="0"),
         sa.Column("published_revision", BIGINT(unsigned=True), nullable=True),

@@ -16,7 +16,7 @@ const LazyCode = lazy(async () => {
   ]);
   return {
     default({ language, code, dark }: { language: string; code: string; dark: boolean }) {
-      return <SyntaxHighlighter language={language} style={dark ? oneDark : oneLight} customStyle={{ margin: 0, borderRadius: "0 0 12px 12px", fontSize: 13 }}>{code}</SyntaxHighlighter>;
+      return <SyntaxHighlighter language={language} style={dark ? oneDark : oneLight} customStyle={{ margin: 0, borderRadius: 0, fontSize: 14, background: dark ? "#202124" : "#f3f4f6" }}>{code}</SyntaxHighlighter>;
     },
   };
 });
@@ -132,8 +132,9 @@ function isSameOriginMarkdownLink(href: string | undefined): href is string {
   }
 }
 
-function isSafeMarkdownImage(src: string | undefined): src is string {
-  if (!src || src.startsWith("#") || /^data:/i.test(src)) return false;
+function isSafeMarkdownImage(src: string | undefined, allowDataImages = false): src is string {
+  if (!src || src.startsWith("#")) return false;
+  if (/^data:/i.test(src)) return allowDataImages && /^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(src);
   try {
     return new URL(src, window.location.href).origin === window.location.origin;
   } catch {
@@ -146,7 +147,7 @@ export function stripInternalChatMetadata(content: string): string {
   return content.replace(/\s*<!--\s*guided-result\s*:\s*(?:\{[\s\S]*?\}\s*-->|[\s\S]*$)/gi, "").trimEnd();
 }
 
-export function MarkdownContent({ children, streaming = false, headingIds, codeActions }: { children: string; streaming?: boolean; headingIds?: string[]; codeActions?: MarkdownCodeActions }) {
+export function MarkdownContent({ children, streaming = false, headingIds, codeActions, allowDataImages = false }: { children: string; streaming?: boolean; headingIds?: string[]; codeActions?: MarkdownCodeActions; allowDataImages?: boolean }) {
   const dark = document.documentElement.classList.contains("dark");
   let headingIndex = 0;
   const nextHeadingId = () => headingIds?.[headingIndex++];
@@ -155,6 +156,7 @@ export function MarkdownContent({ children, streaming = false, headingIds, codeA
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
         rehypePlugins={[rehypeKatex]}
+        urlTransform={(url) => url}
         components={{
           h1: ({ children: value, ...props }) => <h1 {...props} id={nextHeadingId()}>{value}</h1>,
           h2: ({ children: value }) => {
@@ -173,7 +175,7 @@ export function MarkdownContent({ children, streaming = false, headingIds, codeA
           a: ({ children: value, href, ...props }) => isSameOriginMarkdownLink(href)
             ? <a {...props} href={href}>{value}</a>
             : <span className="external-link-removed">{value}</span>,
-          img: ({ src, alt, ...props }) => isSafeMarkdownImage(src)
+          img: ({ src, alt, ...props }) => isSafeMarkdownImage(src, allowDataImages)
             ? <img {...props} src={src} alt={alt ?? ""} />
             : <span className="external-link-removed">{alt || "图片资源不可用"}</span>,
         }}
