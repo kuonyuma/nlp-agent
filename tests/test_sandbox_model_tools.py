@@ -236,6 +236,64 @@ async def test_failed_model_result_emits_failed_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_started_event_failure_closes_execution_as_failed(monkeypatch) -> None:
+    """A Redis outage while opening an execution must not leave it running."""
+
+    from server.sandbox import model_tools
+    from server.sandbox.model_tools import SandboxModelToolService
+
+    class FailingEventStore:
+        async def append(self, _execution_id, *, event_type, **_kwargs):
+            if event_type == "execution.started":
+                raise ConnectionError("redis unavailable")
+            return {"event_id": event_type, "seq": 1, "type": event_type, "payload": {}}
+
+    monkeypatch.setattr(model_tools, "default_sandbox_event_store", FailingEventStore())
+    service = SandboxModelToolService(mode="inmemory")
+
+    result = await service.run_scratch(source="print(1)", config=_config())
+
+    assert result["ok"] is False
+    assert result["code"] == "sandbox_event_failed"
+    assert service._local_executions
+    execution = next(iter(service._local_executions.values()))
+    assert execution["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_failure_does_not_report_completed(monkeypatch) -> None:
+    """A terminal event delivery failure must converge the audit row to failed."""
+
+    from server.sandbox import model_tools
+    from server.sandbox.model_tools import SandboxModelToolService
+
+    class TerminalEventStore:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def append(self, _execution_id, *, event_type, **_kwargs):
+            if event_type == "execution.completed":
+                raise ConnectionError("redis unavailable")
+            self.events.append(event_type)
+            return {"event_id": event_type, "seq": len(self.events), "type": event_type, "payload": {}}
+
+        async def replay(self, *_args, **_kwargs):
+            return [{"type": item} for item in self.events if item != "execution.completed"]
+
+    store = TerminalEventStore()
+    monkeypatch.setattr(model_tools, "default_sandbox_event_store", store)
+    service = SandboxModelToolService(mode="inmemory")
+
+    result = await service.run_scratch(source="print(1)", config=_config())
+
+    assert result["ok"] is False
+    assert result["code"] == "sandbox_event_failed"
+    execution = next(iter(service._local_executions.values()))
+    assert execution["status"] == "failed"
+    assert "execution.completed" not in store.events
+
+
+@pytest.mark.asyncio
 async def test_active_kernel_requires_explicit_confirmation() -> None:
     from server.sandbox.model_tools import SandboxModelToolService
 
