@@ -55,6 +55,22 @@ export interface UploadResponse {
   sha256: string;
 }
 
+export interface SandboxRuntimeProfile {
+  id: string;
+  runtime: string;
+  isolation: string;
+  python_version: string;
+  kernel_version: string;
+  pytorch_version: string;
+  pytorch_device: string;
+}
+
+export interface SandboxRuntimeUsage {
+  cpu_percent: number | null;
+  memory_percent: number | null;
+  sampled_at: string | null;
+}
+
 export async function uploadAttachment(
   sessionId: string,
   file: File,
@@ -88,9 +104,11 @@ export const api = {
       environment: { id: string; status: string; generation: number; profile: string } | null;
       lease: { id: string; state: string; generation: number; expires_at: string } | null;
       runtime: { id: string; generation: number; ticket: string | null } | { kind: "inmemory"; ticket: null } | null;
+      runtime_profile: SandboxRuntimeProfile;
       pool_status?: string;
     }>("/sandbox/lease", { method: "POST" }),
-  executeSandbox: (source: string, ticket: string | null) => request<{ status?: string; stdout: string; stderr: string; ticket?: string; execution_id?: string; artifacts?: Array<{ id: string; mime_type: string }> }>("/sandbox/execute", { method: "POST", body: JSON.stringify({ source, ticket }) }),
+  executeSandbox: (source: string, ticket: string | null) => request<{ status?: string; stdout: string; stderr: string; ticket?: string; execution_id?: string; execution_metrics?: { duration_ms: number; output_bytes: number }; artifacts?: Array<{ id: string; mime_type: string }> }>("/sandbox/execute", { method: "POST", body: JSON.stringify({ source, ticket }) }),
+  getSandboxUsage: (ticket: string | null) => request<SandboxRuntimeUsage>("/sandbox/usage", { method: "POST", body: JSON.stringify({ ticket }) }),
   restartSandbox: (ticket: string | null) => request<{ status: string; ticket?: string | null }>("/sandbox/restart", { method: "POST", body: JSON.stringify({ ticket }) }),
   replaySandboxEvents: (executionId: string, afterEventId?: string) => request<{ execution_id: string; events: Array<{ event_id: string; seq: number | string; type: string; payload: { text?: string } }> }>(`/sandbox/executions/${encodeURIComponent(executionId)}/events${afterEventId ? `?after_event_id=${encodeURIComponent(afterEventId)}` : ""}`),
   getSandboxArtifactUrl: (artifactId: string) => request<{ url: string }>(`/sandbox/artifacts/${encodeURIComponent(artifactId)}/access`),

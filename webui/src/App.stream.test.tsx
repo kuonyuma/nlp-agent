@@ -1,6 +1,22 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const stream = vi.hoisted(() => {
+  type MockSandboxLease = {
+    phase: number;
+    runtime_available: boolean;
+    runtime: { id: string; generation: number; ticket: string | null } | { kind: "inmemory"; ticket: null } | null;
+    environment: { id: string; status: string; generation: number; profile: string } | null;
+    lease: { id: string; state: string; generation: number; expires_at: string } | null;
+    runtime_profile: {
+      id: string;
+      runtime: string;
+      isolation: string;
+      python_version: string;
+      kernel_version: string;
+      pytorch_version: string;
+      pytorch_device: string;
+    };
+  };
   let onEvent: ((event: Record<string, unknown>) => void) | undefined;
   let lastRequestId = "";
   let lastModelProfile = "";
@@ -19,14 +35,19 @@ const stream = vi.hoisted(() => {
     locale: "zh-CN", theme: "system",content_font_size: "medium", reduce_motion: false, show_reasoning: false,
     stream_render_interval_ms: 30, model_profile: "deepseek", ...patch,
   } }));
-  const ensureSandboxLease = vi.fn(async () => ({
+  const ensureSandboxLease = vi.fn<() => Promise<MockSandboxLease>>(async () => ({
     phase: 0,
     runtime_available: true,
     runtime: { kind: "inmemory" as const, ticket: null },
     environment: { id: "sandbox-user", status: "ready", generation: 1, profile: "python-base" },
     lease: { id: "lease-session", state: "active", generation: 1, expires_at: "2026-08-25T10:00:00" },
+    runtime_profile: {
+      id: "python-base", runtime: "runsc", isolation: "runsc 隔离",
+      python_version: "3.11", kernel_version: "6.29.5", pytorch_version: "2.7.1", pytorch_device: "CPU",
+    },
   }));
-  const executeSandbox = vi.fn(async () => ({ status: "completed", stdout: "2\n", stderr: "" }));
+  const getSandboxUsage = vi.fn<() => Promise<{ cpu_percent: number | null; memory_percent: number | null; sampled_at: string | null }>>(async () => ({ cpu_percent: null, memory_percent: null, sampled_at: null }));
+  const executeSandbox = vi.fn(async () => ({ status: "completed", stdout: "2\n", stderr: "", execution_metrics: { duration_ms: 12, output_bytes: 2 } }));
   const getLearningBookNavigation = vi.fn().mockResolvedValue({ workspace_id: "default", items: [] });
   const getLearningBookPage = vi.fn().mockResolvedValue({ page: null });
   return {
@@ -37,6 +58,7 @@ const stream = vi.hoisted(() => {
     uploadAttachment,
     updateSettings,
     ensureSandboxLease,
+    getSandboxUsage,
     executeSandbox,
     getLearningBookNavigation,
     getLearningBookPage,
@@ -74,6 +96,7 @@ vi.mock("@/platform/http/api", () => ({
     listTurns: stream.listTurns,
     deleteSession: vi.fn(), updateSettings: stream.updateSettings,
     ensureSandboxLease: stream.ensureSandboxLease,
+    getSandboxUsage: stream.getSandboxUsage,
     executeSandbox: stream.executeSandbox,
     getLearningBookNavigation: stream.getLearningBookNavigation,
     getLearningBookPage: stream.getLearningBookPage,
@@ -292,6 +315,46 @@ describe("student stream rendering", () => {
     expect(status).not.toBeNull();
     expect(status!.closest(".sandbox-environment-bar")).not.toBeNull();
     expect(status!.closest(".sandbox-workbench-titlebar")).toBeNull();
+  });
+
+  it("shows live sandbox usage and recent execution consumption on the right side of the environment strip", async () => {
+    stream.ensureSandboxLease.mockClear();
+    stream.getSandboxUsage.mockClear();
+    stream.ensureSandboxLease.mockResolvedValueOnce({
+      phase: 0,
+      runtime_available: true,
+      runtime: { id: "runtime-1", generation: 1, ticket: "ticket-1" },
+      environment: { id: "sandbox-user", status: "ready", generation: 1, profile: "python-base" },
+      lease: { id: "lease-session", state: "active", generation: 1, expires_at: "2026-08-25T10:00:00" },
+      runtime_profile: {
+        id: "python-base", runtime: "runsc", isolation: "runsc 隔离",
+        python_version: "3.11", kernel_version: "6.29.5", pytorch_version: "2.7.1", pytorch_device: "CPU",
+      },
+    });
+    stream.getSandboxUsage.mockResolvedValueOnce({ cpu_percent: 37.5, memory_percent: 12.25, sampled_at: "2026-08-28T00:00:00Z" });
+    stream.executeSandbox.mockResolvedValueOnce({ status: "completed", stdout: "ok\n", stderr: "", execution_metrics: { duration_ms: 48, output_bytes: 12 } });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    await waitFor(() => expect(stream.ensureSandboxLease).toHaveBeenCalledTimes(1));
+
+    const editor = screen.getByRole("region", { name: "代码工作台" });
+    const usage = editor.querySelector('[aria-label="当前沙箱资源使用率"]');
+    await waitFor(() => expect(stream.getSandboxUsage).toHaveBeenCalledWith("ticket-1"));
+    expect(usage).not.toBeNull();
+    expect(usage).toHaveTextContent("CPU");
+    expect(usage).toHaveTextContent("37.5%");
+    expect(usage).toHaveTextContent("内存");
+    expect(usage).toHaveTextContent("12.3%");
+    expect(usage).not.toHaveTextContent("vCPU");
+    expect(usage).not.toHaveTextContent("MiB");
+    expect(usage!.closest(".sandbox-environment-bar")).not.toBeNull();
+    expect(usage!.closest(".sandbox-workbench-titlebar")).toBeNull();
+    expect(editor).toHaveTextContent("PyTorch 2.7.1 CPU");
+
+    fireEvent.click(screen.getByRole("button", { name: "运行代码" }));
+    await waitFor(() => expect(editor).toHaveTextContent("48 ms"));
+    expect(editor).toHaveTextContent("12 B");
   });
 
   it("runs code from the sandbox workbench and renders stdout", async () => {
