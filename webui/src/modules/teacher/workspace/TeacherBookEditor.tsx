@@ -131,6 +131,43 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
   const [error, setError] = useState("");
   const pageRequestId = useRef(0);
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const contentHistory = useRef<{ past: string[]; future: string[]; value: string }>({ past: [], future: [], value: "" });
+
+  const replaceEditorContent = useCallback((next: string) => {
+    contentHistory.current = { past: [], future: [], value: next };
+    setContent(next);
+  }, []);
+
+  const setEditorContent = useCallback((next: string) => {
+    const history = contentHistory.current;
+    if (next === history.value) {
+      setContent(next);
+      return;
+    }
+    history.past.push(history.value);
+    if (history.past.length > 100) history.past.shift();
+    history.future = [];
+    history.value = next;
+    setContent(next);
+  }, []);
+
+  const undoEditorContent = useCallback(() => {
+    const history = contentHistory.current;
+    const previous = history.past.pop();
+    if (previous === undefined) return;
+    history.future.unshift(history.value);
+    history.value = previous;
+    setContent(previous);
+  }, []);
+
+  const redoEditorContent = useCallback(() => {
+    const history = contentHistory.current;
+    const next = history.future.shift();
+    if (next === undefined) return;
+    history.past.push(history.value);
+    history.value = next;
+    setContent(next);
+  }, []);
 
   const loadNavigation = useCallback(async () => {
     setLoading(true);
@@ -151,6 +188,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
     const requestedId = selectedId;
     if (!requestedId) {
       setPage(null);
+      replaceEditorContent("");
       return;
     }
     setError("");
@@ -158,7 +196,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
       const result = await api.getTeacherBookPage(workspaceId, requestedId);
       if (requestId !== pageRequestId.current) return;
       setPage(result.page);
-      setContent(result.page.draft_markdown);
+      replaceEditorContent(result.page.draft_markdown);
       setImportPreview(null);
       setImportAssets([]);
       setEditorAssets([]);
@@ -169,7 +207,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
       if (requestId !== pageRequestId.current) return;
       setError(reason instanceof Error ? reason.message : String(reason));
     }
-  }, [selectedId, workspaceId]);
+  }, [replaceEditorContent, selectedId, workspaceId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadNavigation(), 0);
@@ -365,7 +403,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
     try {
       const result = await api.updateTeacherBookPage(workspaceId, selectedId, content, page.revision, editorAssets);
       setPage(result.page);
-      setContent(result.page.draft_markdown);
+      replaceEditorContent(result.page.draft_markdown);
       setEditorAssets([]);
       const warningMessage = result.warnings.length > 0 ? `提示：${result.warnings.join("；")}` : "";
       setMessage(`草稿已保存。发布后学生才会看到新内容。${warningMessage ? ` ${warningMessage}` : ""}`);
@@ -392,7 +430,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
       }
       const result = await api.publishTeacherBookPage(workspaceId, selectedId, draft.revision);
       setPage(result.page);
-      setContent(result.page.draft_markdown);
+      replaceEditorContent(result.page.draft_markdown);
       const warningMessage = warnings.length > 0 ? `提示：${warnings.join("；")}` : "";
       setMessage(`教材已发布，学生端现在可以读取这一版正文。${warningMessage ? ` ${warningMessage}` : ""}`);
       await loadNavigation();
@@ -411,7 +449,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
       editor?.selectionEnd ?? content.length,
       format,
     );
-    setContent(result.value);
+    setEditorContent(result.value);
     window.requestAnimationFrame(() => {
       editorRef.current?.focus();
       editorRef.current?.setSelectionRange(result.selectionStart, result.selectionEnd);
@@ -432,13 +470,20 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
     } else if (command && event.key.toLowerCase() === "s") {
       event.preventDefault();
       void save();
+    } else if (command && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      if (event.shiftKey) redoEditorContent();
+      else undoEditorContent();
+    } else if (command && event.key.toLowerCase() === "y") {
+      event.preventDefault();
+      redoEditorContent();
     } else if (event.key === "Tab") {
       event.preventDefault();
       const editor = editorRef.current;
       const start = editor?.selectionStart ?? content.length;
       const end = editor?.selectionEnd ?? content.length;
       const next = `${content.slice(0, start)}  ${content.slice(end)}`;
-      setContent(next);
+      setEditorContent(next);
       window.requestAnimationFrame(() => {
         editorRef.current?.focus();
         editorRef.current?.setSelectionRange(start + 2, start + 2);
@@ -493,7 +538,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
       })));
       const references = assets.map((asset) => `![${asset.asset_path.split("/").pop() ?? "图片"}](${asset.asset_path})`).join("\n\n");
       const insertion = insertImageReferences(content, selectionStart, selectionEnd, references);
-      setContent(insertion.value);
+      setEditorContent(insertion.value);
       setEditorAssets((current) => {
         const byPath = new Map(current.map((asset) => [asset.asset_path, asset]));
         assets.forEach((asset) => byPath.set(asset.asset_path, asset));
@@ -530,7 +575,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
     try {
       const result = await api.applyTeacherBookImport(workspaceId, selectedId, importName, importPreview.content_markdown, page.revision, importAssets);
       setPage(result.page);
-      setContent(result.page.draft_markdown);
+      replaceEditorContent(result.page.draft_markdown);
       setImportPreview(null);
       setImportAssets([]);
       setEditorAssets([]);
@@ -598,7 +643,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
             const topicExpanded = directoryQuery.trim().length > 0 || !collapsedTopicIds.includes(group.topicId);
             return <section className="teacher-book-tree-topic" key={group.topicId}>
               <div className="teacher-book-tree-topic-heading">
-                <button type="button" className="teacher-book-topic-toggle" aria-label={`${topicExpanded ? "折叠" : "展开"}主题 ${group.topicName}`} aria-expanded={topicExpanded} onClick={() => setCollapsedTopicIds((current) => topicExpanded ? [...current, group.topicId] : current.filter((id) => id !== group.topicId))}><ChevronDown size={14} /><span>{group.topicName}</span><small>{group.items.length}</small></button>
+                <button type="button" className="teacher-book-topic-toggle" aria-label={`${topicExpanded ? "折叠" : "展开"}主题 ${group.topicName}`} aria-expanded={topicExpanded} onClick={() => setCollapsedTopicIds((current) => topicExpanded ? [...current, group.topicId] : current.filter((id) => id !== group.topicId))}><ChevronDown size={14} /><span>{group.topicName}</span>{group.topicStatus === "disabled" && <small className="teacher-book-tree-status is-disabled"><span className="teacher-book-tree-status-dot" aria-hidden="true" />已停用</small>}<small className="teacher-book-tree-count">{group.items.length}</small></button>
                 <details className="teacher-book-tree-menu"><summary aria-label={`${group.topicName}目录选项`}><MoreHorizontal size={16} /></summary><div>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void addKnowledgePoint(group.topicId); }} disabled={!catalogDraft || directorySaving}><Plus size={14} />新增知识点</button>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void editTopic(group.topicId); }} disabled={!catalogDraft || directorySaving}><Pencil size={14} />编辑主题</button>
@@ -607,7 +652,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
                 </div></details>
               </div>
               {topicExpanded && <div className="teacher-book-tree-topic-items">{group.items.map((item) => <div className={`teacher-book-tree-point ${selectedId === item.knowledge_point_id ? "active" : ""}`} key={item.knowledge_point_id}>
-                <button className="teacher-book-tree-point-main" aria-label={item.title} type="button" onClick={() => setSelectedId(item.knowledge_point_id)}><span>{item.title}</span>{item.knowledge_point_status === "disabled" ? <small>已停用</small> : item.has_published && <small>已发布</small>}</button>
+                <button className="teacher-book-tree-point-main" aria-label={item.title} type="button" onClick={() => setSelectedId(item.knowledge_point_id)}><span>{item.title}</span>{item.knowledge_point_status === "disabled" ? <small className="teacher-book-tree-status is-disabled"><span className="teacher-book-tree-status-dot" aria-hidden="true" />已停用</small> : item.has_published && <small className="teacher-book-tree-status is-published"><span className="teacher-book-tree-status-dot" aria-hidden="true" />已发布</small>}</button>
                 <details className="teacher-book-tree-menu"><summary aria-label={`${item.title}选项`}><MoreHorizontal size={15} /></summary><div>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void editKnowledgePoint(group.topicId, item.knowledge_point_id); }} disabled={!catalogDraft || directorySaving}><Pencil size={14} />编辑知识点</button>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void toggleKnowledgePoint(group.topicId, item.knowledge_point_id); }} disabled={!catalogDraft || directorySaving}>{item.knowledge_point_status === "enabled" ? <EyeOff size={14} /> : <Eye size={14} />}{item.knowledge_point_status === "enabled" ? "停用知识点" : "启用知识点"}</button>
@@ -622,9 +667,8 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
         <main className="teacher-book-workspace">
           {page ? <>
             <header className="teacher-book-page-heading"><div className="teacher-book-page-heading-info"><div className="teacher-book-page-breadcrumb"><span className="teacher-book-page-topic">{page.topic_name}</span><span className="teacher-book-page-chevron" aria-hidden="true">›</span><h3>{page.title}</h3></div><span className="teacher-book-version"><strong>草稿 v{page.revision}</strong><span aria-hidden="true">·</span><span>{page.published_revision != null ? `已发布 v${page.published_revision}` : "尚未发布"}</span></span></div><div className="teacher-book-page-actions"><button type="button" className={preview ? "active" : ""} onClick={() => setPreview((current) => !current)}><Eye size={15} />{preview ? "返回编辑" : "预览正文"}</button><button type="button" onClick={() => void save()} disabled={saving}><Save size={15} />保存草稿</button><button type="button" className="teacher-book-publish" onClick={() => void publish()} disabled={saving || !content.trim()}><Send size={15} />发布给学生</button></div></header>
-            {editorAssets.length > 0 && <small className="teacher-book-editor-assets">已附加 {editorAssets.length} 个图片资源，保存时会写入当前知识点的教材资源。</small>}
             <nav className="teacher-book-heading-outline" aria-label="本页小标题"><strong>本页小标题</strong>{headingIndex.headings.length ? <div>{headingIndex.headings.map((heading) => <a className={`level-${heading.level}`} key={heading.id} href={`#${heading.id}`} onClick={() => setPreview(true)}>{heading.text}</a>)}</div> : <small>使用 Markdown 的 ## / ### 标题，学生页面右侧目录会自动同步。</small>}</nav>
-            {preview ? <div className="teacher-book-preview"><MarkdownContent allowDataImages headingIds={headingIndex.headingIds}>{replaceLocalAssetReferences(content || "暂无内容", editorAssetPreviews)}</MarkdownContent></div> : <div className="teacher-book-source"><div className="teacher-book-markdown-toolbar" aria-label="Markdown 快捷工具栏"><span>Markdown 源码</span><div>{markdownTools.map(({ format, label, icon: Icon, shortcut }) => <button key={format} type="button" title={shortcut ? `${label}（${shortcut}）` : label} aria-label={label} onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat(format)}><Icon size={14} />{label}</button>)}</div><small>支持 Ctrl/Cmd+B、I、K、S</small></div><textarea ref={editorRef} className="teacher-book-textarea" aria-label="教材正文 Markdown" value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={handleEditorKeyDown} placeholder="# 知识点标题\n\n在这里编写面向学生的长篇教材正文。代码块建议使用 ```python，并只保留 PyTorch 示例。" /></div>}
+            {preview ? <div className="teacher-book-preview"><MarkdownContent allowDataImages headingIds={headingIndex.headingIds} headingIdsByLine={headingIndex.headingIdsByLine}>{replaceLocalAssetReferences(content || "暂无内容", editorAssetPreviews)}</MarkdownContent></div> : <div className="teacher-book-source"><div className="teacher-book-markdown-toolbar" aria-label="Markdown 快捷工具栏"><span>Markdown 源码</span><div>{markdownTools.map(({ format, label, icon: Icon, shortcut }) => <button key={format} type="button" title={shortcut ? `${label}（${shortcut}）` : label} aria-label={label} onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat(format)}><Icon size={14} />{label}</button>)}</div><small>支持 Ctrl/Cmd+B、I、K、S、Z、Y（撤销/重做） · 图片可写标题参数控制宽度，例如 <code>![图注](assets/figure.png "width=320px")</code></small></div><textarea ref={editorRef} className="teacher-book-textarea" aria-label="教材正文 Markdown" value={content} onChange={(event) => setEditorContent(event.target.value)} onKeyDown={handleEditorKeyDown} placeholder="# 知识点标题\n\n在这里编写面向学生的长篇教材正文。代码块建议使用 ```python，并只保留 PyTorch 示例。" /></div>}
           </> : <div className="teacher-state"><BookOpenText /><p>选择一个知识点开始编写教材。</p></div>}
         </main>
       </div>
