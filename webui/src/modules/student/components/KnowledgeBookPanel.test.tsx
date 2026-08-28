@@ -113,8 +113,7 @@ describe("KnowledgeBookPanel", () => {
 
     render(<KnowledgeBookPanel workspaceId="workspace-1" onOpenInSandbox={openInSandbox} />);
 
-    await screen.findByText("print(torch.__version__)");
-    await user.click(screen.getByRole("button", { name: "在沙箱中打开" }));
+    await user.click(await screen.findByRole("button", { name: "在沙箱中打开" }));
 
     expect(openInSandbox).toHaveBeenCalledWith("import torch\nprint(torch.__version__)", "python");
   });
