@@ -48,6 +48,10 @@ class RedisSandboxMetricsStore:
                 await trim(self._key, 0, count - self._max_samples - 1)
         await self._client.expire(self._key, self._retention_seconds)
         rows = await self._client.zrange(self._key, -min(self._max_samples, 60), -1)
+        return self._decode_rows(rows)
+
+    @staticmethod
+    def _decode_rows(rows: list[Any]) -> list[dict[str, object]]:
         samples: list[dict[str, object]] = []
         for row in rows:
             try:
@@ -59,19 +63,17 @@ class RedisSandboxMetricsStore:
                 samples.append(parsed)
         return samples
 
+    async def recent(self, limit: int = 60) -> list[dict[str, object]]:
+        """Read recent samples without extending or mutating the series."""
+        self._faults.fail_if_configured("redis.metrics.read")
+        bounded_limit = min(max(1, limit), self._max_samples, 60)
+        rows = await self._client.zrange(self._key, -bounded_limit, -1)
+        return self._decode_rows(rows)
+
     async def latest(self) -> dict[str, object] | None:
         """Read the most recent bounded sample for Manager feedback."""
-        self._faults.fail_if_configured("redis.metrics.read")
-        rows = await self._client.zrange(self._key, -1, -1)
-        if not rows:
-            return None
-        raw = rows[-1]
-        try:
-            value = raw.decode("utf-8") if isinstance(raw, bytes) else raw
-            parsed = json.loads(value)
-        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        return parsed if isinstance(parsed, dict) else None
+        samples = await self.recent(1)
+        return samples[-1] if samples else None
 
     async def close(self) -> None:
         close = getattr(self._client, "aclose", None)

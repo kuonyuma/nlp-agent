@@ -7,28 +7,31 @@ import { AccountDialog } from "@/modules/student/components/AccountDialog";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { LearningContextBar } from "@/modules/student/components/LearningContextBar";
 import { LearningPanel } from "@/modules/student/components/LearningPanel";
+import { KnowledgeBookPanel } from "@/modules/student/components/KnowledgeBookPanel";
+import { readKnowledgeBookUrl } from "@/modules/student/components/knowledgeBook";
 import { LoginDialog } from "@/modules/student/components/LoginDialog";
 import { MessageList } from "@/modules/student/components/MessageList";
 import { SettingsDialog } from "@/modules/student/components/SettingsDialog";
 import { SchoolLogo } from "@/shared/ui/SchoolLogo";
 import { Sidebar, SidebarToggle } from "@/modules/student/components/Sidebar";
-import { ToolDock, type ToolDockTool } from "@/modules/student/components/ToolDock";
+import { ToolDock, type ToolDockTabDropPosition, type ToolDockTool } from "@/modules/student/components/ToolDock";
 import { useStudentWorkspace } from "@/modules/student/workspace/public";
 import { useSessionScrollRestoration } from "@/modules/student/workspace/hooks/useSessionScrollRestoration";
 import type { CourseTopic, TeacherCatalog } from "@/shared/types";
 
-export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: string) => void } = {}) {
+export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigateTo?: (path: string) => void; onOpenInSandbox?: (code: string, language: string) => void } = {}) {
   const workspace = useStudentWorkspace();
   const learningContext = workspace.preferences.context;
   const setLearningContext = workspace.setLearningContext;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // Student mode starts focused on the learning canvas after every page load.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
-  const [toolDockOpen, setToolDockOpen] = useState(false);
+  const [toolDockOpen, setToolDockOpen] = useState(() => typeof window !== "undefined" && readKnowledgeBookUrl(window.location.search).tool === "knowledge-book");
   const [toolDockExpanded, setToolDockExpanded] = useState(false);
   const [toolMenuOpen, setToolMenuOpen] = useState(false);
-  const [openTools, setOpenTools] = useState<ToolDockTool[]>([]);
-  const [activeTool, setActiveTool] = useState<ToolDockTool | null>(null);
+  const [openTools, setOpenTools] = useState<ToolDockTool[]>(() => typeof window !== "undefined" && readKnowledgeBookUrl(window.location.search).tool === "knowledge-book" ? ["book"] : []);
+  const [activeTool, setActiveTool] = useState<ToolDockTool | null>(() => typeof window !== "undefined" && readKnowledgeBookUrl(window.location.search).tool === "knowledge-book" ? "book" : null);
+  const [sandboxSource, setSandboxSource] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
@@ -74,10 +77,26 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
   const openTool = (tool: ToolDockTool) => {
     setOpenTools((current) => current.includes(tool) ? current : [...current, tool]);
     setActiveTool(tool);
-    // The sandbox has its own editor layout, but remains a normal resizable
-    // dock until the user explicitly asks for full workbench mode.
-    setToolDockExpanded(false);
   };
+  const reorderTools = (draggedTool: ToolDockTool, targetTool: ToolDockTool, position: ToolDockTabDropPosition) => {
+    setOpenTools((current) => {
+      const draggedIndex = current.indexOf(draggedTool);
+      const targetIndex = current.indexOf(targetTool);
+      if (draggedIndex < 0 || targetIndex < 0 || draggedTool === targetTool) return current;
+      const next = current.filter((tool) => tool !== draggedTool);
+      next.splice(next.indexOf(targetTool) + (position === "after" ? 1 : 0), 0, draggedTool);
+      return next;
+    });
+  };
+  const openCodeInSandbox = useCallback((code: string, language: string) => {
+    if (!/^(?:python|pytorch|py)$/i.test(language)) return;
+    onOpenInSandbox?.(code, language);
+    setSandboxSource(code);
+    setToolDockOpen(true);
+    setToolMenuOpen(false);
+    setOpenTools((current) => current.includes("sandbox") ? current : [...current, "sandbox"]);
+    setActiveTool("sandbox");
+  }, [onOpenInSandbox]);
   const closeTool = (tool: ToolDockTool) => {
     const next = openTools.filter((item) => item !== tool);
     setOpenTools(next);
@@ -162,6 +181,7 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
       toolMenuOpen={toolMenuOpen}
       onToolMenuOpenChange={setToolMenuOpen}
       onOpenTool={openTool}
+      onReorderTools={reorderTools}
       onCloseTool={closeTool}
       onActiveToolChange={setActiveTool}
       onExplainCode={(source) => {
@@ -171,6 +191,8 @@ export function StudentWorkspace({ onNavigateTo }: { onNavigateTo?: (path: strin
         void workspace.send("请解释以下 Python 代码：\n\n```python\n" + source + "\n```");
       }}
       learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
+      knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={statusOnline && !workspace.isRunning ? (prompt) => { setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(prompt); } : undefined} onOpenInSandbox={openCodeInSandbox} />}
+      sandboxSource={sandboxSource}
     />
     <div className="student-school-logo"><SchoolLogo /></div>
     <SettingsDialog open={settingsOpen} settings={workspace.settings} learningContext={workspace.preferences.context} roles={workspace.authSession?.roles} permissions={workspace.authSession?.permissions} userId={workspace.authSession?.user_id} onClose={() => setSettingsOpen(false)} onChange={(patch) => void workspace.patchSettings(patch)} onReset={workspace.resetSettings} onLearningContextChange={workspace.setLearningContext} onOpenDeveloper={() => { if (onNavigateTo) onNavigateTo("/developer"); else location.href = "/developer"; }} onOpenTeacher={() => { if (onNavigateTo) onNavigateTo("/teacher"); else location.href = "/teacher"; }} />

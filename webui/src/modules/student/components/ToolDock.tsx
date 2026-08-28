@@ -1,27 +1,26 @@
-import { BookOpenCheck, Code2, Contrast, Copy, Download, FileText, Globe2, MessageSquareText, Moon, Play, Plus, RotateCcw, Sun, Terminal, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode } from "react";
+import { BookOpenCheck, BookOpenText, Code2, Contrast, Copy, Download, FileText, MessageSquareText, Moon, Play, Plus, RotateCcw, Sun, Terminal, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import type { CSSProperties, DragEvent, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { api } from "@/platform/http/api";
 import { SandboxArtifactFrame } from "./SandboxArtifactFrame";
 
-export type ToolDockTool = "files" | "learning" | "browser" | "terminal" | "sandbox";
+export type ToolDockTool = "files" | "learning" | "book" | "sandbox";
+export type ToolDockTabDropPosition = "before" | "after";
 
 const tools: Array<{
   id: ToolDockTool;
   label: string;
   buttonLabel: string;
-  shortcut: string;
   icon: typeof FileText;
   description: string;
 }> = [
-  { id: "files", label: "文件", buttonLabel: "打开文件工具", shortcut: "Ctrl+P", icon: FileText, description: "代码工作区将在这里打开。" },
-  { id: "learning", label: "学习记录", buttonLabel: "打开学习记录工具", shortcut: "Ctrl+Alt+S", icon: BookOpenCheck, description: "查看本次对话的学习目标、概念与进度。" },
-  { id: "browser", label: "浏览器", buttonLabel: "打开浏览器工具", shortcut: "Ctrl+T", icon: Globe2, description: "后续可在这里安全查看学习资料与网页。" },
-  { id: "terminal", label: "终端", buttonLabel: "打开终端工具", shortcut: "Ctrl+~", icon: Terminal, description: "代码沙箱接入后将在这里显示终端与运行输出。" },
-  { id: "sandbox", label: "代码沙箱", buttonLabel: "打开代码沙箱工具", shortcut: "Ctrl+Alt+R", icon: Code2, description: "为当前登录用户准备独立的代码运行环境。" },
+  { id: "files", label: "文件", buttonLabel: "打开文件工具", icon: FileText, description: "代码工作区将在这里打开。" },
+  { id: "learning", label: "学习记录", buttonLabel: "打开学习记录工具", icon: BookOpenCheck, description: "查看本次对话的学习目标、概念与进度。" },
+  { id: "book", label: "知识教材", buttonLabel: "打开知识教材工具", icon: BookOpenText, description: "阅读教师发布的知识点教材与实操内容。" },
+  { id: "sandbox", label: "代码沙箱", buttonLabel: "打开代码沙箱工具", icon: Code2, description: "为当前登录用户准备独立的代码运行环境。" },
 ];
 
-function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning"> }) {
+function EmptyToolPanel({ tool }: { tool: Exclude<ToolDockTool, "learning" | "book" | "sandbox"> }) {
   const item = tools.find((candidate) => candidate.id === tool)!;
   const Icon = item.icon;
   return <section className="tool-dock-empty-panel">
@@ -39,8 +38,8 @@ const sandboxThemes: Array<{ id: SandboxEditorTheme; label: string; buttonLabel:
   { id: "high-contrast", label: "高对比", buttonLabel: "高对比", icon: Contrast },
 ];
 
-const MIN_OUTPUT_HEIGHT = 132;
-const MAX_OUTPUT_HEIGHT = 440;
+const MIN_OUTPUT_HEIGHT = 0;
+const FALLBACK_MAX_OUTPUT_HEIGHT = 640;
 const SANDBOX_THEME_STORAGE_KEY = "nova.sandbox.editor-theme";
 const MIN_EDITOR_FONT_SIZE = 14;
 const MAX_EDITOR_FONT_SIZE = 24;
@@ -72,12 +71,12 @@ function PythonSyntax({ source }: { source: string }) {
   return <>{fragments}</>;
 }
 
-function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: string) => void }) {
+function SandboxPhaseZeroPanel({ onExplainCode, initialSource }: { onExplainCode: (source: string) => void; initialSource?: string | null }) {
   // Keep the local in-memory preview immediately usable; a Docker response
   // without its mandatory ticket replaces this optimistic display with
   // “warming” before any privileged execution is attempted.
   const [leaseStatus, setLeaseStatus] = useState<"creating" | "ready" | "error">("ready");
-  const [source, setSource] = useState("# 在这里运行 Python 代码\n");
+  const [source, setSource] = useState(() => initialSource ?? "# 在这里运行 Python 代码\n");
   const [result, setResult] = useState("");
   const [running, setRunning] = useState(false);
   const [runtimeTicket, setRuntimeTicket] = useState<string | null>(null);
@@ -88,11 +87,34 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
   const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied">("idle");
   const [outputHeight, setOutputHeight] = useState(204);
+  const [outputBounds, setOutputBounds] = useState({ min: MIN_OUTPUT_HEIGHT, max: FALLBACK_MAX_OUTPUT_HEIGHT });
   const [resizingOutput, setResizingOutput] = useState(false);
   const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [editorScrollLeft, setEditorScrollLeft] = useState(0);
-  const outputResizeStart = useRef<{ pointerY: number; height: number } | null>(null);
+  const outputResizeStart = useRef<{ pointerY: number; height: number; min: number; max: number } | null>(null);
+  const workbenchRef = useRef<HTMLElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
+
+  const getOutputResizeBounds = () => {
+    const workbench = workbenchRef.current;
+    const minimum = MIN_OUTPUT_HEIGHT;
+    if (!workbench) return { min: minimum, max: FALLBACK_MAX_OUTPUT_HEIGHT };
+    const workbenchHeight = Math.round(workbench.getBoundingClientRect().height || workbench.clientHeight);
+    const fixedHeight = [
+      workbench.querySelector<HTMLElement>(".sandbox-workbench-titlebar"),
+      workbench.querySelector<HTMLElement>(".sandbox-environment-bar"),
+      workbench.querySelector<HTMLElement>(".sandbox-editor-statusbar"),
+      workbench.querySelector<HTMLElement>(".sandbox-output-resizer"),
+    ].reduce((total, element) => total + (element ? Math.round(element.getBoundingClientRect().height) : 0), 0);
+    const maximum = Math.max(minimum, workbenchHeight - fixedHeight);
+    return { min: minimum, max: maximum };
+  };
+
+  useEffect(() => {
+    if (initialSource === undefined || initialSource === null) return undefined;
+    const timer = window.setTimeout(() => setSource(initialSource), 0);
+    return () => window.clearTimeout(timer);
+  }, [initialSource]);
 
   useEffect(() => {
     let active = true;
@@ -130,7 +152,7 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
     const resize = (event: globalThis.PointerEvent) => {
       const start = outputResizeStart.current;
       if (!start) return;
-      setOutputHeight(Math.min(MAX_OUTPUT_HEIGHT, Math.max(MIN_OUTPUT_HEIGHT, start.height - (event.clientY - start.pointerY))));
+      setOutputHeight(Math.min(start.max, Math.max(start.min, start.height - (event.clientY - start.pointerY))));
     };
     const stop = () => {
       outputResizeStart.current = null;
@@ -146,14 +168,19 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
 
   const beginOutputResize = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
-    outputResizeStart.current = { pointerY: event.clientY, height: outputHeight };
+    const bounds = getOutputResizeBounds();
+    setOutputBounds(bounds);
+    setOutputHeight((current) => Math.min(bounds.max, Math.max(bounds.min, current)));
+    outputResizeStart.current = { pointerY: event.clientY, height: Math.min(bounds.max, Math.max(bounds.min, outputHeight)), ...bounds };
     setResizingOutput(true);
   };
   const resizeOutputWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
+    const bounds = getOutputResizeBounds();
+    setOutputBounds(bounds);
     const change = event.key === "ArrowUp" ? 24 : -24;
-    setOutputHeight((current) => Math.min(MAX_OUTPUT_HEIGHT, Math.max(MIN_OUTPUT_HEIGHT, current + change)));
+    setOutputHeight((current) => Math.min(bounds.max, Math.max(bounds.min, current + change)));
   };
   const editorLines = source.split("\n");
   const runCode = () => {
@@ -259,7 +286,7 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
   };
 
   const workbenchStyle = { "--sandbox-editor-font-size": `${editorFontSize}px` } as CSSProperties;
-  return <section className={"sandbox-workbench " + (resizingOutput ? "is-resizing" : "")} role="region" aria-label="代码工作台" data-editor-theme={editorTheme} style={workbenchStyle}>
+  return <section ref={workbenchRef} className={"sandbox-workbench " + (resizingOutput ? "is-resizing" : "")} role="region" aria-label="代码工作台" data-editor-theme={editorTheme} style={workbenchStyle}>
     <header className="sandbox-workbench-titlebar">
       <div className="sandbox-file-tab"><Code2 size={16} /><strong>Code Runner</strong><span>main.py</span><small>Python</small></div>
       <div className="sandbox-theme-switcher" role="group" aria-label="代码编辑器主题">
@@ -293,7 +320,7 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
     <footer className="sandbox-editor-statusbar">
       <span>Ln {editorLines.length}, Col 1</span><span>Spaces: 4</span><span>UTF-8</span><span>Python</span>
     </footer>
-    <div className="sandbox-output-resizer" role="separator" aria-label="调整输出面板高度" aria-orientation="horizontal" aria-valuemin={MIN_OUTPUT_HEIGHT} aria-valuemax={MAX_OUTPUT_HEIGHT} aria-valuenow={outputHeight} tabIndex={0} onPointerDown={beginOutputResize} onKeyDown={resizeOutputWithKeyboard}><i /></div>
+    <div className="sandbox-output-resizer" role="separator" aria-label="调整输出面板高度" aria-orientation="horizontal" aria-valuemin={outputBounds.min} aria-valuemax={outputBounds.max} aria-valuenow={Math.min(outputBounds.max, Math.max(outputBounds.min, outputHeight))} tabIndex={0} onPointerDown={beginOutputResize} onKeyDown={resizeOutputWithKeyboard}><i /></div>
     <section className="sandbox-output-panel" style={{ height: outputHeight }} aria-label="运行输出">
       <header>
         <div><Terminal size={15} /><strong>输出</strong><span>{running ? "运行中" : result ? "最近一次运行" : "等待运行"}</span></div>
@@ -313,9 +340,29 @@ function SandboxPhaseZeroPanel({ onExplainCode }: { onExplainCode: (source: stri
 
 const DEFAULT_DOCK_WIDTH = 420;
 const MIN_DOCK_WIDTH = 320;
-const MIN_THREAD_WIDTH = 560;
+const MIN_THREAD_WIDTH = 320;
 const DESKTOP_SIDEBAR_WIDTH = 252;
 const MOBILE_DOCK_VIEWPORT_RATIO = 0.92;
+const TOOL_PANEL_RESIZER_WIDTH = 8;
+const MIN_TOOL_PANEL_WIDTH = 96;
+
+function equalToolPanelWidths(count: number) {
+  return count > 0 ? Array.from({ length: count }, () => 100 / count) : [];
+}
+
+function resizeToolPanelWidths(widths: number[], index: number, deltaPx: number, containerWidth: number) {
+  if (index < 0 || index >= widths.length - 1 || containerWidth <= 0) return widths;
+  const usableWidth = Math.max(1, containerWidth - TOOL_PANEL_RESIZER_WIDTH * (widths.length - 1));
+  const minShare = Math.min(48, (MIN_TOOL_PANEL_WIDTH / usableWidth) * 100);
+  const desiredDelta = (deltaPx / usableWidth) * 100;
+  const minDelta = minShare - widths[index];
+  const maxDelta = widths[index + 1] - minShare;
+  const appliedDelta = Math.max(minDelta, Math.min(maxDelta, desiredDelta));
+  const next = [...widths];
+  next[index] += appliedDelta;
+  next[index + 1] -= appliedDelta;
+  return next;
+}
 
 function getMaxDockWidth() {
   const viewportWidth = window.innerWidth;
@@ -340,13 +387,13 @@ function ToolPicker({ onOpenTool }: { onOpenTool: (tool: ToolDockTool) => void }
       return <button key={item.id} type="button" role="menuitem" aria-label={item.buttonLabel} onClick={() => onOpenTool(item.id)}>
         <span><Icon size={17} /></span>
         <strong>{item.label}</strong>
-        <kbd>{item.shortcut}</kbd>
+        <span className="tool-dock-item-ornament" aria-hidden="true"><i /><i /><i /></span>
       </button>;
     })}
   </nav>;
 }
 
-export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onCloseTool, onActiveToolChange, onExplainCode, learningPanel }: {
+export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, onToolMenuOpenChange, onOpenTool, onReorderTools, onCloseTool, onActiveToolChange, onExplainCode, learningPanel, knowledgeBookPanel, sandboxSource }: {
   open: boolean;
   expanded: boolean;
   openTools: ToolDockTool[];
@@ -354,10 +401,13 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   toolMenuOpen: boolean;
   onToolMenuOpenChange: (open: boolean) => void;
   onOpenTool: (tool: ToolDockTool) => void;
+  onReorderTools: (draggedTool: ToolDockTool, targetTool: ToolDockTool, position: ToolDockTabDropPosition) => void;
   onCloseTool: (tool: ToolDockTool) => void;
   onActiveToolChange: (tool: ToolDockTool | null) => void;
   onExplainCode: (source: string) => void;
   learningPanel: ReactNode;
+  knowledgeBookPanel: ReactNode;
+  sandboxSource?: string | null;
 }) {
   const [width, setWidth] = useState(() =>
   Math.min(DEFAULT_DOCK_WIDTH, getMaxDockWidth()),
@@ -366,6 +416,15 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   const [maxWidth, setMaxWidth] = useState(getMaxDockWidth);
   const resizeStart = useRef<{ pointerX: number; width: number } | null>(null);
   const tabStripRef = useRef<HTMLDivElement>(null);
+  const tabsHeaderRef = useRef<HTMLElement>(null);
+  const draggedTool = useRef<ToolDockTool | null>(null);
+  const lastDragOver = useRef<{ tool: ToolDockTool; position: ToolDockTabDropPosition } | null>(null);
+  const [draggingTool, setDraggingTool] = useState<ToolDockTool | null>(null);
+  const [dragOverTool, setDragOverTool] = useState<ToolDockTool | null>(null);
+  const panelStripRef = useRef<HTMLDivElement>(null);
+  const panelResizeStart = useRef<{ index: number; pointerX: number; widths: number[]; containerWidth: number } | null>(null);
+  const [panelWidths, setPanelWidths] = useState(() => equalToolPanelWidths(openTools.length));
+  const [panelResizing, setPanelResizing] = useState(false);
 
   useEffect(() => {
     const updateMaxWidth = () => {
@@ -376,6 +435,17 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     window.addEventListener("resize", updateMaxWidth);
     return () => window.removeEventListener("resize", updateMaxWidth);
   }, []);
+
+  useEffect(() => {
+    if (!toolMenuOpen) return undefined;
+    const closeMenuOnOutsidePointer = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && tabsHeaderRef.current?.contains(target)) return;
+      onToolMenuOpenChange(false);
+    };
+    document.addEventListener("pointerdown", closeMenuOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeMenuOnOutsidePointer);
+  }, [onToolMenuOpenChange, toolMenuOpen]);
 
   useEffect(() => {
     if (!resizing) return undefined;
@@ -398,6 +468,25 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
   }, [maxWidth, resizing]);
 
   useEffect(() => {
+    if (!panelResizing) return undefined;
+    const handlePanelPointerMove = (event: globalThis.PointerEvent) => {
+      const start = panelResizeStart.current;
+      if (!start) return;
+      setPanelWidths(resizeToolPanelWidths(start.widths, start.index, event.clientX - start.pointerX, start.containerWidth));
+    };
+    const stopPanelResizing = () => {
+      panelResizeStart.current = null;
+      setPanelResizing(false);
+    };
+    window.addEventListener("pointermove", handlePanelPointerMove);
+    window.addEventListener("pointerup", stopPanelResizing, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handlePanelPointerMove);
+      window.removeEventListener("pointerup", stopPanelResizing);
+    };
+  }, [panelResizing]);
+
+  useEffect(() => {
     if (!activeTool) return;
     const activeTab = tabStripRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.parentElement;
     activeTab?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
@@ -407,10 +496,53 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     onToolMenuOpenChange(false);
     onOpenTool(tool);
   };
+  const clearTabDrag = () => {
+    draggedTool.current = null;
+    lastDragOver.current = null;
+    setDraggingTool(null);
+    setDragOverTool(null);
+  };
+  const beginTabDrag = (tool: ToolDockTool, event: DragEvent<HTMLDivElement>) => {
+    draggedTool.current = tool;
+    lastDragOver.current = null;
+    setDraggingTool(tool);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", tool);
+    setDragOverTool(null);
+  };
+  const dragTabOver = (tool: ToolDockTool, event: DragEvent<HTMLDivElement>) => {
+    if (!draggedTool.current || draggedTool.current === tool) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const position: ToolDockTabDropPosition = openTools.indexOf(draggedTool.current) < openTools.indexOf(tool) ? "after" : "before";
+    if (lastDragOver.current?.tool !== tool || lastDragOver.current.position !== position) {
+      onReorderTools(draggedTool.current, tool, position);
+      lastDragOver.current = { tool, position };
+    }
+    setDragOverTool(tool);
+  };
+  const dropTab = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    clearTabDrag();
+  };
   const beginResize = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     resizeStart.current = { pointerX: event.clientX, width };
     setResizing(true);
+  };
+  const beginPanelResize = (index: number, event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const containerWidth = panelStripRef.current?.getBoundingClientRect().width ?? 0;
+    const currentWidths = panelWidths.length === openTools.length ? panelWidths : equalToolPanelWidths(openTools.length);
+    panelResizeStart.current = { index, pointerX: event.clientX, widths: currentWidths, containerWidth: Math.max(1, containerWidth) };
+    setPanelResizing(true);
+  };
+  const resizePanelWithKeyboard = (index: number, event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const containerWidth = panelStripRef.current?.getBoundingClientRect().width ?? 0;
+    const currentWidths = panelWidths.length === openTools.length ? panelWidths : equalToolPanelWidths(openTools.length);
+    setPanelWidths(resizeToolPanelWidths(currentWidths, index, event.key === "ArrowRight" ? 24 : -24, Math.max(1, containerWidth)));
   };
   const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -418,20 +550,25 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
     const delta = event.key === "ArrowLeft" ? 24 : -24;
     setWidth((current) => Math.min(maxWidth, Math.max(MIN_DOCK_WIDTH, current + delta)));
   };
- const dockStyle = { "--tool-dock-width": `${width}px` } as CSSProperties;
+  const dockStyle = { "--tool-dock-width": `${width}px` } as CSSProperties;
+  const currentPanelWidths = panelWidths.length === openTools.length ? panelWidths : equalToolPanelWidths(openTools.length);
+  const panelGridTemplate = currentPanelWidths.flatMap((share, index) => [
+    `minmax(0, ${share}fr)`,
+    ...(index < currentPanelWidths.length - 1 ? [`${TOOL_PANEL_RESIZER_WIDTH}px`] : []),
+  ]).join(" ");
   const showHome = openTools.length === 0;
 
-  return <aside className={["tool-dock", open && "open", expanded && "expanded", resizing && "resizing"].filter(Boolean).join(" ")} aria-label="工具侧栏" style={dockStyle}>
-    {open && <div className="tool-dock-surface">
+  return <aside className={["tool-dock", open && "open", expanded && "expanded", resizing && "resizing", panelResizing && "resizing-panels"].filter(Boolean).join(" ")} aria-label="工具侧栏" style={dockStyle}>
+    <div className="tool-dock-surface" hidden={!open} aria-hidden={!open}>
       {!expanded && <div className="tool-dock-resize-handle" role="separator" aria-label="调整工具侧栏宽度" aria-orientation="vertical" aria-valuemin={MIN_DOCK_WIDTH} aria-valuemax={maxWidth} aria-valuenow={Math.round(width)} tabIndex={0} onPointerDown={beginResize} onKeyDown={resizeWithKeyboard} />}
-      {openTools.length > 0 && <header className="tool-dock-tabs" role="tablist" aria-label="已打开的工具">
+      {openTools.length > 0 && <header ref={tabsHeaderRef} className="tool-dock-tabs" role="tablist" aria-label="已打开的工具">
         <div ref={tabStripRef} className="tool-dock-tab-strip">
-          {openTools.map((tool) => {
+          {openTools.map((tool, index) => {
             const item = tools.find((candidate) => candidate.id === tool)!;
             const Icon = item.icon;
             const selected = tool === activeTool;
-            return <div key={tool} className={["tool-dock-tab", selected && "active"].filter(Boolean).join(" ")}>
-              <button type="button" role="tab" aria-selected={selected} onClick={() => onActiveToolChange(tool)}><Icon size={15} /><span>{item.label}</span></button>
+            return <div key={tool} className={["tool-dock-tab", selected && "active", draggingTool === tool && "is-dragging", dragOverTool === tool && "is-drag-over"].filter(Boolean).join(" ")} draggable onDragStart={(event) => beginTabDrag(tool, event)} onDragOver={(event) => dragTabOver(tool, event)} onDrop={dropTab} onDragEnd={clearTabDrag}>
+              <button type="button" role="tab" aria-selected={selected} aria-posinset={index + 1} aria-setsize={openTools.length} onClick={() => onActiveToolChange(tool)}><Icon size={15} /><span>{item.label}</span></button>
               <button type="button" aria-label={"关闭" + item.label} onClick={() => onCloseTool(tool)}><X size={14} /></button>
             </div>;
           })}
@@ -447,10 +584,21 @@ export function ToolDock({ open, expanded, openTools, activeTool, toolMenuOpen, 
           return <button key={item.id} type="button" aria-label={item.buttonLabel} onClick={() => openTool(item.id)}>
             <span><Icon size={18} /></span>
             <strong>{item.label}</strong>
-            <kbd>{item.shortcut}</kbd>
+            <span className="tool-dock-item-ornament" aria-hidden="true"><i /><i /><i /></span>
           </button>;
         })}
-      </nav> : activeTool === "learning" ? learningPanel : activeTool === "sandbox" ? <SandboxPhaseZeroPanel onExplainCode={onExplainCode} /> : activeTool ? <EmptyToolPanel tool={activeTool} /> : null}
-    </div>}
+      </nav> : <div ref={panelStripRef} className="tool-dock-panels" style={{ "--tool-dock-panel-count": Math.max(1, openTools.length), gridTemplateColumns: panelGridTemplate } as CSSProperties}>
+        {openTools.map((tool, index) => {
+          const item = tools.find((candidate) => candidate.id === tool)!;
+          const panelShare = currentPanelWidths[index] ?? 0;
+          return <Fragment key={tool}>
+            <div className="tool-dock-panel" data-active={tool === activeTool ? "true" : "false"}>
+              {tool === "learning" ? learningPanel : tool === "book" ? knowledgeBookPanel : tool === "sandbox" ? <SandboxPhaseZeroPanel onExplainCode={onExplainCode} initialSource={sandboxSource} /> : <EmptyToolPanel tool={tool} />}
+            </div>
+            {index < openTools.length - 1 && <div className="tool-dock-panel-resizer" role="separator" aria-label={`调整${item.label}与${tools.find((candidate) => candidate.id === openTools[index + 1])?.label ?? "下个页面"}面板宽度`} aria-orientation="vertical" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(panelShare)} tabIndex={0} onPointerDown={(event) => beginPanelResize(index, event)} onKeyDown={(event) => resizePanelWithKeyboard(index, event)}><i /></div>}
+          </Fragment>;
+        })}
+      </div>}
+    </div>
   </aside>;
 }

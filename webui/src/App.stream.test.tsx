@@ -27,6 +27,8 @@ const stream = vi.hoisted(() => {
     lease: { id: "lease-session", state: "active", generation: 1, expires_at: "2026-08-25T10:00:00" },
   }));
   const executeSandbox = vi.fn(async () => ({ status: "completed", stdout: "2\n", stderr: "" }));
+  const getLearningBookNavigation = vi.fn().mockResolvedValue({ workspace_id: "default", items: [] });
+  const getLearningBookPage = vi.fn().mockResolvedValue({ page: null });
   return {
     lastRequestId: () => lastRequestId,
     lastModelProfile: () => lastModelProfile,
@@ -36,6 +38,8 @@ const stream = vi.hoisted(() => {
     updateSettings,
     ensureSandboxLease,
     executeSandbox,
+    getLearningBookNavigation,
+    getLearningBookPage,
     emit(event: Record<string, unknown>) { onEvent?.(event); },
     StudentSocket: class {
       constructor(event: (value: Record<string, unknown>) => void, private readonly onStatus: (status: "connected") => void) { onEvent = event; }
@@ -71,6 +75,8 @@ vi.mock("@/platform/http/api", () => ({
     deleteSession: vi.fn(), updateSettings: stream.updateSettings,
     ensureSandboxLease: stream.ensureSandboxLease,
     executeSandbox: stream.executeSandbox,
+    getLearningBookNavigation: stream.getLearningBookNavigation,
+    getLearningBookPage: stream.getLearningBookPage,
   },
 }));
 
@@ -150,16 +156,76 @@ describe("student stream rendering", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开文件工具" }));
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
 
-    for (const tool of ["打开学习记录工具", "打开浏览器工具", "打开终端工具", "打开代码沙箱工具"]) {
+    for (const tool of ["打开学习记录工具", "打开代码沙箱工具"]) {
       fireEvent.click(screen.getByRole("button", { name: "显示工具列表" }));
       fireEvent.click(screen.getByRole("menuitem", { name: tool }));
     }
 
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "学习记录" })).toBeVisible();
-    expect(screen.getByRole("tab", { name: "浏览器" })).toBeVisible();
-    expect(screen.getByRole("tab", { name: "终端" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "代码沙箱" })).toBeVisible();
+    const panels = [...document.querySelectorAll<HTMLElement>(".tool-dock-panel")];
+    expect(panels).toHaveLength(3);
+    expect(panels.every((panel) => !panel.hasAttribute("hidden"))).toBe(true);
+    expect(document.querySelector(".tool-dock-panels")?.getAttribute("style")).toContain("--tool-dock-panel-count: 3");
+    const panelSeparators = screen.getAllByRole("separator").filter((separator) => separator.getAttribute("aria-orientation") === "vertical" && separator.getAttribute("aria-label") !== "调整工具侧栏宽度");
+    expect(panelSeparators).toHaveLength(2);
+  });
+
+  it("reorders open tool tabs by dragging them horizontally", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开文件工具" }));
+    for (const tool of ["打开学习记录工具", "打开代码沙箱工具"]) {
+      fireEvent.click(screen.getByRole("button", { name: "显示工具列表" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: tool }));
+    }
+
+    const order = () => [...document.querySelectorAll<HTMLElement>(".tool-dock-tab")].map((tab) => tab.querySelector('[role="tab"]')?.textContent?.trim());
+    const draggedTab = screen.getByRole("tab", { name: "代码沙箱" }).closest(".tool-dock-tab") as HTMLElement;
+    const targetTab = screen.getByRole("tab", { name: "文件" }).closest(".tool-dock-tab") as HTMLElement;
+    const dataTransfer = { dropEffect: "move", effectAllowed: "move", setData: vi.fn(), getData: vi.fn() };
+
+    expect(order()).toEqual(["文件", "学习记录", "代码沙箱"]);
+    fireEvent.dragStart(draggedTab, { dataTransfer });
+    fireEvent.dragOver(targetTab, { dataTransfer });
+    expect(order()).toEqual(["代码沙箱", "文件", "学习记录"]);
+    fireEvent.drop(targetTab, { dataTransfer });
+    fireEvent.dragEnd(draggedTab, { dataTransfer });
+
+    expect(order()).toEqual(["代码沙箱", "文件", "学习记录"]);
+
+    const rightDraggedTab = screen.getByRole("tab", { name: "代码沙箱" }).closest(".tool-dock-tab") as HTMLElement;
+    const rightTargetTab = screen.getByRole("tab", { name: "学习记录" }).closest(".tool-dock-tab") as HTMLElement;
+    vi.spyOn(rightTargetTab, "getBoundingClientRect").mockReturnValue({ width: 100, height: 32, top: 0, right: 200, bottom: 32, left: 100, x: 100, y: 0, toJSON: () => ({}) });
+    fireEvent.dragStart(rightDraggedTab, { dataTransfer });
+    fireEvent.dragOver(rightTargetTab, { dataTransfer, clientX: 190 });
+    expect(order()).toEqual(["文件", "学习记录", "代码沙箱"]);
+    fireEvent.drop(rightTargetTab, { dataTransfer, clientX: 190 });
+    fireEvent.dragEnd(rightDraggedTab, { dataTransfer });
+  });
+
+  it("keeps the docked layout when opening a second tool page", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+    fireEvent.click(screen.getByRole("button", { name: "显示工具列表" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "打开知识教材工具" }));
+
+    expect(screen.getByRole("button", { name: "展开工具面板" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "还原工具面板" })).not.toBeInTheDocument();
+    const panelSeparator = screen.getByRole("separator", { name: "调整代码沙箱与知识教材面板宽度" });
+    fireEvent.pointerDown(panelSeparator, { clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 560 });
+    fireEvent.pointerUp(window);
+    expect(Number(panelSeparator.getAttribute("aria-valuenow"))).toBeGreaterThan(50);
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开工具侧栏" }));
+    expect(screen.getByRole("button", { name: "展开工具面板" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "还原工具面板" })).not.toBeInTheDocument();
   });
 
   it("opens the Phase 0 code sandbox as a first-class right-workbench page", async () => {
@@ -174,6 +240,48 @@ describe("student stream rendering", () => {
     expect(screen.getByText(/当前会话使用隔离运行环境/)).toBeVisible();
     await waitFor(() => expect(stream.ensureSandboxLease).toHaveBeenCalledTimes(1));
   });
+
+  it("opens lesson Python code in the real sandbox while retaining the book tab", async () => {
+    stream.ensureSandboxLease.mockClear();
+    stream.getLearningBookNavigation.mockResolvedValue({
+      workspace_id: "default",
+      items: [{ topic_id: "topic-1", topic_name: "基础", knowledge_point_id: "point-1", title: "词法分析", sort_order: 1, revision: 1 }],
+    });
+    stream.getLearningBookPage.mockResolvedValue({
+      page: {
+        workspace_id: "default",
+        topic_id: "topic-1",
+        topic_name: "基础",
+        knowledge_point_id: "point-1",
+        title: "词法分析",
+        content_markdown: "## 示例\n\n```python\nimport torch\nprint(torch.__version__)\n```",
+        revision: 1,
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开知识教材工具" }));
+    fireEvent.click(await screen.findByRole("button", { name: "在沙箱中打开" }));
+
+    expect(screen.getByRole("tab", { name: "知识教材" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "代码沙箱" })).toBeVisible();
+    const openPanels = [...document.querySelectorAll<HTMLElement>(".tool-dock-panel")];
+    expect(openPanels).toHaveLength(2);
+    expect(openPanels.every((panel) => !panel.hasAttribute("hidden"))).toBe(true);
+    expect(screen.getByRole("region", { name: "代码工作台" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "知识教材" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "展开工具面板" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "还原工具面板" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "沙箱代码" })).toHaveValue("import torch\nprint(torch.__version__)");
+    await waitFor(() => expect(stream.ensureSandboxLease).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开工具侧栏" }));
+    expect(screen.getByRole("button", { name: "展开工具面板" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "还原工具面板" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "沙箱代码" })).toHaveValue("import torch\nprint(torch.__version__)");
+  }, 10000);
 
   it("keeps the kernel status in the environment strip when the workbench is expanded", async () => {
     render(<App />);
@@ -296,12 +404,59 @@ describe("student stream rendering", () => {
     expect(menu).toBeVisible();
     expect(document.querySelector(".tool-dock-tab-strip")).toBeInTheDocument();
     expect(menu.closest(".tool-dock-tab-strip")).toBeNull();
-    expect(screen.getByRole("menuitem", { name: "打开浏览器工具" })).toBeVisible();
+    expect(screen.queryByRole("menuitem", { name: "打开浏览器工具" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "打开终端工具" })).not.toBeInTheDocument();
+    expect(menu.querySelectorAll(".tool-dock-item-ornament")).toHaveLength(4);
+    expect(menu).not.toHaveTextContent("Ctrl+");
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
     expect(screen.getByRole("button", { name: "显示工具列表" }).parentElement).toContainElement(menu);
 
     fireEvent.click(screen.getByRole("button", { name: "关闭工具侧栏" }));
     expect(screen.queryByRole("menu", { name: "工具列表" })).not.toBeInTheDocument();
+  });
+
+  it("closes the tool picker when clicking outside the tab row", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开文件工具" }));
+    fireEvent.click(screen.getByRole("button", { name: "显示工具列表" }));
+    expect(screen.getByRole("menu", { name: "工具列表" })).toBeVisible();
+
+    fireEvent.pointerDown(document.body);
+
+    expect(screen.queryByRole("menu", { name: "工具列表" })).not.toBeInTheDocument();
+  });
+
+  it("lets the output panel reach the editor boundary in both directions", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开代码沙箱工具" }));
+
+    const workbench = screen.getByRole("region", { name: "代码工作台" });
+    const titlebar = workbench.querySelector(".sandbox-workbench-titlebar") as HTMLElement;
+    const environmentBar = workbench.querySelector(".sandbox-environment-bar") as HTMLElement;
+    const statusbar = workbench.querySelector(".sandbox-editor-statusbar") as HTMLElement;
+    const outputResizer = screen.getByRole("separator", { name: "调整输出面板高度" });
+    const outputHeader = workbench.querySelector(".sandbox-output-panel > header") as HTMLElement;
+    vi.spyOn(workbench, "getBoundingClientRect").mockReturnValue({ width: 640, height: 600, top: 0, right: 640, bottom: 600, left: 0, x: 0, y: 0, toJSON: () => ({}) });
+    for (const [element, height] of [[titlebar, 50], [environmentBar, 36], [statusbar, 27], [outputResizer, 9], [outputHeader, 46]] as const) {
+      vi.spyOn(element, "getBoundingClientRect").mockReturnValue({ width: 640, height, top: 0, right: 640, bottom: height, left: 0, x: 0, y: 0, toJSON: () => ({}) });
+    }
+
+    fireEvent.pointerDown(outputResizer, { clientY: 300 });
+    fireEvent.pointerMove(window, { clientY: -500 });
+    fireEvent.pointerUp(window);
+    expect(outputResizer).toHaveAttribute("aria-valuemax", "478");
+    expect(outputResizer).toHaveAttribute("aria-valuenow", "478");
+
+    fireEvent.pointerDown(outputResizer, { clientY: 300 });
+    fireEvent.pointerMove(window, { clientY: 1_000 });
+    fireEvent.pointerUp(window);
+    expect(outputResizer).toHaveAttribute("aria-valuemin", "0");
+    expect(outputResizer).toHaveAttribute("aria-valuenow", "0");
+    expect(workbench.querySelector(".sandbox-output-panel")).toHaveStyle({ height: "0px" });
   });
 
   it("exposes a wide draggable dock separator and a full workbench mode", async () => {
@@ -313,9 +468,9 @@ describe("student stream rendering", () => {
     const separator = screen.getByRole("separator", { name: "调整工具侧栏宽度" });
     expect(separator).toHaveAttribute("aria-valuenow", "420");
     const maxWidth = Number(separator.getAttribute("aria-valuemax"));
-    expect(maxWidth).toBe(window.innerWidth - 560);
+    expect(maxWidth).toBe(window.innerWidth - 320);
     fireEvent.pointerDown(separator, { clientX: 480 });
-    fireEvent.pointerMove(window, { clientX: 360 });
+    fireEvent.pointerMove(window, { clientX: 180 });
     fireEvent.pointerUp(window);
     expect(Number(separator.getAttribute("aria-valuenow"))).toBe(maxWidth);
 
