@@ -1,5 +1,5 @@
 import { Check, Copy, ExternalLink, MessageCircleQuestion } from "lucide-react";
-import { Children, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { Children, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkBreaks from "remark-breaks";
@@ -45,11 +45,38 @@ async function copyText(text: string): Promise<void> {
 
 function LessonCodeBlock({ code, dark, language, actions }: { code: string; dark: boolean; language: string; actions?: MarkdownCodeActions }) {
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [codeReady, setCodeReady] = useState(() => typeof IntersectionObserver === "undefined");
+  const codeRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (copyStatus === "idle") return undefined;
     const timer = window.setTimeout(() => setCopyStatus("idle"), 1800);
     return () => window.clearTimeout(timer);
   }, [copyStatus]);
+
+  useEffect(() => {
+    if (codeReady) return undefined;
+    const target = codeRef.current;
+    if (!target || typeof IntersectionObserver === "undefined") {
+      setCodeReady(true);
+      return undefined;
+    }
+    const root = target.closest<HTMLElement>(".knowledge-book-page-scroll,.teacher-book-preview");
+    // happy-dom does not calculate layout boxes, so IntersectionObserver never
+    // reports an intersection there. Render the code immediately in that
+    // environment while keeping the viewport-gated path in a real browser.
+    if (root && root.getBoundingClientRect().height === 0) {
+      setCodeReady(true);
+      return undefined;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setCodeReady(true);
+        observer.disconnect();
+      }
+    }, { root, rootMargin: "640px 0px", threshold: 0 });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [codeReady]);
 
   const copy = async () => {
     try {
@@ -62,7 +89,7 @@ function LessonCodeBlock({ code, dark, language, actions }: { code: string; dark
 
   const supportsLessonActions = /^(?:python|pytorch|py)$/i.test(language);
   const lessonActions = supportsLessonActions ? actions : undefined;
-  return <div className="code-shell">
+  return <div ref={codeRef} className="code-shell">
     <div className="code-toolbar">
       <div className="code-label">{language}</div>
       {lessonActions && <div className="code-actions">
@@ -73,14 +100,19 @@ function LessonCodeBlock({ code, dark, language, actions }: { code: string; dark
         {copyStatus === "error" && <span className="code-action-status" role="status">复制失败</span>}
       </div>}
     </div>
-    <Suspense fallback={<pre><code>{code}</code></pre>}>
-      <LazyCode language={language} code={code} dark={dark} />
-    </Suspense>
+    {codeReady ? <Suspense fallback={<pre><code>{code}</code></pre>}><LazyCode language={language} code={code} dark={dark} /></Suspense> : <pre className="code-lazy-fallback"><code>{code}</code></pre>}
   </div>;
 }
 
 function headingText(children: ReactNode): string {
   return Children.toArray(children).join("");
+}
+
+function headingSourceLine(node: unknown): number | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  const position = (node as { position?: { start?: { line?: unknown } } }).position;
+  const line = position?.start?.line;
+  return typeof line === "number" ? line : undefined;
 }
 
 function normalizeFormulaContent(content: string): string {
@@ -142,30 +174,56 @@ function isSafeMarkdownImage(src: string | undefined, allowDataImages = false): 
   }
 }
 
+function readMarkdownImageWidth(title: string | undefined): string | undefined {
+  const match = title?.trim().match(/^width\s*=\s*(\d+(?:\.\d+)?)(px|%|rem|em|vw|vh)?$/i);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  const unit = (match[2] ?? "px").toLowerCase();
+  const maximum = unit === "%" || unit === "vw" || unit === "vh" ? 100 : 1600;
+  if (!Number.isFinite(value) || value <= 0 || value > maximum) return undefined;
+  return `${value}${unit}`;
+}
+
 /** Internal protocol metadata is parsed by the gateway and must never be shown or copied as lesson content. */
 export function stripInternalChatMetadata(content: string): string {
   return content.replace(/\s*<!--\s*guided-result\s*:\s*(?:\{[\s\S]*?\}\s*-->|[\s\S]*$)/gi, "").trimEnd();
 }
 
-export function MarkdownContent({ children, streaming = false, headingIds, codeActions, allowDataImages = false }: { children: string; streaming?: boolean; headingIds?: string[]; codeActions?: MarkdownCodeActions; allowDataImages?: boolean }) {
+export function MarkdownContent({ children, streaming = false, headingIds, headingIdsByLine, codeActions, allowDataImages = false }: { children: string; streaming?: boolean; headingIds?: string[]; headingIdsByLine?: Record<number, string>; codeActions?: MarkdownCodeActions; allowDataImages?: boolean }) {
   const dark = document.documentElement.classList.contains("dark");
-  let headingIndex = 0;
-  const nextHeadingId = () => headingIds?.[headingIndex++];
-  return (
-    <div className="markdown-content prose prose-zinc max-w-none dark:prose-invert prose-headings:scroll-mt-20 prose-pre:p-0">
+  const renderedMarkdown = useMemo(() => {
+    let legacyHeadingIndex = 0;
+    const nextHeadingId = (node: unknown) => {
+      if (headingIdsByLine) {
+        const sourceLine = headingSourceLine(node);
+        return sourceLine === undefined ? undefined : headingIdsByLine[sourceLine];
+      }
+      return headingIds?.[legacyHeadingIndex++];
+    };
+    return (
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         urlTransform={(url) => url}
         components={{
-          h1: ({ children: value, ...props }) => <h1 {...props} id={nextHeadingId()}>{value}</h1>,
-          h2: ({ children: value }) => {
+          h1: ({ children: value, node, ...props }) => {
+            const headingId = nextHeadingId(node);
+            return <><span id={headingId} className="knowledge-book-heading-anchor" data-knowledge-book-heading-anchor="true" aria-hidden="true" /><h1 {...props} data-knowledge-book-heading-id={headingId}>{value}</h1></>;
+          },
+          h2: ({ children: value, node }) => {
+            const headingId = nextHeadingId(node);
             const text = headingText(value);
             const educational = /练习|思考|核心|概念|误区|总结/.test(text);
-            return <h2 id={nextHeadingId()} className={educational ? "education-heading" : undefined}>{value}</h2>;
+            return <><span id={headingId} className="knowledge-book-heading-anchor" data-knowledge-book-heading-anchor="true" aria-hidden="true" /><h2 data-knowledge-book-heading-id={headingId} className={educational ? "education-heading" : undefined}>{value}</h2></>;
           },
-          h3: ({ children: value, ...props }) => <h3 {...props} id={nextHeadingId()}>{value}</h3>,
-          h4: ({ children: value, ...props }) => <h4 {...props} id={nextHeadingId()}>{value}</h4>,
+          h3: ({ children: value, node, ...props }) => {
+            const headingId = nextHeadingId(node);
+            return <><span id={headingId} className="knowledge-book-heading-anchor" data-knowledge-book-heading-anchor="true" aria-hidden="true" /><h3 {...props} data-knowledge-book-heading-id={headingId}>{value}</h3></>;
+          },
+          h4: ({ children: value, node, ...props }) => {
+            const headingId = nextHeadingId(node);
+            return <><span id={headingId} className="knowledge-book-heading-anchor" data-knowledge-book-heading-anchor="true" aria-hidden="true" /><h4 {...props} data-knowledge-book-heading-id={headingId}>{value}</h4></>;
+          },
           code: ({ className, children: value, ...props }) => {
             const match = /language-([\w-]+)/.exec(className ?? "");
             const content = String(value).replace(/\n$/, "");
@@ -175,13 +233,23 @@ export function MarkdownContent({ children, streaming = false, headingIds, codeA
           a: ({ children: value, href, ...props }) => isSameOriginMarkdownLink(href)
             ? <a {...props} href={href}>{value}</a>
             : <span className="external-link-removed">{value}</span>,
-          img: ({ src, alt, ...props }) => isSafeMarkdownImage(src, allowDataImages)
-            ? <img {...props} src={src} alt={alt ?? ""} />
-            : <span className="external-link-removed">{alt || "图片资源不可用"}</span>,
+          img: ({ node, src, alt, title, ...props }) => {
+            void node;
+            const imageWidth = readMarkdownImageWidth(title);
+            return isSafeMarkdownImage(src, allowDataImages)
+              ? <span className="markdown-image-figure"><img {...props} src={src} alt={alt ?? ""} title={imageWidth ? undefined : title} loading="lazy" decoding="async" style={imageWidth ? { ...props.style, width: imageWidth } : props.style} />{alt?.trim() && <span className="markdown-image-caption">{alt}</span>}</span>
+              : <span className="external-link-removed">{alt || "图片资源不可用"}</span>;
+          },
         }}
       >
         {normalizeLatexDelimiters(stripInternalChatMetadata(children) || (streaming ? "" : "暂无内容"))}
       </ReactMarkdown>
+    );
+  }, [allowDataImages, children, codeActions, dark, headingIds, headingIdsByLine, streaming]);
+
+  return (
+    <div className="markdown-content prose prose-zinc max-w-none dark:prose-invert prose-headings:scroll-mt-20 prose-pre:p-0">
+      {renderedMarkdown}
       {streaming && <span className="stream-caret" aria-label="正在生成" />}
     </div>
   );
