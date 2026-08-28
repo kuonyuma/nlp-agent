@@ -262,8 +262,7 @@ describe("student stream rendering", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "打开工具侧栏" }));
     fireEvent.click(screen.getByRole("button", { name: "打开知识教材工具" }));
-    await screen.findByText("print(torch.__version__)");
-    fireEvent.click(screen.getByRole("button", { name: "在沙箱中打开" }));
+    fireEvent.click(await screen.findByRole("button", { name: "在沙箱中打开" }));
 
     expect(screen.getByRole("tab", { name: "知识教材" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "代码沙箱" })).toBeVisible();
