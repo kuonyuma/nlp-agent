@@ -19,3 +19,14 @@ def test_sandbox_runtime_installs_a_pinned_cpu_only_pytorch_wheel() -> None:
     assert 'torch==${pytorch_version}' in normalized
     assert "conda" not in normalized
     assert "cuda" not in normalized
+
+
+def test_runtime_health_probe_verifies_the_pinned_cpu_torch_runtime() -> None:
+    runtime = Path("sandbox-runtime/nova_runtime.py").read_text(encoding="utf-8")
+    health = runtime[runtime.index("def health") :]
+
+    assert 'EXPECTED_TORCH_VERSION = "2.7.1"' in runtime
+    assert "def verify_runtime_dependencies()" in runtime
+    assert "import torch" in runtime
+    assert "torch.cuda.is_available()" in runtime
+    assert "verify_runtime_dependencies()" in health
