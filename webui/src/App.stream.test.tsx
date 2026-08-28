@@ -469,8 +469,8 @@ describe("student stream rendering", () => {
     expect(menu.closest(".tool-dock-tab-strip")).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "打开浏览器工具" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "打开终端工具" })).not.toBeInTheDocument();
-    expect(menu.querySelectorAll(".tool-dock-item-ornament")).toHaveLength(4);
-    expect(menu).not.toHaveTextContent("Ctrl+");
+    expect(menu.querySelectorAll("kbd")).toHaveLength(4);
+    expect(menu).toHaveTextContent("Ctrl+Alt+F");
     expect(screen.getByRole("tab", { name: "文件" })).toBeVisible();
     expect(screen.getByRole("button", { name: "显示工具列表" }).parentElement).toContainElement(menu);
 

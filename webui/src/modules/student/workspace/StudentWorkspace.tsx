@@ -74,10 +74,11 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
   const archived = useMemo(() => workspace.sessions.filter((session) => workspace.preferences.sessions[session.session_id]?.archived), [workspace.preferences.sessions, workspace.sessions]);
   const { scrollRef, onScroll } = useSessionScrollRestoration(workspace.activeSessionId, workspace.messages, workspace.loadingMessages);
   const setCollapsed = (collapsed: boolean) => { setSidebarCollapsed(collapsed); };
-  const openTool = (tool: ToolDockTool) => {
+  const openTool = useCallback((tool: ToolDockTool) => {
+    setToolDockOpen(true);
     setOpenTools((current) => current.includes(tool) ? current : [...current, tool]);
     setActiveTool(tool);
-  };
+  }, []);
   const reorderTools = (draggedTool: ToolDockTool, targetTool: ToolDockTool, position: ToolDockTabDropPosition) => {
     setOpenTools((current) => {
       const draggedIndex = current.indexOf(draggedTool);
