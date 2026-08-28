@@ -27,10 +27,12 @@ from server.sandbox.confirmation import SandboxConfirmationSigner
 from server.sandbox.ticket import SandboxTicketSigner
 from server.sandbox.events import SandboxEventStore, default_sandbox_event_store
 from server.sandbox.execution_events import (
+    append_event_with_retry,
     execution_failure_payload,
     execution_output_streams,
     execution_result_failure_payload,
     execution_result_failed,
+    SandboxEventDeliveryError,
 )
 from server.web.protocol import control_event
 
@@ -95,6 +97,149 @@ def _sandbox_gateway(request: Request) -> SandboxGateway:
     return gateway
 
 
+def _sandbox_session_factory(request: Request):
+    """Return the database factory used for short, independently committed writes.
+
+    The request dependency deliberately owns a transaction for the lifetime of
+    the HTTP request.  A Docker Manager uses another database connection, so
+    execution records must be committed through this factory before any RPC is
+    sent to the Manager.
+    """
+    factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sandbox database is unavailable.",
+        )
+    return factory
+
+
+async def _emit_execution_event(
+    request: Request,
+    *,
+    execution_id: str,
+    user_id: str,
+    event_type: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    event = await append_event_with_retry(
+        lambda: sandbox_events.append(
+            execution_id,
+            user_id=user_id,
+            event_type=event_type,
+            payload=payload,
+        )
+    )
+    # Redis append is the durable delivery boundary.  A websocket broadcast
+    # can fail for a disconnected browser without invalidating the persisted
+    # event; the replay endpoint will recover it on the next request.
+    try:
+        await request.app.state.hub.broadcast(
+            control_event(
+                f"sandbox.{event_type}",
+                payload={"execution_id": execution_id, **event},
+            ),
+            user_id=user_id,
+        )
+    except Exception:
+        pass
+    return event
+
+
+async def _finish_execution(
+    request: Request,
+    session_factory,
+    *,
+    execution_id: str,
+    owner_user_id: str,
+    status_value: str,
+    result: dict[str, object] | None = None,
+    error: BaseException | None = None,
+) -> list[object]:
+    """Persist the terminal execution state in a fresh short transaction."""
+    persisted_artifacts: list[object] = []
+    event_delivery_error: BaseException | None = None
+    async with session_factory.begin() as session:
+        execution = await session.get(
+            SandboxExecutionModel,
+            execution_id,
+            with_for_update=True,
+        )
+        if execution is None:
+            raise RuntimeError("sandbox execution record disappeared before completion")
+        if result is not None:
+            store_root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
+            if store_root:
+                persisted_artifacts = persist_runtime_artifacts(
+                    db=session,
+                    execution_id=execution_id,
+                    owner_user_id=owner_user_id,
+                    payload=result.get("artifacts"),
+                    store_root=Path(store_root),
+                    ttl_seconds=settings.NLP_AGENT_SANDBOX_ARTIFACT_TTL_S,
+                )
+        execution.status = status_value
+        execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        if error is not None:
+            execution.exit_reason = f"{type(error).__name__}: {error}"[:128]
+        elif result is not None and execution_result_failed(result):
+            execution.exit_reason = execution_result_failure_payload(result)["error"]
+        failed = error is not None or execution_result_failed(result or {})
+        event_type = "execution.failed" if failed else "execution.completed"
+        payload = (
+            execution_failure_payload(error)
+            if error is not None
+            else execution_result_failure_payload(result or {})
+            if failed
+            else {}
+        )
+        try:
+            if result is not None:
+                for stream, output in execution_output_streams(result):
+                    await _emit_execution_event(
+                        request,
+                        execution_id=execution_id,
+                        user_id=owner_user_id,
+                        event_type="execution.output",
+                        payload={"stream": stream, "text": output},
+                    )
+            await _emit_execution_event(
+                request,
+                execution_id=execution_id,
+                user_id=owner_user_id,
+                event_type=event_type,
+                payload=payload,
+            )
+        except Exception as delivery_error:
+            # Redis is outside the SQL transaction, so compensate explicitly:
+            # never commit a successful terminal state when its terminal event
+            # was not delivered.  The failure event is best effort and the DB
+            # row remains authoritative if Redis is completely unavailable.
+            event_delivery_error = delivery_error
+            execution.status = "failed"
+            execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
+            execution.exit_reason = f"event delivery failed: {delivery_error}"[:128]
+            summary = dict(execution.resource_summary_json or {})
+            summary["event_delivery"] = {
+                "status": "failed",
+                "error": str(delivery_error)[:128],
+            }
+            execution.resource_summary_json = summary
+            try:
+                await _emit_execution_event(
+                    request,
+                    execution_id=execution_id,
+                    user_id=owner_user_id,
+                    event_type="execution.failed",
+                    payload=execution_failure_payload(delivery_error),
+                )
+            except Exception:
+                pass
+    if event_delivery_error is not None:
+        raise SandboxEventDeliveryError(event_delivery_error)
+    return persisted_artifacts
+
+
 @router.get("")
 async def describe_sandbox(
     db: DbSession,
@@ -151,129 +296,100 @@ async def execute_sandbox(
     claims: DatabaseClaims,
     _write_claims: WriteClaims,
 ) -> dict:
+    del db  # The request-scoped transaction must not span the Manager RPC.
     scope = SandboxScope.from_authenticated_request(principal, claims)
     execution_id = str(uuid4())
-    environment = await db.scalar(select(SandboxEnvironmentModel).where(SandboxEnvironmentModel.owner_user_id == scope.owner_user_id))
-    lease = None
-    if environment is not None:
-        lease = await db.scalar(select(SandboxLeaseModel).where(
-            SandboxLeaseModel.environment_id == environment.id,
-            SandboxLeaseModel.auth_session_id == scope.auth_session_id,
-            SandboxLeaseModel.state == "active",
-        ))
-    if environment is None or lease is None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Sandbox lease is not active.")
-    execution = SandboxExecutionModel(
-        id=execution_id,
-        environment_id=environment.id,
-        runtime_instance_id=lease.runtime_instance_id,
-        lease_id=lease.id,
-        owner_user_id=scope.owner_user_id,
-        workspace_id=scope.workspace_id,
-        actor_type="browser",
-        request_id=execution_id,
-        code_hash=hashlib.sha256(body.source.encode("utf-8")).hexdigest(),
-        status="running",
-        generation=scope.generation,
-        started_at=datetime.now(UTC).replace(tzinfo=None),
-    )
-    db.add(execution)
-    await db.flush()
-    await sandbox_events.append(execution_id, user_id=scope.owner_user_id, event_type="execution.started", payload={})
-    await request.app.state.hub.broadcast(control_event("sandbox.execution.started", payload={"execution_id": execution_id, "seq": 1}), user_id=scope.owner_user_id)
+    session_factory = _sandbox_session_factory(request)
+
+    # Keep the execution envelope and the lease lookup in a short transaction.
+    # The Manager has its own connection and must see this commit before it
+    # executes its SELECT ... FOR UPDATE fencing checks.
+    async with session_factory.begin() as session:
+        environment = await session.scalar(
+            select(SandboxEnvironmentModel).where(
+                SandboxEnvironmentModel.owner_user_id == scope.owner_user_id
+            )
+        )
+        lease = None
+        if environment is not None:
+            lease = await session.scalar(
+                select(SandboxLeaseModel).where(
+                    SandboxLeaseModel.environment_id == environment.id,
+                    SandboxLeaseModel.auth_session_id == scope.auth_session_id,
+                    SandboxLeaseModel.state == "active",
+                )
+            )
+        if environment is None or lease is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Sandbox lease is not active.",
+            )
+        session.add(
+            SandboxExecutionModel(
+                id=execution_id,
+                environment_id=environment.id,
+                runtime_instance_id=lease.runtime_instance_id,
+                lease_id=lease.id,
+                owner_user_id=scope.owner_user_id,
+                workspace_id=scope.workspace_id,
+                actor_type="browser",
+                request_id=execution_id,
+                code_hash=hashlib.sha256(body.source.encode("utf-8")).hexdigest(),
+                status="running",
+                generation=scope.generation,
+                started_at=datetime.now(UTC).replace(tzinfo=None),
+            )
+        )
+        await session.flush()
+
     try:
+        # Opening the event stream is part of the execution lifecycle.  If it
+        # fails, the exception reaches the failure finalizer below and the row
+        # is closed instead of remaining indefinitely in ``running``.
+        await _emit_execution_event(
+            request,
+            execution_id=execution_id,
+            user_id=scope.owner_user_id,
+            event_type="execution.started",
+            payload={},
+        )
         result = await _sandbox_gateway(request).execute(scope, source=body.source, ticket=body.ticket)
-        persisted_artifacts = []
-        store_root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
-        if store_root:
-            persisted_artifacts = persist_runtime_artifacts(
-                db=db, execution_id=execution_id, owner_user_id=scope.owner_user_id,
-                payload=result.get("artifacts"), store_root=Path(store_root),
-                ttl_seconds=settings.NLP_AGENT_SANDBOX_ARTIFACT_TTL_S,
-            )
-        for stream, output in execution_output_streams(result):
-            event = await sandbox_events.append(
-                execution_id,
-                user_id=scope.owner_user_id,
-                event_type="execution.output",
-                payload={"stream": stream, "text": output},
-            )
-            await request.app.state.hub.broadcast(
-                control_event(
-                    "sandbox.execution.output",
-                    payload={"execution_id": execution_id, **event},
-                ),
-                user_id=scope.owner_user_id,
-            )
-        execution.status = str(result.get("status") or "completed")
-        execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        if execution_result_failed(result):
-            event = await sandbox_events.append(
-                execution_id,
-                user_id=scope.owner_user_id,
-                event_type="execution.failed",
-                payload=execution_result_failure_payload(result),
-            )
-            await request.app.state.hub.broadcast(
-                control_event(
-                    "sandbox.execution.failed",
-                    payload={"execution_id": execution_id, **event},
-                ),
-                user_id=scope.owner_user_id,
-            )
-        else:
-            event = await sandbox_events.append(
-                execution_id,
-                user_id=scope.owner_user_id,
-                event_type="execution.completed",
-                payload={},
-            )
-            await request.app.state.hub.broadcast(
-                control_event(
-                    "sandbox.execution.completed",
-                    payload={"execution_id": execution_id, **event},
-                ),
-                user_id=scope.owner_user_id,
-            )
-        await db.commit()
+        persisted_artifacts = await _finish_execution(
+            request,
+            session_factory,
+            execution_id=execution_id,
+            owner_user_id=scope.owner_user_id,
+            status_value=str(result.get("status") or "completed"),
+            result=result,
+        )
         return {**result, "execution_id": execution_id, "artifacts": [{"id": artifact.id, "name": artifact.locator.rsplit("/", 1)[-1], "mime_type": artifact.mime_type} for artifact in persisted_artifacts]}
+    except SandboxEventDeliveryError as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
     except PermissionError as error:
-        execution.status = "failed"
-        execution.exit_reason = str(error)[:128]
-        execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        event = await sandbox_events.append(
-            execution_id,
-            user_id=scope.owner_user_id,
-            event_type="execution.failed",
-            payload=execution_failure_payload(error),
-        )
-        await request.app.state.hub.broadcast(
-            control_event(
-                "sandbox.execution.failed",
-                payload={"execution_id": execution_id, **event},
-            ),
-            user_id=scope.owner_user_id,
-        )
-        await db.commit()
+        try:
+            await _finish_execution(
+                request,
+                session_factory,
+                execution_id=execution_id,
+                owner_user_id=scope.owner_user_id,
+                status_value="failed",
+                error=error,
+            )
+        except SandboxEventDeliveryError as delivery_error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(delivery_error)) from delivery_error
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     except Exception as error:
-        execution.status = "failed"
-        execution.exit_reason = f"{type(error).__name__}: {error}"[:128]
-        execution.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        event = await sandbox_events.append(
-            execution_id,
-            user_id=scope.owner_user_id,
-            event_type="execution.failed",
-            payload=execution_failure_payload(error),
-        )
-        await request.app.state.hub.broadcast(
-            control_event(
-                "sandbox.execution.failed",
-                payload={"execution_id": execution_id, **event},
-            ),
-            user_id=scope.owner_user_id,
-        )
-        await db.commit()
+        try:
+            await _finish_execution(
+                request,
+                session_factory,
+                execution_id=execution_id,
+                owner_user_id=scope.owner_user_id,
+                status_value="failed",
+                error=error,
+            )
+        except SandboxEventDeliveryError as delivery_error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(delivery_error)) from delivery_error
         raise
 
 
