@@ -29,7 +29,11 @@ describe("Sidebar delete requests", () => {
   it("delegates session and category deletion to the shared confirmation owner", () => {
     render(<Sidebar {...props} />);
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
-    expect(props.onDelete).toHaveBeenCalledWith("session_1", "Attention 入门");
+    expect(props.onDelete).toHaveBeenCalledWith(
+  "session_1",
+  "Attention 入门",
+  undefined,
+);
 
     fireEvent.click(screen.getByRole("button", { name: "删除分类" }));
     expect(props.onDeleteCategory).toHaveBeenCalledWith("category_1", "注意力机制");
@@ -89,14 +93,17 @@ describe("Sidebar delete requests", () => {
   });
 
   it("renames a session through the backend callback", () => {
-    vi.stubGlobal("prompt", vi.fn(() => "新的标题"));
     const onRename = vi.fn();
-    render(<Sidebar {...props} onRename={onRename} />);
+    const { container } = render(<Sidebar {...props} onRename={onRename} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "重命名学习对话" }));
+    fireEvent.click(container.querySelector(".session-menu summary")!);
+    fireEvent.click(screen.getByRole("button", { name: "重命名" }));
+
+    const input = container.querySelector<HTMLInputElement>(".session-rename-input")!;
+    fireEvent.change(input, { target: { value: "新的标题" } });
+    fireEvent.keyDown(input, { key: "Enter" });
 
     expect(onRename).toHaveBeenCalledWith("session_1", "新的标题");
-    vi.unstubAllGlobals();
   });
 
   it("groups pinned sessions first across categories and restores source order after unpinning", () => {
@@ -173,4 +180,22 @@ describe("Sidebar delete requests", () => {
 
     expect(onMeta).toHaveBeenCalledWith("session_1", { pinnedAt: expect.any(Number) });
   });
+  it("renames a session inline without using a native prompt", () => {
+  const onRename = vi.fn();
+  const { container } = render(<Sidebar {...props} onRename={onRename} />);
+
+  fireEvent.click(container.querySelector(".session-menu summary")!);
+  fireEvent.click(container.querySelector(".session-menu button")!);
+
+  const input = container.querySelector<HTMLInputElement>(".session-rename-input")!;
+
+  expect(input).toHaveValue("Attention 入门");
+
+  fireEvent.change(input, { target: { value: "Transformer 学习" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+
+  expect(onRename).toHaveBeenCalledWith("session_1", "Transformer 学习");
+
+  expect(container.querySelector(".session-rename-input")).not.toBeInTheDocument();
+});
 });

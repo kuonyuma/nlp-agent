@@ -40,6 +40,36 @@ export interface DeveloperSnapshot {
   web: Record<string, unknown>;
 }
 
+export interface FeedbackMessage {
+  id: string;
+  sender_type: "student" | "developer";
+  body: string;
+  created_at: string;
+}
+
+export interface FeedbackThreadSummary {
+  thread_id: string;
+  user_id: string;
+  username: string;
+  display_name: string;
+  unread_count: number;
+  updated_at: string;
+  latest: FeedbackMessage | null;
+}
+
+export interface FeedbackThreadList {
+  items: FeedbackThreadSummary[];
+  total: number;
+}
+
+export interface FeedbackThread {
+  thread_id: string;
+  user_id: string;
+  username: string;
+  display_name: string;
+  messages: FeedbackMessage[];
+}
+
 export interface TeachingGoals {
   workspace_id: string;
   course_title: string;
@@ -58,6 +88,82 @@ export interface ExerciseBlueprint { id: string; name: string; topic_id: string;
 export interface ReviewBlueprint { id: string; name: string; topic_id: string; knowledge_point_id: string; instructions: string; exercise_blueprint_id: string | null; status: BlueprintStatus; question_type: string; rubric: RubricPoint[] }
 export interface GuidedBlueprint { id: string; name: string; topic_id: string; knowledge_point_id: string; guidance: string; status: BlueprintStatus }
 export interface TeacherCatalog { workspace_id: string; topics: CourseTopic[]; exercise_blueprints: ExerciseBlueprint[]; review_blueprints: ReviewBlueprint[]; guided_blueprints: GuidedBlueprint[] }
+export interface TeacherBookNavigationItem {
+  topic_id: string;
+  topic_name: string;
+  knowledge_point_id: string;
+  title: string;
+  sort_order: number;
+  topic_status: AvailabilityStatus;
+  knowledge_point_status: AvailabilityStatus;
+  has_draft: boolean;
+  has_published: boolean;
+  revision: number;
+  published_revision: number | null;
+}
+export interface LearningBookNavigationItem {
+  topic_id: string;
+  topic_name: string;
+  knowledge_point_id: string;
+  title: string;
+  sort_order: number;
+  revision: number;
+}
+export interface TeacherBookPage {
+  workspace_id: string;
+  topic_id: string;
+  topic_name: string;
+  knowledge_point_id: string;
+  title: string;
+  draft_markdown: string;
+  published_markdown: string | null;
+  revision: number;
+  published_revision: number | null;
+  updated_at: string | null;
+}
+export interface LearningBookPage {
+  workspace_id: string;
+  topic_id: string;
+  topic_name: string;
+  knowledge_point_id: string;
+  title: string;
+  content_markdown: string;
+  revision: number;
+}
+export interface TeacherBookImportPreview {
+  file_name: string;
+  content_markdown: string;
+  removed_frameworks: string[];
+  warnings: string[];
+}
+export interface TeacherBookAssetInput {
+  asset_path: string;
+  media_type: string;
+  content_base64: string;
+}
+
+export interface TeacherBookArchiveItemPreview {
+  topic_id: string;
+  knowledge_point_id: string;
+  title: string;
+  file_name: string;
+  action: "create" | "update" | "unchanged";
+  expected_revision: number;
+  current_markdown: string;
+  content_markdown: string;
+  removed_frameworks: string[];
+  warnings: string[];
+}
+
+export interface TeacherBookArchiveImportPreview {
+  file_name: string;
+  format_version: number;
+  title: string;
+  items: TeacherBookArchiveItemPreview[];
+  asset_paths: string[];
+  omitted_knowledge_points: string[];
+  warnings: string[];
+}
 
 export interface TeacherDistribution { name: string; count: number; percentage: number }
 
@@ -111,9 +217,25 @@ export interface SessionSummary {
   user_id: string;
   workspace_id: string;
   channel: string;
-  created_at?: number;
-  last_active?: number;
+  created_at?: string | number;
+  last_active?: string | number;
   title?: string;
+}
+
+export interface SessionListResponse {
+  items: SessionSummary[];
+  total?: number;
+  offset?: number;
+  limit?: number;
+  has_more?: boolean;
+}
+
+export interface AgentSessionStats {
+  sessions_total: number;
+  sessions_active: number;
+  turns_total: number | null;
+  turns_last_24h: number | null;
+  last_activity_at: string | number | null;
 }
 
 export interface TurnRecord {
@@ -191,7 +313,6 @@ export interface SessionLearningMeta {
   title?: string;
   topic?: string;
   categoryId?: string;
-  favorite?: boolean;
   archived?: boolean;
   pinnedAt?: number;
   summary?: string;
@@ -256,12 +377,15 @@ export interface UserProfile {
   updated_at: string;
   deleted_at?: string | null;
   last_login_at?: string | null;
+  roles?: string[];
 }
 
 export interface RbacRole { code: string; name: string; description: string; status: string; is_builtin: boolean }
 export interface RbacPermission { code: string; name: string; description: string; status: string }
 export interface SystemMenu { id: string; parent_id: string | null; type: string; name: string; route_path: string | null; component_key: string | null; permission_id: string | null; client_scope: string | null; sort_order: number; visible: boolean; status: string }
 export interface AuthorizationAuditRecord { id: string; actor_user_id: string | null; target_user_id: string | null; decision: string; reason_code: string; permission_code: string | null; resource_type: string | null; resource_id: string | null; detail: Record<string, unknown>; created_at: string }
+export interface AuthorizationAuditListResponse { items: AuthorizationAuditRecord[]; total: number; offset: number; limit: number; has_more: boolean }
+export interface AuthorizationAuditSummary { period_days: number; since: string; total: number; by_decision: Record<string, number>; top_reasons: Array<{ reason_code: string; count: number }> }
 
 export interface UserListResponse {
   users: UserProfile[];

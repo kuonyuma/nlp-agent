@@ -2,18 +2,24 @@
 
 import asyncio
 import json
+import logging
 import secrets
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, WebSocket, status
+logger = logging.getLogger(__name__)
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, Security, WebSocket, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyCookie
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from configs.settings import settings
@@ -23,6 +29,7 @@ from core.authorization_audit import begin as begin_authorization_audit, end as 
 from gateway.contracts import (
     GatewayNotStartedError,
     InjectMessageRequest,
+    KnowledgeBookRevisionConflictError,
     ResourceNotFoundError,
     SubmitTurnRequest,
     TurnConflictError,
@@ -54,6 +61,8 @@ from server.web.contracts import (
     UpdateCustomToolsBody,
     UpdateToolPoliciesBody,
     UpdateSettingsBody,
+    FeedbackBody,
+    FeedbackReadBody,
     McpServerBody,
     SkillBody,
     WorkerProfileBody,
@@ -74,19 +83,82 @@ from server.web.developer_runtime import (
     upsert_skill,
     upsert_worker_profile,
 )
-from server.teacher.models import ExerciseBlueprint, GuidedBlueprint, ReviewBlueprint, UpdateTeacherCatalog, UpdateTeachingGoals
+from server.teacher.models import (
+    ExerciseBlueprint,
+    GuidedBlueprint,
+    TeacherBookArchiveImportApplyRequest,
+    TeacherBookArchiveImportPreviewRequest,
+    PublishTeacherBookPage,
+    ReviewBlueprint,
+    TeacherBookImportApplyRequest,
+    TeacherBookImportPreviewRequest,
+    UpdateTeacherBookPage,
+    UpdateTeacherCatalog,
+    UpdateTeachingGoals,
+)
 from server.teacher.service import teacher_service
 from server.rbac.service import rbac_service
 from server.infrastructure.mysql.models import UserModel
+from server.sandbox.service import sandbox_lifecycle_service
+from server.sandbox.artifact_retention import purge_expired_artifacts
+from server.sandbox.metrics import record_sandbox_capacity_sample
 from server.release_notes.service import (
     ReleaseNoteConflictError,
     ReleaseNoteNotFoundError,
     release_note_service,
 )
 from server.web.websocket import WebSocketHub, websocket_endpoint
+from server.web.feedback import get_feedback_thread, list_feedback_threads, mark_feedback_read, submit_feedback
+from server.auth.dependencies import get_db_session
+from server.auth import code_store
+from server.auth.captcha import generate_captcha_image
+from server.user.schemas import SmsCodeRequest, UserCreate, UserRegister
+from server.user.service import UserService, generate_sms_code
+from server.user.tencent_sms import create_tencent_sms_provider_from_env
+
+DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 GatewayFactory = Callable[[], BackendGateway]
+
+
+class SpaStaticFiles(StaticFiles):
+    """Serve the SPA shell only for browser navigations.
+
+    A blanket fallback turns missing API responses and broken JavaScript
+    assets into an HTML ``200`` response.  Browsers then report a misleading
+    JSON/parse error and operational probes can no longer distinguish a real
+    404.  Restricting the fallback to HTML GET/HEAD navigations keeps the
+    BrowserRouter deep-link fix while preserving normal HTTP semantics.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        directory = kwargs.get("directory")
+        if directory is None and args:
+            directory = args[0]
+        self._spa_index = Path(directory) / "index.html"
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as error:
+            headers = {
+                key.lower(): value
+                for key, value in scope.get("headers", [])
+            }
+            accept = headers.get(b"accept", b"").decode("latin-1")
+            normalized_path = str(scope.get("path", path)).lstrip("/").lower()
+            is_navigation = (
+                scope.get("method") in {"GET", "HEAD"}
+                and "text/html" in accept.lower()
+                and normalized_path not in {"api", "ws"}
+                and not normalized_path.startswith("api/")
+                and not normalized_path.startswith("ws/")
+            )
+            if error.status_code == 404 and is_navigation and self._spa_index.is_file():
+                return await super().get_response("index.html", scope)
+            raise
 
 
 def _problem(
@@ -185,6 +257,24 @@ def create_app(
                 gateway.authorization_session_factory
             )
         app.state.gateway = gateway
+        # Bind model-facing Sandbox tools to the same authenticated DB session
+        # factory as the HTTP gateway.  The module-level tool objects remain
+        # stable for LangChain catalogs while their service is request-safe.
+        from server.sandbox.manager_rpc import create_sandbox_manager_rpc_client
+        from server.sandbox.model_tools import configure_model_sandbox_service
+
+        sandbox_manager = (
+            create_sandbox_manager_rpc_client()
+            if settings.NLP_AGENT_SANDBOX_RUNTIME_MODE.strip().lower() == "docker"
+            else None
+        )
+        app.state.sandbox_manager = sandbox_manager
+
+        sandbox_model_service = configure_model_sandbox_service(
+            mode=settings.NLP_AGENT_SANDBOX_RUNTIME_MODE,
+            session_factory=gateway.authorization_session_factory,
+            manager=sandbox_manager,
+        )
         await gateway.start()
         redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
         authorization_channel = str(settings.gateway_runtime.get("redis_authorization_channel", "nlp-agent:authorization"))
@@ -214,12 +304,46 @@ def create_app(
             asyncio.create_task(consume_authorization_changes(), name="authorization-invalidation-listener")
             if redis_client is not None else None
         )
+        sandbox_reconcile_interval_s = max(
+            10, int(web_config.get("sandbox_lease_reconcile_interval_s", 60))
+        )
+
+        async def reconcile_sandbox_leases() -> None:
+            factory = gateway.authorization_session_factory
+            if factory is None:
+                return
+            while True:
+                try:
+                    await sandbox_lifecycle_service.reconcile_expired_leases(factory)
+                    store_root = settings.NLP_AGENT_SANDBOX_ARTIFACT_STORE_ROOT.strip()
+                    if store_root:
+                        await purge_expired_artifacts(factory, store_root=Path(store_root))
+                    await record_sandbox_capacity_sample(factory)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Reconciliation is a periodic repair loop. One transient
+                    # DB/Redis/filesystem failure must not kill all later runs.
+                    logger.exception("sandbox reconciliation pass failed")
+                finally:
+                    await asyncio.sleep(sandbox_reconcile_interval_s)
+
+        sandbox_reconciler = (
+            asyncio.create_task(reconcile_sandbox_leases(), name="sandbox-lease-reconciler")
+            if gateway.authorization_session_factory is not None else None
+        )
         try:
             yield
         finally:
+            if sandbox_reconciler is not None:
+                sandbox_reconciler.cancel()
+                await asyncio.gather(sandbox_reconciler, return_exceptions=True)
             if authorization_listener is not None:
                 authorization_listener.cancel()
                 await asyncio.gather(authorization_listener, return_exceptions=True)
+            if sandbox_manager is not None:
+                await sandbox_manager.close()
+            await sandbox_model_service.close()
             await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()
@@ -257,17 +381,33 @@ def create_app(
         finally:
             end_authorization_audit(audit_token)
         session_factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
-        if session_factory is not None and decisions:
-            async with session_factory() as session:
-                async with session.begin():
-                    for decision in decisions:
-                        await rbac_service.audit(
-                            session, actor_user_id=decision.actor_user_id, target_user_id=None,
-                            decision=decision.decision, reason_code="authorization_required",
-                            permission_code=decision.permission_code, resource_type=decision.resource_type,
-                            resource_id=decision.resource_id,
-                            detail={"workspace_id": decision.workspace_id, "request_id": request.state.request_id},
-                        )
+        audit_successful_reads = bool(web_config.get("audit_successful_reads", False))
+        if session_factory is not None and decisions and response.status_code != 401:
+            try:
+                async with session_factory() as session:
+                    async with session.begin():
+                        for decision in decisions:
+                            # Denials and state-changing requests are always
+                            # retained.  Successful GET/HEAD authorization
+                            # checks are high-volume telemetry; keep them
+                            # opt-in because the endpoint-specific audit
+                            # events still record sensitive reads and writes.
+                            if (
+                                decision.decision == "allow"
+                                and request.method in {"GET", "HEAD"}
+                                and not audit_successful_reads
+                            ):
+                                continue
+                            await rbac_service.audit(
+                                session, actor_user_id=decision.actor_user_id, target_user_id=None,
+                                decision=decision.decision, reason_code="authorization_required",
+                                permission_code=decision.permission_code, resource_type=decision.resource_type,
+                                resource_id=decision.resource_id,
+                                detail={"workspace_id": decision.workspace_id, "request_id": request.state.request_id},
+                            )
+            except Exception as audit_exc:
+                import logging
+                logging.getLogger("audit").warning("authorization audit flush failed: %s", audit_exc)
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
@@ -470,6 +610,75 @@ def create_app(
             status_code=200 if ready else 503,
         )
 
+    @app.get("/api/v1/auth/captcha", tags=["auth"])
+    async def get_captcha(db: DbSession):
+        """Generate a CAPTCHA image for registration/SMS verification.
+
+        The answer is persisted in ``nlp_auth_codes`` (shared across all
+        instances) with a short TTL; verification goes through
+        ``code_store.consume_code``.
+        """
+        captcha_id, image_data, code = generate_captcha_image()
+        await code_store.put_code(
+            db,
+            kind="captcha",
+            subject=captcha_id,
+            code=code,
+            ttl_s=code_store.CAPTCHA_TTL_S,
+        )
+        return {"captcha_id": captcha_id, "image": image_data}
+
+    @app.post("/api/v1/auth/sms/send", status_code=status.HTTP_200_OK, tags=["auth"])
+    async def send_sms_code(body: SmsCodeRequest, db: DbSession, request: Request):
+        """Validate the image CAPTCHA, then issue an SMS verification code.
+
+        Server-side controls (the frontend 60s countdown is UX only):
+        - the CAPTCHA answer is consumed single-use from ``nlp_auth_codes``;
+        - per-phone cooldown / per-phone hourly / per-IP hourly send limits;
+        - real delivery via Tencent Cloud SMS when ``TENCENT_SMS_*`` env vars
+          are configured, otherwise the code is printed to the server console
+          (development fallback);
+        - the code is stored hashed with a hard 120s expiry enforced at
+          consumption time.
+        """
+        await code_store.purge_expired(db)
+        if not await code_store.consume_code(
+            db, kind="captcha", subject=body.captcha_id, code=body.captcha_code
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired CAPTCHA",
+            )
+        phone = body.phone_number.strip()
+        client_ip = request.client.host if request.client else None
+        allowed, reason = await code_store.sms_send_allowed(
+            db, phone=phone, client_ip=client_ip
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason
+            )
+        code = generate_sms_code()
+        provider = create_tencent_sms_provider_from_env()
+        if provider is not None:
+            if not await provider.send_verification_code(phone, code):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="SMS gateway failed to deliver the code",
+                )
+        else:
+            # Development fallback: no Tencent Cloud credentials configured.
+            print(f"[SMS] Verification code for {phone}: {code}")
+        await code_store.put_code(
+            db,
+            kind="sms",
+            subject=phone,
+            code=code,
+            ttl_s=code_store.SMS_CODE_TTL_S,
+            client_ip=client_ip,
+        )
+        return {"message": "SMS code sent successfully"}
+
     @app.post("/api/v1/auth/login", status_code=status.HTTP_200_OK, tags=["auth"])
     async def login(body: LoginBody, request: Request, response: Response):
         factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
@@ -545,6 +754,68 @@ def create_app(
             "permissions": sorted(principal.permissions),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at_epoch if isinstance(claims, DatabaseSessionClaims) else claims.expires_at,
+        }
+
+    @app.post("/api/v1/auth/register", status_code=status.HTTP_201_CREATED, tags=["auth"])
+    async def register_user(body: UserRegister, db: DbSession):
+        """Register a new account via phone number (image CAPTCHA + SMS code).
+
+        The account's ``username`` is set to the digits of the phone number so
+        that ``database_auth.login`` (which matches on ``username_lower``) can
+        authenticate the user with their phone number directly.
+        """
+        # 1. Validate the image CAPTCHA (single-use, DB-backed, 120s TTL).
+        if not await code_store.consume_code(
+            db, kind="captcha", subject=body.captcha_id, code=body.captcha_code
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired CAPTCHA",
+            )
+        # 2. Validate the SMS code issued by /auth/sms/send.  The 120s expiry
+        #    is enforced by code_store at consumption time.
+        if not await code_store.consume_code(
+            db, kind="sms", subject=body.phone_number.strip(), code=body.sms_code
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired SMS code",
+            )
+        # 3. Reject duplicate phones (username == phone digits).
+        phone = body.phone_number.strip()
+        username = "".join(ch for ch in phone if ch.isdigit()) or phone
+        existing = await db.scalar(
+            select(UserModel).where(
+                (UserModel.username_lower == username.casefold())
+                | (UserModel.phone_number == phone)
+            )
+        )
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This phone number is already registered",
+            )
+        # 4. Create the account.  ``create_user`` provisions a personal workspace
+        #    and assigns the default least-privilege ``guest`` (游客) role, which is
+        #    the correct self-registration identity: a curious outsider who just
+        #    wants to try the agent.  Admins promote accounts to student/teacher/
+        #    developer later through the user-management roles API.
+        service = UserService(db)
+        user = await service.create_user(
+            UserCreate(
+                username=username,
+                display_name=(body.display_name or "").strip() or username,
+                password=body.password,
+            )
+        )
+        user.phone_number = phone
+        user.registration_source = "phone"
+        await db.flush()
+        return {
+            "message": "User registered successfully",
+            "user_id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
         }
 
     @app.post("/api/v1/auth/guest", status_code=status.HTTP_200_OK, tags=["auth"])
@@ -748,24 +1019,55 @@ def create_app(
     async def list_authorization_audit(
         request: Request,
         principal: Principal,
-        limit: int = Query(default=100, ge=1, le=500),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
         actor_user_id: str | None = None,
+        decision: str | None = Query(default=None, pattern="^(allow|deny)$"),
+        reason_code: str | None = Query(default=None, min_length=1, max_length=64),
     ):
         authorization_service.require(principal, Permission.SYSTEM_AUDIT_READ)
         async with authorization_session_factory(request)() as session:
-            rows = await rbac_service.audit_records(
-                session, limit=limit, actor_user_id=actor_user_id
+            rows, total = await rbac_service.audit_page(
+                session,
+                limit=limit,
+                offset=offset,
+                actor_user_id=actor_user_id,
+                decision=decision,
+                reason_code=reason_code,
             )
-        return {"items": [
-            {
-                "id": row.id, "actor_user_id": row.actor_user_id,
-                "target_user_id": row.target_user_id, "decision": row.decision,
-                "reason_code": row.reason_code, "permission_code": row.permission_code,
-                "resource_type": row.resource_type, "resource_id": row.resource_id,
-                "detail": row.detail_json, "created_at": row.created_at,
-            }
-            for row in rows
-        ]}
+        return {
+            "items": [
+                {
+                    "id": row.id,
+                    "actor_user_id": row.actor_user_id,
+                    "target_user_id": row.target_user_id,
+                    "decision": row.decision,
+                    "reason_code": row.reason_code,
+                    "permission_code": row.permission_code,
+                    "resource_type": row.resource_type,
+                    "resource_id": row.resource_id,
+                    "detail": row.detail_json,
+                    "created_at": row.created_at,
+                }
+                for row in rows
+            ],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total,
+        }
+
+    @app.get("/api/v1/audit/authorization/stats", tags=["rbac"])
+    async def authorization_audit_stats(
+        request: Request,
+        principal: Principal,
+        days: int = Query(default=30, ge=1, le=3650),
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_AUDIT_READ)
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+        async with authorization_session_factory(request)() as session:
+            summary = await rbac_service.audit_summary(session, since=since)
+        return {"period_days": days, "since": since, **summary}
 
     @app.get("/api/v1/system/sessions/{session_id}/checkpoints/{checkpoint_id}", tags=["rbac"])
     async def read_sensitive_checkpoint(session_id: str, checkpoint_id: str, request: Request, principal: Principal):
@@ -841,9 +1143,42 @@ def create_app(
             response.delete_cookie(auth.cookie_name, path="/", secure=cookie_secure, samesite="lax")
 
     @app.get("/api/v1/sessions", tags=["sessions"])
-    async def list_sessions(request: Request, principal: Principal):
+    async def list_sessions(
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+    ):
         authorization_service.require(principal, Permission.AGENT_SESSION_READ)
-        return {"items": await request.app.state.gateway.sessions.list(principal)}
+        service = request.app.state.gateway.sessions
+        list_page = getattr(service, "list_page", None)
+        if list_page is not None:
+            return await list_page(principal, limit=limit, offset=offset)
+        items = await service.list(principal)
+        page = items[offset : offset + limit]
+        return {
+            "items": page,
+            "total": len(items),
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(page) < len(items),
+        }
+
+    @app.get("/api/v1/sessions/stats", tags=["sessions"])
+    async def session_stats(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
+        service = request.app.state.gateway.sessions
+        stats = getattr(service, "stats", None)
+        if stats is not None:
+            return await stats(principal)
+        items = await service.list(principal)
+        return {
+            "sessions_total": len(items),
+            "sessions_active": len(items),
+            "turns_total": None,
+            "turns_last_24h": None,
+            "last_activity_at": None,
+        }
 
     @app.post("/api/v1/sessions", status_code=status.HTTP_201_CREATED, tags=["sessions"])
     async def create_session(
@@ -938,6 +1273,9 @@ def create_app(
         accepted = await request.app.state.gateway.submit_turn(
             principal,
             SubmitTurnRequest(**body.model_dump()),
+            auth_session_id=(
+                _claims.session_id if isinstance(_claims, DatabaseSessionClaims) else None
+            ),
         )
         return accepted.model_dump(mode="json")
 
@@ -1001,6 +1339,55 @@ def create_app(
     async def get_settings(request: Request, principal: Principal):
         preferences = await request.app.state.gateway.get_user_settings(principal)
         return {"preferences": preferences, "runtime": _public_runtime_settings()}
+
+    @app.post("/api/v1/feedback", status_code=status.HTTP_201_CREATED, tags=["feedback"])
+    async def create_feedback(body: FeedbackBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.LEARNING_FEEDBACK_SUBMIT)
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                return await submit_feedback(session, principal, body.body)
+
+    @app.get("/api/v1/developer/feedback", tags=["developer"])
+    async def get_feedback_list(
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        q: str | None = Query(default=None, max_length=64),
+    ):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            return await list_feedback_threads(session, limit=limit, offset=offset, search=q)
+
+    @app.get("/api/v1/developer/feedback/{thread_id}", tags=["developer"])
+    async def get_feedback_detail(thread_id: str, request: Request, principal: Principal):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            try:
+                return await get_feedback_thread(session, thread_id)
+            except LookupError:
+                return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
+
+    @app.post("/api/v1/developer/feedback/{thread_id}/read", tags=["developer"])
+    async def read_feedback(thread_id: str, body: FeedbackReadBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                try:
+                    await mark_feedback_read(session, thread_id, body.read_through_message_id)
+                except LookupError:
+                    return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
+        return {"ok": True}
 
     @app.get("/api/v1/protocol", tags=["runtime"])
     async def get_protocol(_principal: Principal):
@@ -1240,6 +1627,153 @@ def create_app(
         ]
         return {"catalog": catalog}
 
+    @app.get("/api/v1/teacher/book/{workspace_id}/navigation", tags=["teacher"])
+    async def get_teacher_book_navigation(workspace_id: str, request: Request, principal: Principal):
+        return await teacher_service.teacher_book_navigation(
+            principal, request.app.state.gateway, workspace_id
+        )
+
+    @app.get("/api/v1/learning/book/{workspace_id}/navigation", tags=["learning"])
+    async def get_learning_book_navigation(workspace_id: str, request: Request, principal: Principal):
+        return await teacher_service.learning_book_navigation(
+            principal, request.app.state.gateway, workspace_id
+        )
+
+    @app.get("/api/v1/teacher/book/{workspace_id}/pages/{knowledge_point_id}", tags=["teacher"])
+    async def get_teacher_book_page(workspace_id: str, knowledge_point_id: str, request: Request, principal: Principal):
+        return await teacher_service.teacher_book_page(
+            principal, request.app.state.gateway, workspace_id, knowledge_point_id
+        )
+
+    @app.get("/api/v1/learning/book/{workspace_id}/pages/{knowledge_point_id}", tags=["learning"])
+    async def get_learning_book_page(workspace_id: str, knowledge_point_id: str, request: Request, principal: Principal):
+        return await teacher_service.learning_book_page(
+            principal, request.app.state.gateway, workspace_id, knowledge_point_id
+        )
+
+    @app.put("/api/v1/teacher/book/{workspace_id}/pages/{knowledge_point_id}", tags=["teacher"])
+    async def put_teacher_book_page(
+        workspace_id: str,
+        knowledge_point_id: str,
+        body: UpdateTeacherBookPage,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.update_teacher_book_page(
+                principal, request.app.state.gateway, workspace_id, knowledge_point_id, body
+            )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_page_conflict", title="教材页面版本冲突", detail=str(error))
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_page", title="教材页面无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/pages/{knowledge_point_id}/publish", tags=["teacher"])
+    async def publish_teacher_book_page(
+        workspace_id: str,
+        knowledge_point_id: str,
+        body: PublishTeacherBookPage,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.publish_teacher_book_page(
+                principal, request.app.state.gateway, workspace_id, knowledge_point_id, body
+            )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_page_conflict", title="教材页面版本冲突", detail=str(error))
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_page", title="教材页面无法发布", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/preview", tags=["teacher"])
+    async def preview_teacher_book_import(
+        workspace_id: str,
+        body: TeacherBookImportPreviewRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.preview_teacher_book_import(principal, workspace_id, body)
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_import", title="教材导入文件无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/apply", tags=["teacher"])
+    async def apply_teacher_book_import(
+        workspace_id: str,
+        body: TeacherBookImportApplyRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.apply_teacher_book_import(
+                principal, request.app.state.gateway, workspace_id, body
+            )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_page_conflict", title="教材页面版本冲突", detail=str(error))
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_import", title="教材导入文件无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/archive/preview", tags=["teacher"])
+    async def preview_teacher_book_archive_import(
+        workspace_id: str,
+        body: TeacherBookArchiveImportPreviewRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.preview_teacher_book_archive_import(
+                principal, request.app.state.gateway, workspace_id, body
+            )
+        except ValueError as error:
+            return _problem(request, status_code=422, code="invalid_book_archive", title="教材批量包无效", detail=str(error))
+
+    @app.post("/api/v1/teacher/book/{workspace_id}/imports/archive/apply", tags=["teacher"])
+    async def apply_teacher_book_archive_import(
+        workspace_id: str,
+        body: TeacherBookArchiveImportApplyRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        try:
+            return await teacher_service.apply_teacher_book_archive_import(
+                principal, request.app.state.gateway, workspace_id, body
+            )
+        except KnowledgeBookRevisionConflictError as error:
+            return _problem(request, status_code=409, code="book_import_conflict", title="教材批量导入版本冲突", detail=str(error))
+        except ValueError as error:
+            return _problem(
+                request,
+                status_code=422,
+                code="invalid_book_archive",
+                title="教材批量包无效",
+                detail=str(error),
+            )
+
+    @app.get("/api/v1/learning/book/{workspace_id}/assets/{asset_path:path}", tags=["learning"])
+    async def get_learning_book_asset(
+        workspace_id: str,
+        asset_path: str,
+        request: Request,
+        principal: Principal,
+    ):
+        try:
+            asset = await teacher_service.knowledge_book_asset(
+                principal, request.app.state.gateway, workspace_id, asset_path
+            )
+        except FileNotFoundError:
+            return _problem(request, status_code=404, code="book_asset_not_found", title="教材资源不存在")
+        return Response(
+            content=asset["content"],
+            media_type=str(asset["media_type"]),
+            headers={"Cache-Control": "private, max-age=300", "ETag": str(asset["sha256"])},
+        )
+
     @app.put("/api/v1/teacher/catalog/{workspace_id}", tags=["teacher"])
     async def put_teacher_catalog(workspace_id: str, body: UpdateTeacherCatalog, request: Request, principal: Principal, _claims: WriteClaims):
         return await teacher_service.update_catalog(principal, request.app.state.gateway, workspace_id, body)
@@ -1357,10 +1891,14 @@ def create_app(
     from server.user.controller import router as user_router
     from server.workspace.controller import router as workspace_router
     from server.classroom_join import router as classroom_join_router
+    from server.sandbox.controller import router as sandbox_router
+    from server.sandbox.artifact_controller import router as sandbox_artifact_router
 
     app.include_router(user_router)
     app.include_router(workspace_router)
     app.include_router(classroom_join_router)
+    app.include_router(sandbox_router)
+    app.include_router(sandbox_artifact_router)
 
     static_dir_value = str(web_config.get("static_dir", "")).strip()
     static_dir = Path(static_dir_value).expanduser() if static_dir_value else None
@@ -1371,17 +1909,7 @@ def create_app(
     app.include_router(uploads_router)
 
     if static_dir is not None and static_dir.is_dir():
-        @app.get("/developer", include_in_schema=False)
-        @app.get("/developer/{developer_path:path}", include_in_schema=False)
-        async def developer_spa(developer_path: str = ""):
-            return FileResponse(static_dir / "index.html")
-
-        @app.get("/teacher", include_in_schema=False)
-        @app.get("/teacher/{teacher_path:path}", include_in_schema=False)
-        async def teacher_spa(teacher_path: str = ""):
-            return FileResponse(static_dir / "index.html")
-
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="webui")
+        app.mount("/", SpaStaticFiles(directory=static_dir, html=True), name="webui")
     else:
         @app.get("/", include_in_schema=False)
         async def api_root():

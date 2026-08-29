@@ -32,8 +32,11 @@ export function useStudentWorkspace() {
     workspaceId,
     setWorkspaceId,
     activeSessionId,
+    composerRevision,
     setActiveSessionId,
+    selectSession,
     activeSessionRef,
+    freshSessionIdsRef,
     loadSessions,
     createBackendSession,
     startNewChat,
@@ -111,13 +114,15 @@ export function useStudentWorkspace() {
     loadGenerationRef.current += 1;
     socketRef.current?.setSession(activeSessionId);
     queueMicrotask(() => {
-      if (activeSessionId) void loadTurns(activeSessionId).catch((reason) => setError(String(reason)));
+      if (activeSessionId && freshSessionIdsRef.current.delete(activeSessionId)) {
+        setLoadingMessages(false);
+      } else if (activeSessionId) void loadTurns(activeSessionId).catch((reason) => setError(String(reason)));
       else {
         setMessages([]);
         setLoadingMessages(false);
       }
     });
-  }, [activeSessionId, loadTurns]);
+  }, [activeSessionId, freshSessionIdsRef, loadTurns]);
 
   const { send, cancel } = useTurnSender({
     activeSessionRef,
@@ -141,22 +146,31 @@ export function useStudentWorkspace() {
     setAuthRevision((current) => current + 1);
   }, []);
   const logout = useCallback(async () => {
-    if (globalAuth) await globalAuth.logout();
-    else await api.logout();
-    socketRef.current?.close();
-    setAuthSession(null);
-    setSessions([]);
-    setActiveSessionId(null);
-    setMessages([]);
-    setModelProfiles({});
-    setBootStatus("unauthenticated");
+    try {
+      if (globalAuth) await globalAuth.logout();
+      else await api.logout();
+    } catch (err) {
+      console.error("Logout failed:", err);
+    } finally {
+      socketRef.current?.close();
+      setAuthSession(null);
+      setSessions([]);
+      setActiveSessionId(null);
+      setMessages([]);
+      setModelProfiles({});
+      setBootStatus("unauthenticated");
+      // Redirect to login page
+      window.location.href = "/";
+    }
   }, [globalAuth, setActiveSessionId, setSessions]);
 
   return {
     sessions,
     workspaceId,
     activeSessionId,
+    composerRevision,
     setActiveSessionId,
+    selectSession,
     messages,
     preferences,
     activeMeta,
@@ -171,6 +185,7 @@ export function useStudentWorkspace() {
     loadingMessages,
     isRunning,
     startNewChat,
+    ensureSession: createBackendSession,
     send,
     cancel,
     deleteSession,

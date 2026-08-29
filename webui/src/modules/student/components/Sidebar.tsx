@@ -1,5 +1,5 @@
-import { Archive, BookOpen, FolderPlus, Heart, Menu, MoreHorizontal, Pencil, Pin, Plus, Search, Settings, Trash2, UserRound, X } from "lucide-react";
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { Archive, BookOpen, FolderPlus,  Menu, MoreHorizontal, Pencil, Pin, Plus, Search, Settings, Trash2, UserRound, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import novaMarkUrl from "../../../../logo/nova-remove.png";
 
@@ -31,7 +31,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   onAddCategory: (name: string) => string;
   onRenameCategory: (id: string, name: string) => void;
   onDeleteCategory: (id: string, name: string) => void;
-  onDelete: (id: string, title: string) => void;
+  onDelete: (id: string, title: string, onDeleted?: () => void) => void;
   onAccount: () => void;
   onSettings: () => void;
 }) {
@@ -40,6 +40,9 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   const [searchOpen, setSearchOpen] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const skipRenameBlurRef = useRef(false);
   const visible = useMemo(() => sessions.filter((session) => {
     const meta = preferences.sessions[session.session_id];
     if (!!meta?.archived !== showArchived) return false;
@@ -134,27 +137,58 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
           {group.items.map((session) => {
             const meta = preferences.sessions[session.session_id] ?? {};
             const title = displayTitle(session);
+            const isRenaming = renamingSessionId === session.session_id;
             return <div className={`session-item ${activeId === session.session_id ? "active" : ""}`} key={session.session_id}>
-              <button
-  className="session-main"
-  type="button"
-  onClick={() => {
-    onSelect(session.session_id);
-    onClose();
+              {isRenaming ? (
+  <input
+  className="session-rename-input"
+  value={renameValue}
+  autoFocus
+  onFocus={(event) => event.currentTarget.select()}
+  onChange={(event) => setRenameValue(event.target.value)}
+  onKeyDown={(event) => {
+    if (event.key === "Enter") {
+      skipRenameBlurRef.current = true;
+      const nextTitle = renameValue.trim();
+
+      if (nextTitle) {
+        onRename(session.session_id, nextTitle);
+      }
+
+      setRenamingSessionId(null);
+    }
+
+    if (event.key === "Escape") {
+      skipRenameBlurRef.current = true;
+      setRenameValue(title);
+      setRenamingSessionId(null);
+    }
   }}
->
-  <span>{title}</span>
-</button>
-{meta.favorite && (
+  onBlur={() => {
+    if (skipRenameBlurRef.current) {
+      skipRenameBlurRef.current = false;
+      return;
+    }
+
+    const nextTitle = renameValue.trim();
+
+    if (nextTitle) {
+      onRename(session.session_id, nextTitle);
+    }
+
+    setRenamingSessionId(null);
+  }}
+/>
+) : (
   <button
+    className="session-main"
     type="button"
-    className="session-favorite active"
-    aria-label="取消收藏"
-    aria-pressed="true"
-    title="取消收藏"
-    onClick={() => onMeta(session.session_id, { favorite: false })}
+    onClick={() => {
+      onSelect(session.session_id);
+      onClose();
+    }}
   >
-    <Heart size={14} fill="currentColor" />
+    <span>{title}</span>
   </button>
 )}
               <button
@@ -172,12 +206,66 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   <Pin size={14} />
 </button>
               <details className="session-menu"><summary aria-label="会话菜单"><MoreHorizontal size={16} /></summary><div>
-                <button type="button" aria-label="重命名学习对话" onClick={() => { const name = prompt("重命名学习对话", title); if (name?.trim()) onRename(session.session_id, name.trim()); }}><Pencil size={14} />重命名</button>
+                <button
+  type="button"
+  onClick={(event) => {
+    setRenamingSessionId(session.session_id);
+    setRenameValue(title);
+    event.currentTarget.closest("details")?.removeAttribute("open");
+  }}
+>
+  <Pencil size={14} />重命名
+</button>
                 <button type="button" onClick={() => onMeta(session.session_id, { pinnedAt: meta.pinnedAt ? undefined : Date.now() })}><Pin size={14} />{meta.pinnedAt ? "取消置顶" : "置顶"}</button>
-                <button type="button" onClick={() => onMeta(session.session_id, { favorite: !meta.favorite })}><Heart size={14} />{meta.favorite ? "取消收藏" : "收藏"}</button>
-                <button type="button" onClick={() => onMeta(session.session_id, { archived: !meta.archived })}><Archive size={14} />{meta.archived ? "移出归档" : "归档"}</button>
+                <button
+  type="button"
+  onClick={(event) => {
+    const isUnarchivingLastSession =
+      showArchived &&
+      meta.archived &&
+      !sessions.some(
+        (item) =>
+          item.session_id !== session.session_id &&
+          preferences.sessions[item.session_id]?.archived,
+      );
+
+    onMeta(session.session_id, { archived: !meta.archived });
+    event.currentTarget.closest("details")?.removeAttribute("open");
+    if (isUnarchivingLastSession) {
+      setShowArchived(false);
+    }
+  }}
+>
+  <Archive size={14} />
+  {meta.archived ? "移出归档" : "归档"}
+</button>
                 <div className="session-category-actions"><span>移动到分类</span><button type="button" onClick={() => onMeta(session.session_id, { categoryId: undefined })}>未分类</button>{preferences.categories.map((category) => <button key={category.id} type="button" onClick={() => onMeta(session.session_id, { categoryId: category.id })}>{category.name}</button>)}</div>
-                <button className="danger" type="button" onClick={() => onDelete(session.session_id, title)}><Trash2 size={14} />删除</button>
+                <button
+  className="danger"
+  type="button"
+  onClick={(event) => {
+  const isDeletingLastArchivedSession =
+    showArchived &&
+    meta.archived &&
+    !sessions.some(
+      (item) =>
+        item.session_id !== session.session_id &&
+        preferences.sessions[item.session_id]?.archived,
+    );
+
+  event.currentTarget.closest("details")?.removeAttribute("open");
+  onDelete(
+    session.session_id,
+    title,
+    isDeletingLastArchivedSession
+      ? () => setShowArchived(false)
+      : undefined,
+  );
+}}
+>
+  <Trash2 size={14} />
+  删除
+</button>
               </div></details>
             </div>;
           })}

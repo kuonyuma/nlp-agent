@@ -25,6 +25,8 @@ class Permission(StrEnum):
     LEARNING_PROGRESS_READ_SELF = "learning:progress:read_self"
     LEARNING_CONTENT_MANAGE = "learning:content:manage"
     LEARNING_PROGRESS_READ_CLASSROOM = "learning:progress:read_classroom"
+    LEARNING_FEEDBACK_SUBMIT = "learning:feedback:submit"
+    LEARNING_FEEDBACK_READ = "learning:feedback:read"
     LEARNING_FEEDBACK_CREATE = "learning:feedback:create"
     CLASSROOM_CREATE = "classroom:classroom:create"
     CLASSROOM_MEMBER_MANAGE = "classroom:member:manage"
@@ -90,20 +92,23 @@ _GUEST: Final[frozenset[Permission]] = frozenset(
         Permission.IDENTITY_PROFILE_READ_SELF,
         Permission.IDENTITY_PROFILE_UPDATE_SELF,
         Permission.LEARNING_CONTENT_READ_PUBLIC,
+        # 基础 agent 使用权限：guest 是"来试用智能体的人"，必须能创建/读写会话、提交对话。
+        Permission.AGENT_SESSION_CREATE,
+        Permission.AGENT_SESSION_READ,
+        Permission.AGENT_SESSION_UPDATE,
+        Permission.AGENT_SESSION_DELETE,
+        Permission.AGENT_TURN_SUBMIT,
+        Permission.AGENT_TURN_CANCEL,
+        Permission.AGENT_EVENT_REPLAY,
     }
 )
 _STUDENT: Final[frozenset[Permission]] = _GUEST | {
-    Permission.AGENT_SESSION_CREATE,
-    Permission.AGENT_SESSION_READ,
-    Permission.AGENT_SESSION_UPDATE,
-    Permission.AGENT_SESSION_DELETE,
-    Permission.AGENT_TURN_SUBMIT,
-    Permission.AGENT_TURN_CANCEL,
-    Permission.AGENT_EVENT_REPLAY,
+    # 学习/教学增强权限：练习、进度、反馈、检查点恢复、工作区内容。
     Permission.AGENT_CHECKPOINT_RESTORE,
     Permission.LEARNING_CONTENT_READ_WORKSPACE,
     Permission.LEARNING_EXERCISE_SUBMIT,
     Permission.LEARNING_PROGRESS_READ_SELF,
+    Permission.LEARNING_FEEDBACK_SUBMIT,
 }
 _TEACHER: Final[frozenset[Permission]] = _STUDENT | {
     Permission.LEARNING_CONTENT_MANAGE,
@@ -113,6 +118,7 @@ _TEACHER: Final[frozenset[Permission]] = _STUDENT | {
     Permission.CLASSROOM_MEMBER_MANAGE,
 }
 _DEVELOPER: Final[frozenset[Permission]] = _TEACHER | {
+    Permission.LEARNING_FEEDBACK_READ,
     Permission.SYSTEM_MODEL_PROFILE_MANAGE,
     Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE,
     Permission.SYSTEM_TOOL_CONFIG_MANAGE,
@@ -143,6 +149,11 @@ HIGH_RISK_TOOL_PERMISSIONS: Final[dict[str, Permission]] = {
     "runtime.model_profile.write": Permission.SYSTEM_MODEL_PROFILE_MANAGE,
     "runtime.prompt_template.write": Permission.SYSTEM_PROMPT_TEMPLATE_MANAGE,
     "runtime.tool_config.write": Permission.SYSTEM_TOOL_CONFIG_MANAGE,
+    # Sandbox model tools are deliberately mapped to existing session-control
+    # permissions so the approval path remains fail-closed without widening
+    # the public permission vocabulary.
+    "sandbox_run_active_kernel": Permission.AGENT_TURN_SUBMIT,
+    "sandbox_reset": Permission.AGENT_TURN_CANCEL,
 }
 
 
@@ -209,7 +220,12 @@ class AuthorizationService:
         if not scopes:
             # Compatibility identities use the old role packages: agent data
             # is own-scoped, system controls are system-scoped.
-            scopes = frozenset({"system"}) if required.value.startswith("system:") else frozenset({"own"})
+            scopes = (
+                frozenset({"system"})
+                if required.value.startswith("system:")
+                or required is Permission.LEARNING_FEEDBACK_READ
+                else frozenset({"own"})
+            )
         return ResourcePolicy().allows(principal, frozenset(scopes), resource)
 
     def require_resource(

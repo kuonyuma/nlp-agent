@@ -31,11 +31,33 @@ from server.infrastructure.mysql.models import (
     WsTicketModel,
 )
 from server.user.service import PasswordHasherSingleton
+from server.sandbox.service import sandbox_lifecycle_service
 from server.web.auth import AuthenticationError, CsrfRejectedError, OriginRejectedError
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _phone_variants(identifier: str) -> list[str]:
+    """Plausible stored forms of *identifier* when it looks like a phone number.
+
+    Registration stores the phone exactly as submitted (after ``strip()``), so
+    we match the raw input, its bare digits, and the ``+86`` national-prefix
+    variants.  Returns ``[]`` for inputs that are not phone-shaped.
+    """
+    cleaned = identifier.strip()
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    if not (7 <= len(digits) <= 15):
+        return []
+    variants = {cleaned, digits}
+    if len(digits) == 13 and digits.startswith("86"):
+        variants.add(digits[2:])
+        variants.add(f"+{digits}")
+    else:
+        variants.add(f"86{digits}")
+        variants.add(f"+86{digits}")
+    return sorted(variants)
 
 
 @dataclass(frozen=True)
@@ -170,10 +192,16 @@ class DatabaseSessionAuth:
             raise AuthenticationError("too many login attempts")
 
         async with factory.begin() as session:
+            # 主登录入口同时接受用户名与手机号：用户名走 ``username_lower``
+            # 精确匹配，手机号按常见存储形态（含 +86 变体）匹配。
+            identity_criteria = UserModel.username_lower == normalized
+            phone_variants = _phone_variants(username)
+            if phone_variants:
+                identity_criteria = identity_criteria | UserModel.phone_number.in_(phone_variants)
             user = await session.scalar(
                 select(UserModel)
                 .where(
-                    UserModel.username_lower == normalized,
+                    identity_criteria,
                     UserModel.deleted_at.is_(None),
                 )
                 .with_for_update()
@@ -269,6 +297,13 @@ class DatabaseSessionAuth:
                 failure = "authentication cookie has expired"
             elif touch:
                 row.last_seen_at = now
+            if failure is not None:
+                await sandbox_lifecycle_service.release_auth_session_in_transaction(
+                    session,
+                    user_id=row.user_id,
+                    auth_session_id=row.id,
+                    reason="auth.session.expired",
+                )
             if failure is None:
                 claims = self._claims(row)
         if failure is not None:
@@ -309,14 +344,19 @@ class DatabaseSessionAuth:
         token_hash: str,
     ) -> None:
         async with factory.begin() as session:
-            await session.execute(
-                update(SessionModel)
-                .where(
-                    SessionModel.token_hash == token_hash,
-                    SessionModel.revoked_at.is_(None),
-                )
-                .values(revoked_at=_utc_now())
+            row = await session.scalar(
+                select(SessionModel)
+                .where(SessionModel.token_hash == token_hash)
+                .with_for_update()
             )
+            if row is not None and row.revoked_at is None:
+                row.revoked_at = _utc_now()
+                await sandbox_lifecycle_service.release_auth_session_in_transaction(
+                    session,
+                    user_id=row.user_id,
+                    auth_session_id=row.id,
+                    reason="auth.session.logged_out",
+                )
 
     async def list_user_sessions(
         self,
@@ -367,6 +407,12 @@ class DatabaseSessionAuth:
                 return None
             if row.revoked_at is None:
                 row.revoked_at = _utc_now()
+                await sandbox_lifecycle_service.release_auth_session_in_transaction(
+                    session,
+                    user_id=row.user_id,
+                    auth_session_id=row.id,
+                    reason="auth.session.revoked",
+                )
             return row.token_hash
 
     async def issue_ws_ticket(

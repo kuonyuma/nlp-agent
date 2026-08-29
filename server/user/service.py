@@ -6,6 +6,7 @@ and uses the shared MySQL async session factory.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,8 +25,9 @@ from server.infrastructure.mysql.models import (
     WorkspaceMemberModel,
     OutboxMessageModel,
 )
+from server.auth import code_store
 
-from .schemas import UserCreate, UserUpdate
+from .schemas import UserCreate, UserRegister, UserUpdate
 
 
 class UserServiceError(Exception):
@@ -38,6 +40,14 @@ class UserNotFoundError(UserServiceError):
 
 class UserAlreadyExistsError(UserServiceError):
     """Raised when attempting to create a duplicate user."""
+
+
+class PhoneNumberAlreadyUsedError(UserServiceError):
+    """Raised when a phone number is already registered."""
+
+
+class InvalidSmsCodeError(UserServiceError):
+    """Raised when an SMS verification code is invalid or expired."""
 
 
 class SelfDeleteForbiddenError(UserServiceError):
@@ -128,7 +138,11 @@ class UserService:
         # async driver (aiomysql), so we force the order explicitly.
         await self.session.flush([user, workspace])
 
-        # Add user as workspace owner
+        # Flush user + workspace first so they exist before adding member
+        await self.session.flush()
+
+        # Add user as workspace owner (must be a separate flush because
+        # MySQL foreign-key constraints require the parent row to exist)
         member = WorkspaceMemberModel(
             workspace_id=workspace.id,
             user_id=user.id,
@@ -239,6 +253,27 @@ class UserService:
 
         return users, total or 0
 
+    async def get_roles_for_users(
+        self, user_ids: list[str]
+    ) -> dict[str, list[str]]:
+        """Return ``user_id -> [role_code, ...]`` for the given users.
+
+        A single JOIN avoids per-user lazy loading (which would raise
+        ``MissingGreenlet`` under the async driver) and N+1 queries.
+        """
+        if not user_ids:
+            return {}
+        rows = await self.session.execute(
+            select(UserRoleModel.user_id, RoleModel.code)
+            .join(RoleModel, RoleModel.id == UserRoleModel.role_id)
+            .where(UserRoleModel.user_id.in_(user_ids))
+            .order_by(RoleModel.code)
+        )
+        mapping: dict[str, list[str]] = {uid: [] for uid in user_ids}
+        for user_id, code in rows.all():
+            mapping.setdefault(user_id, []).append(code)
+        return mapping
+
     async def update_user(
         self,
         user_id: str,
@@ -264,9 +299,27 @@ class UserService:
             )
             .values(revoked_at=datetime.now(timezone.utc).replace(tzinfo=None))
         )
+        # A disabled account, password reset, or administrator session revoke
+        # must also fence its Phase-0 sandbox leases in this same transaction.
+        # No runtime exists yet, but the future manager consumes this durable
+        # state rather than trusting a browser logout notification.
+        from server.sandbox.service import sandbox_lifecycle_service
 
-    def _mark_authorization_changed(self, user_id: str, reason: str) -> None:
+        await sandbox_lifecycle_service.revoke_user_leases(
+            self.session,
+            user_id=user_id,
+            reason="authorization.session_revoked",
+        )
+
+    async def _mark_authorization_changed(self, user_id: str, reason: str) -> None:
         """Persist cross-process invalidation in the same transaction."""
+        from server.sandbox.service import sandbox_lifecycle_service
+
+        await sandbox_lifecycle_service.revoke_user_leases(
+            self.session,
+            user_id=user_id,
+            reason=f"authorization.changed:{reason}",
+        )
         self.session.add(
             OutboxMessageModel(
                 id=str(uuid.uuid4()),
@@ -294,14 +347,14 @@ class UserService:
         if status in ("disabled", "locked"):
             await self._revoke_user_sessions(user_id)
 
-        self._mark_authorization_changed(user_id, "user_status_changed")
+        await self._mark_authorization_changed(user_id, "user_status_changed")
         await self.session.flush()
         return user
 
     async def verify_password(self, user: UserModel, password: str) -> bool:
-        """Verify a password against the stored hash."""
+        """Verify a password against the stored hash (non-blocking)."""
         try:
-            return self.hasher.verify(user.password_hash, password)
+            return await asyncio.to_thread(self.hasher.verify, user.password_hash, password)
         except (VerifyMismatchError, VerificationError, ValueError, TypeError):
             return False
 
@@ -309,14 +362,17 @@ class UserService:
         self,
         user_id: str,
         new_password: str,
+        *,
+        user: UserModel | None = None,
     ) -> UserModel:
-        """Change user password."""
-        user = await self.get_user(user_id)
-        user.password_hash = self.hasher.hash(new_password)
+        """Change user password (non-blocking hash)."""
+        if user is None:
+            user = await self.get_user(user_id)
+        user.password_hash = await asyncio.to_thread(self.hasher.hash, new_password)
         user.authorization_version += 1  # Invalidate all sessions
         user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await self._revoke_user_sessions(user_id)
-        self._mark_authorization_changed(user_id, "password_changed")
+        await self._mark_authorization_changed(user_id, "password_changed")
         await self.session.flush()
         return user
 
@@ -333,7 +389,7 @@ class UserService:
         user.authorization_version += 1
         user.updated_at = now
         await self._revoke_user_sessions(user_id)
-        self._mark_authorization_changed(user_id, "user_restored")
+        await self._mark_authorization_changed(user_id, "user_restored")
         await self.session.flush()
         return user
 
@@ -360,7 +416,7 @@ class UserService:
         user.authorization_version += 1
 
         await self._revoke_user_sessions(user_id)
-        self._mark_authorization_changed(user_id, "user_soft_deleted")
+        await self._mark_authorization_changed(user_id, "user_soft_deleted")
         await self.session.flush()
         return user
 
@@ -401,7 +457,7 @@ class UserService:
             sess.revoked_at = now
         user.authorization_version += 1
         user.updated_at = now
-        self._mark_authorization_changed(user_id, "user_sessions_revoked")
+        await self._mark_authorization_changed(user_id, "user_sessions_revoked")
         await self.session.flush()
         return len(active_sessions)
 
@@ -413,3 +469,69 @@ class UserService:
             .where(UserModel.id == user_id, UserModel.deleted_at.is_(None))
             .values(last_login_at=datetime.now(timezone.utc).replace(tzinfo=None))
         )
+
+    async def register_user(
+        self,
+        data: UserRegister,
+    ) -> UserModel:
+        """Register a new user via phone number with SMS verification."""
+        # 1. Check if phone number is already registered
+        existing = await self.session.scalar(
+            select(UserModel.id).where(UserModel.phone_number == data.phone_number)
+        )
+        if existing:
+            raise PhoneNumberAlreadyUsedError("This phone number is already registered")
+
+        # 2. Verify SMS code (shared ``nlp_auth_codes`` store; the 120s expiry
+        #    is enforced here at consumption time and the code is single-use).
+        if not await code_store.consume_code(
+            self.session, kind="sms", subject=data.phone_number.strip(), code=data.sms_code
+        ):
+            raise InvalidSmsCodeError("Invalid or expired verification code")
+
+        # 3. Generate username from phone number (alphanumeric only)
+        phone_clean = data.phone_number.replace(" ", "").replace("-", "").lstrip("+")
+        # Use pure alphanumeric: user + last 8 digits of phone + first 4 chars of uuid hex
+        username = f"user{phone_clean[-8:]}{uuid.uuid4().hex[:4]}"
+        display_name = data.display_name or f"User {phone_clean[-4:]}"
+
+        # 4. Create user
+        user_create = UserCreate(username=username, display_name=display_name, password=data.password)
+        user = await self.create_user(user_create)
+        user.phone_number = data.phone_number
+        user.registration_source = "phone"
+        await self.session.flush()
+
+        # 5. Assign student role (not guest — students need AGENT_SESSION_* permissions)
+        student_role = await self.session.scalar(
+            select(RoleModel).where(RoleModel.code == "student")
+        )
+        if student_role:
+            self.session.add(
+                UserRoleModel(user_id=user.id, role_id=student_role.id)
+            )
+            await self.session.flush()
+
+        # Refresh user from DB to load server-default fields (created_at, updated_at)
+        # session.get() returns cached identity-map object; refresh() forces a SELECT
+        await self.session.refresh(user)
+        await self.session.commit()  # Commit the transaction — without this, the async with block rolls back
+        return user
+
+
+# ---------------------------------------------------------------------------
+# SMS code generation
+# ---------------------------------------------------------------------------
+
+
+def generate_sms_code() -> str:
+    """Generate a 6-digit verification code.
+
+    This is a pure random generator: persistence, the 120s expiry, single-use
+    semantics and server-side send-rate limits all live in
+    :mod:`server.auth.code_store` (shared ``nlp_auth_codes`` table), so codes
+    survive multi-instance deployments.
+    """
+    import secrets
+
+    return f"{secrets.randbelow(1_000_000):06d}"

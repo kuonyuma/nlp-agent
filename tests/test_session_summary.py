@@ -265,6 +265,9 @@ def test_session_list_requires_read_permission_and_exposes_title(monkeypatch):
         async def __aexit__(self, *exc):
             return False
 
+        async def scalar(self, statement):
+            return 0
+
         async def scalars(self, statement):
             return _ScalarResult()
 
@@ -340,6 +343,9 @@ def test_session_list_falls_back_to_first_question(monkeypatch):
 
         async def __aexit__(self, *exc):
             return False
+
+        async def scalar(self, statement):
+            return 0
 
         async def scalars(self, statement):
             return _ScalarResult()

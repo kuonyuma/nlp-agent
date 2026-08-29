@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    CheckConstraint,
     Computed,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
@@ -16,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.mysql import BIGINT, DATETIME
+from sqlalchemy.dialects.mysql import BIGINT, DATETIME, MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampedModel
@@ -54,6 +56,15 @@ class UserModel(TimestampedModel, Base):
     )
     last_login_at: Mapped[datetime | None] = mapped_column(
         DATETIME(fsp=6), nullable=True, index=True
+    )
+    # 手机号注册：``phone_number`` 与 ``registration_source`` 在数据库已存在，
+    # 但 develop 合并后的模型缺失定义，导致 ``server/user/service.py`` 里的
+    # ``UserModel.phone_number`` 查询/赋值会抛 AttributeError。此处补齐保持一致。
+    phone_number: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, unique=True, index=True
+    )
+    registration_source: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="manual"
     )
 
     sessions: Mapped[list["SessionModel"]] = relationship(back_populates="user")
@@ -103,6 +114,37 @@ class UserRoleModel(Base):
     assigned_by_user_id: Mapped[str | None] = mapped_column(
         UUID, ForeignKey("nlp_users.id", ondelete="SET NULL")
     )
+
+
+class FeedbackThreadModel(TimestampedModel, Base):
+    __tablename__ = "nlp_feedback_threads"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_nlp_feedback_threads_user_id"),
+        Index("ix_nlp_feedback_threads_updated_at", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False)
+    developer_read_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+
+class FeedbackMessageModel(TimestampedModel, Base):
+    __tablename__ = "nlp_feedback_messages"
+    __table_args__ = (
+        Index("ix_nlp_feedback_messages_thread_created", "thread_id", "created_at"),
+        CheckConstraint(
+            "sender_type IN ('student', 'developer')",
+            # Short name on purpose: the metadata naming convention expands it
+            # to ck_nlp_feedback_messages_sender_type.
+            name="sender_type",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_feedback_threads.id", ondelete="CASCADE"), nullable=False)
+    sender_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False)
+    sender_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class RolePermissionModel(Base):
@@ -155,6 +197,7 @@ class AuthorizationAuditLogModel(Base):
     __table_args__ = (
         Index("ix_nlp_authorization_audit_actor_created", "actor_user_id", "created_at"),
         Index("ix_nlp_authorization_audit_target_created", "target_user_id", "created_at"),
+        Index("ix_nlp_authorization_audit_created_at", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
@@ -324,6 +367,47 @@ class KnowledgePointModel(TimestampedModel, Base):
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class KnowledgePageModel(TimestampedModel, Base):
+    """Long-form teacher-authored book content, separate from prompt context."""
+
+    __tablename__ = "nlp_knowledge_pages"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "knowledge_point_id",
+            name="uq_nlp_knowledge_pages_workspace_point",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_point_id: Mapped[str] = mapped_column(UUID, nullable=False)
+    # MySQL 8.4 rejects defaults on TEXT/MEDIUMTEXT columns; repositories
+    # provide the empty draft explicitly when creating a page.
+    draft_markdown: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
+    published_markdown: Mapped[str | None] = mapped_column(MEDIUMTEXT)
+    revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+    published_revision: Mapped[int | None] = mapped_column(BIGINT(unsigned=True))
+
+
+class KnowledgeBookAssetModel(TimestampedModel, Base):
+    """Validated local image assets referenced by published book pages."""
+
+    __tablename__ = "nlp_knowledge_book_assets"
+
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_course_catalogs.workspace_id", ondelete="CASCADE"), primary_key=True
+    )
+    asset_path: Mapped[str] = mapped_column(String(512, collation="utf8mb4_bin"), primary_key=True)
+    media_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    draft_content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    published_content: Mapped[bytes | None] = mapped_column(LargeBinary)
+    size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64, collation="ascii_bin"), nullable=False)
+
+
 class TeachingBlueprintModel(TimestampedModel, Base):
     __tablename__ = "nlp_teaching_blueprints"
     __table_args__ = (Index("ix_nlp_blueprints_assignment", "workspace_id", "kind", "topic_id", "knowledge_point_id", "status"),)
@@ -363,6 +447,15 @@ class CourseCatalogVersionModel(Base):
 
 class ConversationModel(TimestampedModel, Base):
     __tablename__ = "nlp_conversations"
+    __table_args__ = (
+        Index(
+            "ix_nlp_conversations_owner_status_activity",
+            "owner_user_id",
+            "status",
+            "last_message_at",
+            "created_at",
+        ),
+    )
     id: Mapped[str] = mapped_column(SESSION_IDENTIFIER, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False, index=True)
@@ -773,6 +866,181 @@ class ClassJoinRequestModel(TimestampedModel, Base):
     cls: Mapped["ClassroomModel"] = relationship("ClassroomModel", foreign_keys=[class_id])
     user_: Mapped["UserModel"] = relationship("UserModel", foreign_keys=[user_id])
     reviewer: Mapped["UserModel | None"] = relationship("UserModel", foreign_keys=[reviewed_by])
+
+
+class SandboxEnvironmentModel(TimestampedModel, Base):
+    """Long-lived logical sandbox ownership; it never stores user code."""
+
+    __tablename__ = "nlp_sandbox_environments"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", name="uq_nlp_sandbox_environments_owner"),
+        UniqueConstraint("id", "owner_user_id", name="uq_nlp_sandbox_environments_id_owner"),
+        Index("ix_nlp_sandbox_environments_status_deadline", "status", "lease_deadline_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    resource_profile_id: Mapped[str] = mapped_column(String(64), nullable=False, server_default="python-base")
+    profile_revision: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="1")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ready")
+    generation: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="1")
+    # Runtime rows are intentionally not represented by a hard foreign key here:
+    # warm-pool runtimes can exist before they are claimed by an environment.
+    active_runtime_id: Mapped[str | None] = mapped_column(UUID, nullable=True, index=True)
+    last_active_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    lease_deadline_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+
+class SandboxRuntimeInstanceModel(TimestampedModel, Base):
+    """Runtime declaration only; Phase 0 does not create containers."""
+
+    __tablename__ = "nlp_sandbox_runtime_instances"
+    __table_args__ = (
+        UniqueConstraint("external_runtime_id", name="uq_nlp_sandbox_runtime_external_id"),
+        Index("ix_nlp_sandbox_runtime_state_profile", "state", "resource_profile_id"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    environment_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_sandbox_environments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    runtime_kind: Mapped[str] = mapped_column(String(32), nullable=False, server_default="unassigned")
+    external_runtime_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    image_digest: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    resource_profile_id: Mapped[str] = mapped_column(String(64), nullable=False, server_default="python-base")
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="creating")
+    generation: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="1")
+    claim_nonce_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class SandboxLeaseModel(TimestampedModel, Base):
+    """A per-authentication-session grant to one user's environment."""
+
+    __tablename__ = "nlp_sandbox_leases"
+    __table_args__ = (
+        UniqueConstraint("environment_id", "auth_session_id", name="uq_nlp_sandbox_leases_environment_session"),
+        ForeignKeyConstraint(
+            ["environment_id", "user_id"],
+            ["nlp_sandbox_environments.id", "nlp_sandbox_environments.owner_user_id"],
+            name="fk_nlp_sandbox_leases_environment_owner",
+        ),
+        Index("ix_nlp_sandbox_leases_session_state_expiry", "auth_session_id", "state", "expires_at"),
+        Index("ix_nlp_sandbox_leases_user_state", "user_id", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_sandbox_environments.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    auth_session_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_sessions.id", ondelete="RESTRICT"), nullable=False
+    )
+    runtime_instance_id: Mapped[str | None] = mapped_column(
+        UUID, ForeignKey("nlp_sandbox_runtime_instances.id", ondelete="SET NULL"), nullable=True
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False
+    )
+    actor_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default="browser")
+    generation: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="1")
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    issued_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+    renewed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class SandboxExecutionModel(Base):
+    """Execution audit envelope; code and stdout are deliberately excluded."""
+
+    __tablename__ = "nlp_sandbox_executions"
+    __table_args__ = (
+        UniqueConstraint("id", "owner_user_id", name="uq_nlp_sandbox_executions_id_owner"),
+        ForeignKeyConstraint(
+            ["environment_id", "owner_user_id"],
+            ["nlp_sandbox_environments.id", "nlp_sandbox_environments.owner_user_id"],
+            name="fk_nlp_sandbox_executions_environment_owner",
+        ),
+        Index("ix_nlp_sandbox_executions_environment_created", "environment_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    environment_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_sandbox_environments.id", ondelete="RESTRICT"), nullable=False)
+    runtime_instance_id: Mapped[str | None] = mapped_column(UUID, ForeignKey("nlp_sandbox_runtime_instances.id", ondelete="SET NULL"), nullable=True)
+    lease_id: Mapped[str | None] = mapped_column(UUID, ForeignKey("nlp_sandbox_leases.id", ondelete="SET NULL"), nullable=True)
+    owner_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    generation: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resource_summary_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class SandboxArtifactModel(Base):
+    """Pointer-only artifact metadata; unsafe HTML is never trusted by the UI."""
+
+    __tablename__ = "nlp_sandbox_artifacts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["execution_id", "owner_user_id"],
+            ["nlp_sandbox_executions.id", "nlp_sandbox_executions.owner_user_id"],
+            name="fk_nlp_sandbox_artifacts_execution_owner",
+        ),
+        Index("ix_nlp_sandbox_artifacts_execution", "execution_id"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    execution_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_sandbox_executions.id", ondelete="CASCADE"), nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    locator: Mapped[str] = mapped_column(String(512), nullable=False)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
+    expires_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class AuthCodeModel(Base):
+    """Shared (DB-backed) store for one-time verification codes.
+
+    Replaces the previous in-process dicts so that captcha / SMS codes
+    survive multi-instance deployments: the instance that generates a code
+    and the instance that verifies it no longer need to be the same process.
+    ``client_ip`` is recorded to enable server-side send-rate limiting.
+    """
+
+    __tablename__ = "nlp_auth_codes"
+    __table_args__ = (
+        Index("ix_nlp_auth_codes_kind_subject", "kind", "subject"),
+        Index("ix_nlp_auth_codes_kind_ip_created", "kind", "client_ip", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, index=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
 
 
 for _table_name, _table_comment in TABLE_COMMENTS.items():

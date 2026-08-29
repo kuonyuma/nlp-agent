@@ -1,4 +1,5 @@
-import type { AuthSession, AuthorizationAuditRecord, DeveloperSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SettingsRuntime, SystemMenu, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { AgentSessionStats, AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { FeedbackThread, FeedbackThreadList } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
 
@@ -54,6 +55,22 @@ export interface UploadResponse {
   sha256: string;
 }
 
+export interface SandboxRuntimeProfile {
+  id: string;
+  runtime: string;
+  isolation: string;
+  python_version: string;
+  kernel_version: string;
+  pytorch_version: string;
+  pytorch_device: string;
+}
+
+export interface SandboxRuntimeUsage {
+  cpu_percent: number | null;
+  memory_percent: number | null;
+  sampled_at: string | null;
+}
+
 export async function uploadAttachment(
   sessionId: string,
   file: File,
@@ -81,8 +98,29 @@ export const api = {
     csrfToken = "";
   },
   getAuthSession: ensureAuth,
+  ensureSandboxLease: () => request<{
+    phase: number;
+      runtime_available: boolean;
+      environment: { id: string; status: string; generation: number; profile: string } | null;
+      lease: { id: string; state: string; generation: number; expires_at: string } | null;
+      runtime: { id: string; generation: number; ticket: string | null } | { kind: "inmemory"; ticket: null } | null;
+      runtime_profile: SandboxRuntimeProfile;
+      pool_status?: string;
+    }>("/sandbox/lease", { method: "POST" }),
+  executeSandbox: (source: string, ticket: string | null) => request<{ status?: string; stdout: string; stderr: string; ticket?: string; execution_id?: string; execution_metrics?: { duration_ms: number; output_bytes: number }; artifacts?: Array<{ id: string; mime_type: string }> }>("/sandbox/execute", { method: "POST", body: JSON.stringify({ source, ticket }) }),
+  getSandboxUsage: (ticket: string | null) => request<SandboxRuntimeUsage>("/sandbox/usage", { method: "POST", body: JSON.stringify({ ticket }) }),
+  restartSandbox: (ticket: string | null) => request<{ status: string; ticket?: string | null }>("/sandbox/restart", { method: "POST", body: JSON.stringify({ ticket }) }),
+  replaySandboxEvents: (executionId: string, afterEventId?: string) => request<{ execution_id: string; events: Array<{ event_id: string; seq: number | string; type: string; payload: { text?: string } }> }>(`/sandbox/executions/${encodeURIComponent(executionId)}/events${afterEventId ? `?after_event_id=${encodeURIComponent(afterEventId)}` : ""}`),
+  getSandboxArtifactUrl: (artifactId: string) => request<{ url: string }>(`/sandbox/artifacts/${encodeURIComponent(artifactId)}/access`),
   createWsTicket: () => request<{ ticket: string; expires_in: number }>("/auth/ws-ticket", { method: "POST", body: "{}" }),
-  listSessions: () => request<{ items: SessionSummary[] }>("/sessions"),
+  listSessions: (params?: { limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<SessionListResponse>(`/sessions${suffix}`);
+  },
+  getSessionStats: () => request<AgentSessionStats>("/sessions/stats"),
   createSession: (workspaceId = "default") =>
     request<SessionSummary>("/sessions", {
       method: "POST",
@@ -105,6 +143,17 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(settings),
     }),
+  submitFeedback: (body: string) => request<{ thread_id: string }>("/feedback", { method: "POST", body: JSON.stringify({ body }) }),
+  listFeedback: (params?: { limit?: number; offset?: number; q?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    if (params?.q) query.set("q", params.q);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<FeedbackThreadList>(`/developer/feedback${suffix}`);
+  },
+  getFeedback: (threadId: string) => request<FeedbackThread>(`/developer/feedback/${encodeURIComponent(threadId)}`),
+  markFeedbackRead: (threadId: string, messageId: string) => request<{ ok: boolean }>(`/developer/feedback/${encodeURIComponent(threadId)}/read`, { method: "POST", body: JSON.stringify({ read_through_message_id: messageId }) }),
   getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
   updateToolPolicies: (policies: Record<string, unknown>) =>
     request<Record<string, unknown>>("/developer/tools/policies", { method: "PUT", body: JSON.stringify({ policies }) }),
@@ -140,6 +189,16 @@ export const api = {
   saveGuidedBlueprint: (workspaceId: string, blueprint: TeacherCatalog["guided_blueprints"][number]) => request<{ catalog: TeacherCatalog }>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/guided-blueprints/${encodeURIComponent(blueprint.id)}`, { method: "PUT", body: JSON.stringify(blueprint) }),
   deleteBlueprint: (workspaceId: string, kind: "exercise" | "review", blueprintId: string) => request<void>(`/teacher/catalog/${encodeURIComponent(workspaceId)}/${kind}-blueprints/${encodeURIComponent(blueprintId)}`, { method: "DELETE" }),
   getLearningCatalog: (workspaceId = "default") => request<{ catalog: TeacherCatalog }>(`/learning/catalog/${encodeURIComponent(workspaceId)}`),
+  getTeacherBookNavigation: (workspaceId = "default") => request<{ workspace_id: string; items: TeacherBookNavigationItem[] }>(`/teacher/book/${encodeURIComponent(workspaceId)}/navigation`),
+  getTeacherBookPage: (workspaceId: string, knowledgePointId: string) => request<{ page: TeacherBookPage }>(`/teacher/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}`),
+  updateTeacherBookPage: (workspaceId: string, knowledgePointId: string, content_markdown: string, expected_revision: number, assets: TeacherBookAssetInput[] = []) => request<{ page: TeacherBookPage; warnings: string[] }>(`/teacher/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}`, { method: "PUT", body: JSON.stringify({ content_markdown, expected_revision, assets }) }),
+  publishTeacherBookPage: (workspaceId: string, knowledgePointId: string, expected_revision: number) => request<{ page: TeacherBookPage }>(`/teacher/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}/publish`, { method: "POST", body: JSON.stringify({ expected_revision }) }),
+  previewTeacherBookImport: (workspaceId: string, file_name: string, content_markdown: string) => request<TeacherBookImportPreview>(`/teacher/book/${encodeURIComponent(workspaceId)}/imports/preview`, { method: "POST", body: JSON.stringify({ file_name, content_markdown }) }),
+  applyTeacherBookImport: (workspaceId: string, knowledgePointId: string, file_name: string, content_markdown: string, expected_revision: number, assets: TeacherBookAssetInput[] = []) => request<{ page: TeacherBookPage }>(`/teacher/book/${encodeURIComponent(workspaceId)}/imports/apply`, { method: "POST", body: JSON.stringify({ knowledge_point_id: knowledgePointId, file_name, content_markdown, expected_revision, assets }) }),
+  previewTeacherBookArchiveImport: (workspaceId: string, file_name: string, archive_base64: string) => request<TeacherBookArchiveImportPreview>(`/teacher/book/${encodeURIComponent(workspaceId)}/imports/archive/preview`, { method: "POST", body: JSON.stringify({ file_name, archive_base64 }) }),
+  applyTeacherBookArchiveImport: (workspaceId: string, file_name: string, archive_base64: string, expected_revisions: Record<string, number>) => request<{ pages: TeacherBookPage[]; asset_paths: string[]; applied_count: number }>(`/teacher/book/${encodeURIComponent(workspaceId)}/imports/archive/apply`, { method: "POST", body: JSON.stringify({ file_name, archive_base64, expected_revisions }) }),
+  getLearningBookNavigation: (workspaceId = "default") => request<{ workspace_id: string; items: LearningBookNavigationItem[] }>(`/learning/book/${encodeURIComponent(workspaceId)}/navigation`),
+  getLearningBookPage: (workspaceId: string, knowledgePointId: string) => request<{ page: LearningBookPage }>(`/learning/book/${encodeURIComponent(workspaceId)}/pages/${encodeURIComponent(knowledgePointId)}`),
   getTeacherResource: (resource: "courses" | "prompts" | "reports", workspaceId = "default") =>
     request<{ items: unknown[]; status: string }>(`/teacher/${resource}?workspace_id=${encodeURIComponent(workspaceId)}`),
 
@@ -148,7 +207,7 @@ export const api = {
     request<UserListResponse>(
       `/users?offset=${offset}&limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ""}${includeDeleted ? "&include_deleted=true" : ""}`,
     ),
-  createUser: (input: { username: string; display_name: string; password: string }) =>
+  createUser: (input: { username: string; display_name: string; password: string; role_codes?: string[] }) =>
     request<UserListResponse["users"][number]>("/users", { method: "POST", body: JSON.stringify(input) }),
   updateUser: (userId: string, input: { display_name?: string; status?: "active" | "disabled" | "locked" }) =>
     request<UserListResponse["users"][number]>(`/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify(input) }),
@@ -181,7 +240,17 @@ export const api = {
   replaceRoleMenus: (roleCode: string, menu_ids: string[]) =>
     request<void>(`/system/roles/${encodeURIComponent(roleCode)}/menus`, { method: "PUT", body: JSON.stringify({ menu_ids }) }),
   listRoleMenus: (roleCode: string) => request<{ role_code: string; menu_ids: string[] }>(`/system/roles/${encodeURIComponent(roleCode)}/menus`),
-  listAuthorizationAudit: (limit = 100, actorUserId?: string) => request<{ items: AuthorizationAuditRecord[] }>(`/audit/authorization?limit=${limit}${actorUserId ? `&actor_user_id=${encodeURIComponent(actorUserId)}` : ""}`),
+  listAuthorizationAudit: (params?: { limit?: number; offset?: number; actorUserId?: string; decision?: string; reasonCode?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    if (params?.actorUserId) query.set("actor_user_id", params.actorUserId);
+    if (params?.decision) query.set("decision", params.decision);
+    if (params?.reasonCode) query.set("reason_code", params.reasonCode);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<AuthorizationAuditListResponse>(`/audit/authorization${suffix}`);
+  },
+  getAuthorizationAuditStats: (days = 30) => request<AuthorizationAuditSummary>(`/audit/authorization/stats?days=${days}`),
   listWorkspaces: () => request<{ workspaces: Workspace[]; total: number }>("/workspaces"),
   listWorkspaceMembers: (workspaceId: string) =>
     request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),
@@ -198,4 +267,35 @@ export const api = {
       `/classrooms/${encodeURIComponent(classroomId)}/join-requests/${encodeURIComponent(requestId)}/reject`,
       { method: "POST" },
     ),
+
+  // ---------------------------------------------------------------------------
+  // Registration (public)
+  // ---------------------------------------------------------------------------
+  getCaptcha: () =>
+    request<{ captcha_id: string; image: string }>("/auth/captcha"),
+  register: (data: { phone_number: string; sms_code: string; password: string; display_name?: string; captcha_id: string; captcha_code: string }) =>
+    request<UserProfile>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  sendSmsCode: (phoneNumber: string, captchaId: string, captchaCode: string) =>
+    request<{ message: string }>("/auth/sms/send", {
+      method: "POST",
+      body: JSON.stringify({ phone_number: phoneNumber, captcha_id: captchaId, captcha_code: captchaCode }),
+    }),
+
+  // ---------------------------------------------------------------------------
+  // Self-service profile (当前用户)
+  // ---------------------------------------------------------------------------
+  getCurrentUser: () => request<UserProfile>("/users/me"),
+  updateProfile: (data: { display_name: string }) =>
+    request<UserProfile>("/users/me", {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    request<void>("/users/me/password", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 };
