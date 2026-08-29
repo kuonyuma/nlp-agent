@@ -1527,9 +1527,6 @@ button { color: inherit; }
 .teacher-catalog-layout { display:grid; min-height:0; flex:1 1 auto; grid-template-columns:290px minmax(0,1fr); overflow:hidden; border:1px solid #dedff0; border-radius:15px; background:#fff; box-shadow:0 7px 24px rgb(46 42 98 / 6%); transition:grid-template-columns .2s ease; }
 .teacher-catalog-layout.directory-collapsed { grid-template-columns:48px minmax(0,1fr); }
 .teacher-catalog-directory { position:relative; display:flex; min-width:0; min-height:0; flex-direction:column; border-right:1px solid #e3e3ed; background:#fcfcff; }
-.teacher-catalog-directory.collapsed > :not(.teacher-catalog-directory-expand) { display:none; }
-.teacher-catalog-directory-expand { display:none; width:48px; height:44px; place-items:center; border:0; background:transparent; color:#76798a; cursor:pointer; }
-.teacher-catalog-directory.collapsed .teacher-catalog-directory-expand { display:grid; }
 .teacher-catalog-directory-header { display:flex; min-height:68px; box-sizing:border-box; align-items:center; justify-content:space-between; gap:8px; padding:13px 12px 10px 16px; border-bottom:1px solid #e5e5ee; }
 .teacher-catalog-directory-header > div:first-child { display:grid; min-width:0; gap:4px; }
 .teacher-catalog-directory-header strong { overflow:hidden; color:#292b3a; font-size:14px; text-overflow:ellipsis; white-space:nowrap; }
@@ -1632,7 +1629,7 @@ button { color: inherit; }
 .teacher-catalog-empty strong { color:#626576; font-size:14px; }
 .teacher-catalog-empty p { margin:0; font-size:11px; }
 @media (max-width:1000px) { .teacher-catalog-layout { grid-template-columns:240px minmax(0,1fr); }.teacher-catalog-breadcrumb > small { display:none; }.teacher-catalog-editor-content { padding-inline:28px; } }
-@media (max-width:760px) { .teacher-content-catalog { height:auto; min-height:calc(100vh - 58px); overflow:visible; }.teacher-main.teacher-catalog-main { display:block; height:auto; overflow:visible; }.teacher-catalog-page { min-height:calc(100vh - 94px); }.teacher-catalog-layout { min-height:680px; grid-template-columns:1fr; grid-template-rows:260px minmax(420px,1fr); overflow:visible; }.teacher-catalog-layout.directory-collapsed { grid-template-columns:1fr; grid-template-rows:48px minmax(420px,1fr); }.teacher-catalog-directory { border-right:0; border-bottom:1px solid #e3e3ed; }.teacher-catalog-directory.collapsed > .teacher-catalog-directory-expand { width:100%; }.teacher-catalog-workspace-header { align-items:flex-start; flex-direction:column; }.teacher-catalog-workspace-actions { width:100%; flex-wrap:wrap; }.teacher-catalog-field-grid { grid-template-columns:1fr; }.teacher-catalog-editor-content { padding:20px 16px 34px; }.teacher-catalog-page-summary { min-height:100px; padding-inline:17px; }.teacher-catalog-page-summary > svg { display:none; } }
+@media (max-width:760px) { .teacher-content-catalog { height:auto; min-height:calc(100vh - 58px); overflow:visible; }.teacher-main.teacher-catalog-main { display:block; height:auto; overflow:visible; }.teacher-catalog-page { min-height:calc(100vh - 94px); }.teacher-catalog-layout { min-height:680px; grid-template-columns:1fr; grid-template-rows:260px minmax(420px,1fr); overflow:visible; }.teacher-catalog-layout.directory-collapsed { grid-template-columns:1fr; grid-template-rows:48px minmax(420px,1fr); }.teacher-catalog-directory { border-right:0; border-bottom:1px solid #e3e3ed; }.teacher-catalog-workspace-header { align-items:flex-start; flex-direction:column; }.teacher-catalog-workspace-actions { width:100%; flex-wrap:wrap; }.teacher-catalog-field-grid { grid-template-columns:1fr; }.teacher-catalog-editor-content { padding:20px 16px 34px; }.teacher-catalog-page-summary { min-height:100px; padding-inline:17px; }.teacher-catalog-page-summary > svg { display:none; } }
 
 /* Catalog pages use the same viewport workbench geometry as the knowledge book.
    Keep the directory fixed and let the Markdown pane consume every remaining
@@ -1665,4 +1662,46 @@ button { color: inherit; }
   .teacher-content-catalog .teacher-catalog-layout { height: auto; min-height: 680px; }
   .teacher-content-catalog .teacher-book-workspace-scroll { overflow: visible; }
   .teacher-content-catalog .teacher-catalog-editor-content { min-height: 420px; }
+}
+
+/* Keep the catalog sidebar's real expand control visible after collapsing. */
+.teacher-content-catalog .teacher-catalog-directory.collapsed > :not(.teacher-book-tree-collapsed-toggle) { display: none; }
+.teacher-content-catalog .teacher-catalog-directory.collapsed .teacher-book-tree-collapsed-toggle { display: grid; width: 48px; height: 44px; place-items: center; border: 0; background: transparent; color: #76798a; cursor: pointer; }
+.teacher-content-catalog .teacher-catalog-directory.collapsed .teacher-book-tree-collapsed-toggle:hover { background: #f0effa; color: #5547b6; }
+
+/* The book source and the current-page outline are independent floating
+   surfaces, so the long-form editor keeps the same visual rhythm as the
+   catalog editors while retaining a full-height writing area. */
+.teacher-content-book .teacher-book-heading-outline {
+  flex: 0 0 auto;
+  min-height: 42px;
+  box-sizing: border-box;
+  align-items: center;
+  margin: 14px 18px 0;
+  padding: 10px 14px;
+  border: 1px solid #e1def1;
+  border-radius: 12px;
+  background: #fbfbff;
+  box-shadow: 0 5px 16px rgb(35 35 72 / 4%);
+}
+.teacher-content-book .teacher-book-heading-outline > div { max-height: 46px; overflow: auto; }
+.teacher-content-book .teacher-book-source,
+.teacher-content-book .teacher-book-preview {
+  min-height: 0;
+  margin: 14px 18px 18px;
+  border: 1px solid #e1def1;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 7px 22px rgb(35 35 72 / 6%);
+  overflow: hidden;
+}
+.teacher-content-book .teacher-book-source { flex: 1 1 auto; }
+.teacher-content-book .teacher-book-preview { flex: 1 1 auto; overflow: auto; }
+.teacher-content-book .teacher-book-source .teacher-book-textarea { min-height: 0; }
+
+@media (max-width: 620px) {
+  .teacher-content-catalog .teacher-catalog-directory.collapsed .teacher-book-tree-collapsed-toggle { width: 100%; }
+  .teacher-content-book .teacher-book-heading-outline { margin: 10px 10px 0; }
+  .teacher-content-book .teacher-book-source,
+  .teacher-content-book .teacher-book-preview { margin: 10px 10px 12px; }
 }

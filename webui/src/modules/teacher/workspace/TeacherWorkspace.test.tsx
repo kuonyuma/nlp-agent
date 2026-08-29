@@ -1,8 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { within } from "@testing-library/react";
 
-import { GuidedBlueprintCatalogEditor } from "./TeacherCatalogEditor";
+import { GuidedBlueprintCatalogEditor, TopicCatalogEditor } from "./TeacherCatalogEditor";
 import { TeacherWorkspace } from "./TeacherWorkspace";
 import { TeacherRoutes } from "../routes";
 
@@ -91,6 +90,35 @@ describe("TeacherWorkspace catalog CRUD", () => {
     expect(await screen.findByRole("heading", { name: "主题与知识点" })).toBeVisible();
     expect(screen.getByDisplayValue("Transformer")).toBeVisible();
     expect(screen.getByRole("button", { name: "折叠主题 Transformer" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("sorts disabled knowledge points to the end and keeps enabled rows unlabelled", () => {
+    render(<TopicCatalogEditor topics={[{ id: "topic", name: "主题", description: "", status: "enabled", knowledge_points: [
+      { id: "enabled", name: "可用知识点", markdown: "", status: "enabled", sort_order: 0 },
+      { id: "disabled", name: "停用知识点", markdown: "", status: "disabled", sort_order: 1 },
+    ] }]} onChange={vi.fn()} />);
+
+    expect(screen.getAllByRole("button", { name: /选择知识点/ }).map((button) => button.getAttribute("aria-label"))).toEqual([
+      "选择知识点 可用知识点",
+      "选择知识点 停用知识点",
+    ]);
+    expect(within(screen.getByRole("complementary", { name: "主题与知识点目录" })).queryByText("已启用")).not.toBeInTheDocument();
+  });
+
+  it("closes an open directory menu when clicking outside and restores the directory after collapsing", async () => {
+    history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
+    await screen.findByRole("heading", { name: "主题与知识点", level: 2 });
+
+    const menu = screen.getByRole("button", { name: "Transformer目录选项" }).closest("details") as HTMLDetailsElement;
+    menu.open = true;
+    fireEvent.pointerDown(document.body);
+    expect(menu.open).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "收起主题与知识点目录" }));
+    const expandButton = screen.getByRole("button", { name: "展开主题与知识点目录" });
+    expect(screen.getByRole("complementary", { name: "主题与知识点目录" })).toHaveClass("collapsed");
+    fireEvent.click(expandButton);
+    expect(screen.getByRole("button", { name: "收起主题与知识点目录" })).toBeVisible();
   });
 
   it("keeps the Markdown toolbar read-only while previewing", async () => {
