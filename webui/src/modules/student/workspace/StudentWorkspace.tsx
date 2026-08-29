@@ -191,7 +191,7 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
         setToolMenuOpen(false);
         void workspace.send("请解释以下 Python 代码：\n\n```python\n" + source + "\n```");
       }}
-      learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
+      learningPanel={<LearningPanel open onClose={() => closeTool("learning")} title={activeTitle} context={workspace.preferences.context} meta={workspace.activeMeta} messages={workspace.messages} catalog={learningCatalog} onPrompt={(content) => { setToolDockOpen(false); setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(content); }} onMeta={(patch) => { if (workspace.activeSessionId) workspace.updateSessionMeta(workspace.activeSessionId, patch); }} />}
       knowledgeBookPanel={<KnowledgeBookPanel workspaceId={workspace.workspaceId} onAskNova={statusOnline && !workspace.isRunning ? (prompt) => { setToolDockExpanded(false); setToolMenuOpen(false); void workspace.send(prompt); } : undefined} onOpenInSandbox={openCodeInSandbox} />}
       sandboxSource={sandboxSource}
     />

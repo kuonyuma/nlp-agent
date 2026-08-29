@@ -1482,3 +1482,36 @@ button { color: inherit; }
   color: var(--muted);
   font: 10px ui-monospace, SFMono-Regular, Consolas, monospace;
 }
+
+.learning-panel header small { color: var(--muted); font-size: 11px; margin-left: 2px; }
+.learning-topic-desc { margin-top: 8px !important; padding-top: 8px; border-top: 1px solid var(--border); }
+.learning-scope-list { display: grid; gap: 5px; }
+.learning-scope-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--soft-bg);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.learning-scope-item:hover { border-color: var(--accent); }
+.learning-scope-item strong { min-width: 0; overflow: hidden; font-size: 11px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.learning-scope-item small { color: var(--muted); font-size: 10px; }
+.learning-scope-icon { display: grid; place-items: center; color: var(--muted); }
+.learning-scope-item.covered .learning-scope-icon { color: var(--accent); }
+.learning-scope-item.review { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: var(--accent-soft); }
+.learning-scope-item.review small { color: var(--accent); }
+.learning-coverage { margin-top: 8px !important; color: var(--muted); font-size: 10px !important; }
+.learning-stats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.learning-stats span { padding: 4px 7px; border-radius: 7px; background: var(--muted-bg); color: var(--muted); font-size: 10px; }
+.practice-actions { display: flex; gap: 6px; margin-top: 10px; }
+.practice-actions button { flex: 1; padding: 7px 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--soft-bg); font-size: 11px; cursor: pointer; }
+.practice-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.practice-actions button:disabled { opacity: .45; cursor: default; }
+.practice-hint { margin-top: 8px !important; color: var(--muted); font-size: 10px !important; }
