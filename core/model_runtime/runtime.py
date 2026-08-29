@@ -35,7 +35,7 @@ from core.model_runtime.usage import (
     resolve_usage_attribution,
 )
 from core.observability.context import current_telemetry_context
-from core.observability.models import SpanKind
+from core.observability.models import SpanKind, SpanStatus
 from core.observability.runtime import global_telemetry
 from utils.logger import get_logger
 
@@ -421,33 +421,62 @@ class ResilientChatModel:
                             timeout=candidate.preset.timeouts.total_s,
                         )
 
-                    # Structured Output handling
-                    if isinstance(response, dict) and "raw" in response:
-                        raw_msg = response["raw"]
-                        parsed = response.get("parsed")
-                        parsing_error = response.get("parsing_error")
-                        canon_usage = response_canonical_usage(raw_msg)
-                        finish_reason = (
-                            getattr(raw_msg, "response_metadata", {}) or {}
-                        ).get("finish_reason")
-                        resp_id = extract_provider_response_id(raw_msg)
-                        if (
-                            resp_id
-                            and canon_usage.provider_response_id is None
-                        ):
-                            canon_usage = canon_usage.model_copy(
-                                update={"provider_response_id": resp_id}
-                            )
+                        is_structured = (
+                            isinstance(response, dict) and "raw" in response
+                        )
+                        if is_structured:
+                            raw_msg = response["raw"]
+                            parsed = response.get("parsed")
+                            parsing_error = response.get("parsing_error")
+                            canon_usage = response_canonical_usage(raw_msg)
+                            finish_reason = (
+                                getattr(raw_msg, "response_metadata", {}) or {}
+                            ).get("finish_reason")
+                            resp_id = extract_provider_response_id(raw_msg)
+                            if (
+                                resp_id
+                                and canon_usage.provider_response_id is None
+                            ):
+                                canon_usage = canon_usage.model_copy(
+                                    update={"provider_response_id": resp_id}
+                                )
 
-                        if span is not None:
-                            usage_meta = response_usage(raw_msg)
-                            if usage_meta.get("total_tokens"):
-                                span.set_usage(usage_meta)
-                            span.annotate(
-                                structured_output=True,
-                                finish_reason=finish_reason or "",
-                            )
+                            if span is not None:
+                                usage_meta = response_usage(raw_msg)
+                                if usage_meta.get("total_tokens"):
+                                    span.set_usage(usage_meta)
+                                span.annotate(
+                                    structured_output=True,
+                                    finish_reason=finish_reason or "",
+                                )
+                                if parsing_error is not None:
+                                    span.set_status(
+                                        SpanStatus.ERROR,
+                                        error_kind=(
+                                            "structured_output_parse_error"
+                                        ),
+                                        error_message=str(parsing_error),
+                                    )
+                        else:
+                            parsing_error = None
+                            canon_usage = response_canonical_usage(response)
+                            finish_reason = (
+                                getattr(response, "response_metadata", {}) or {}
+                            ).get("finish_reason")
+                            resp_id = extract_provider_response_id(response)
+                            if (
+                                resp_id
+                                and canon_usage.provider_response_id is None
+                            ):
+                                canon_usage = canon_usage.model_copy(
+                                    update={"provider_response_id": resp_id}
+                                )
+                            if span is not None:
+                                usage_meta = response_usage(response)
+                                if usage_meta.get("total_tokens"):
+                                    span.set_usage(usage_meta)
 
+                    if is_structured:
                         if parsing_error is not None:
                             attempt_reported = True
                             await self._report_attempt_guarded(
@@ -469,20 +498,6 @@ class ResilientChatModel:
                         candidate.circuit.succeed()
                         return response if self.caller_include_raw else parsed
 
-                    # Plain or object response
-                    canon_usage = response_canonical_usage(response)
-                    finish_reason = (
-                        getattr(response, "response_metadata", {}) or {}
-                    ).get("finish_reason")
-                    resp_id = extract_provider_response_id(response)
-                    if resp_id and canon_usage.provider_response_id is None:
-                        canon_usage = canon_usage.model_copy(
-                            update={"provider_response_id": resp_id}
-                        )
-                    if span is not None:
-                        usage_meta = response_usage(response)
-                        if usage_meta.get("total_tokens"):
-                            span.set_usage(usage_meta)
                     attempt_reported = True
                     await self._report_attempt_guarded(
                         invocation=invocation,

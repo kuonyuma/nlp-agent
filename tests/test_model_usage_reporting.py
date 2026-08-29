@@ -7,6 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from pydantic import BaseModel
 
+import core.model_runtime.runtime as model_runtime
 from core.model_runtime.contracts import (
     CircuitBreakerPolicy,
     GenerationConfig,
@@ -31,6 +32,8 @@ from core.model_runtime.usage import (
     UsageAttributionContext,
     bind_usage_attribution,
 )
+from core.observability.context import TelemetryContext, bind_telemetry_context
+from core.observability.models import SpanStatus
 
 
 def _preset(*, attempts: int = 1) -> ModelPresetConfig:
@@ -460,6 +463,100 @@ async def test_structured_output_success_and_parse_error():
     assert reporter.events[1][2].status == "failed"
     assert reporter.events[1][1].input_tokens == 12
     assert reporter.events[1][2].error_kind == "structured_output_parse_error"
+
+
+@pytest.mark.asyncio
+async def test_structured_output_updates_telemetry_before_span_closes(
+    monkeypatch,
+):
+    class RecordingSpan:
+        def __init__(self) -> None:
+            self.active = False
+            self.attributes = {}
+            self.usage = None
+            self.status = None
+            self.error_kind = None
+
+        async def __aenter__(self):
+            self.active = True
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback):
+            self.active = False
+            return False
+
+        def set_usage(self, usage):
+            assert self.active, "usage was recorded after the span closed"
+            self.usage = usage
+
+        def annotate(self, **attributes):
+            assert self.active, "attributes were recorded after the span closed"
+            self.attributes.update(attributes)
+
+        def set_status(self, status, *, error_kind=None, error_message=None):
+            assert self.active, "status was recorded after the span closed"
+            self.status = status
+            self.error_kind = error_kind
+
+    class RecordingTelemetry:
+        def __init__(self) -> None:
+            self.spans = []
+
+        def span(self, *_args, **_kwargs):
+            span = RecordingSpan()
+            self.spans.append(span)
+            return span
+
+        def event(self, *_args, **_kwargs):
+            pass
+
+    class SampleOut(BaseModel):
+        ans: str
+
+    raw = AIMessage(
+        content="bad",
+        response_metadata={
+            "id": "span-structured-1",
+            "finish_reason": "stop",
+            "token_usage": {"prompt_tokens": 7, "completion_tokens": 2},
+        },
+    )
+    fake = FakeRawModel(
+        [
+            {
+                "raw": raw,
+                "parsed": None,
+                "parsing_error": ValueError("Malformed JSON"),
+            }
+        ]
+    )
+    telemetry = RecordingTelemetry()
+    monkeypatch.setattr(model_runtime, "global_telemetry", telemetry)
+    structured_model = ResilientChatModel(
+        [_candidate("cand-span-struct", fake)]
+    ).with_structured_output(SampleOut)
+    telemetry_context = TelemetryContext.create(
+        session_id="session-structured",
+        turn_id="turn-structured",
+    )
+
+    with bind_usage_attribution(_sample_attribution()):
+        with bind_telemetry_context(telemetry_context):
+            with pytest.raises(ValueError, match="Malformed JSON"):
+                await structured_model.ainvoke(
+                    [HumanMessage(content="give bad answer")]
+                )
+
+    assert len(telemetry.spans) == 1
+    span = telemetry.spans[0]
+    assert span.active is False
+    assert span.usage["total_tokens"] == 9
+    assert span.attributes == {
+        "structured_output": True,
+        "finish_reason": "stop",
+    }
+    assert span.status == SpanStatus.ERROR
+    assert span.error_kind == "structured_output_parse_error"
 
 
 @pytest.mark.asyncio
