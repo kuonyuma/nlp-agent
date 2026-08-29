@@ -17,10 +17,12 @@ import { Sidebar, SidebarToggle } from "@/modules/student/components/Sidebar";
 import { ToolDock, type ToolDockTabDropPosition, type ToolDockTool } from "@/modules/student/components/ToolDock";
 import { useStudentWorkspace } from "@/modules/student/workspace/public";
 import { useSessionScrollRestoration } from "@/modules/student/workspace/hooks/useSessionScrollRestoration";
+import { useOptionalAuth } from "@/platform/auth/AuthContext";
 import type { CourseTopic, TeacherCatalog } from "@/shared/types";
 
 export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigateTo?: (path: string) => void; onOpenInSandbox?: (code: string, language: string) => void } = {}) {
   const workspace = useStudentWorkspace();
+  const globalAuth = useOptionalAuth();
   const learningContext = workspace.preferences.context;
   const setLearningContext = workspace.setLearningContext;
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -133,8 +135,12 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
       </section>
     </main>
     <LoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} onAuthenticate={async (username, password) => {
-      await api.login(username, password);
-      workspace.retryAuthentication();
+      if (globalAuth) {
+        await globalAuth.login(username, password);
+      } else {
+        await api.login(username, password);
+        workspace.retryAuthentication();
+      }
     }} />
   </div>;
 
@@ -173,7 +179,7 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
           <button className="icon-button theme-toggle" type="button" aria-label="切换主题" onClick={() => void workspace.patchSettings({ theme: workspace.settings.theme === "dark" ? "light" : "dark" })}>{workspace.settings.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}</button>
         </div>
       </header>
-      {hasMessages ? <><div className="thread-scroll" ref={scrollRef} onScroll={onScroll}><MessageList messages={workspace.messages} loading={workspace.loadingMessages} showReasoning={workspace.settings.show_reasoning} onFollowUp={(text) => void workspace.send(text)} /></div>{composer()}</> : <div className="empty-thread-home"><div><h1>《自然语言处理》智能体 欢迎您！</h1><p>从一个 NLP 概念、模型原理或练习问题开始。</p>{composer(true)}</div></div>}
+      {hasMessages ? <><div className="thread-scroll" ref={scrollRef} onScroll={onScroll}><MessageList messages={workspace.messages} loading={workspace.loadingMessages} showReasoning={workspace.settings.show_reasoning} streamRenderIntervalMs={workspace.settings.stream_render_interval_ms} onFollowUp={(text) => void workspace.send(text)} /></div>{composer()}</> : <div className="empty-thread-home"><div><h1>《自然语言处理》智能体 欢迎您！</h1><p>从一个 NLP 概念、模型原理或练习问题开始。</p>{composer(true)}</div></div>}
     </main>
       <ToolDock
       open={toolDockOpen}

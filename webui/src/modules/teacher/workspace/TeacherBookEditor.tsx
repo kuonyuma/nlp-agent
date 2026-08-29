@@ -2,14 +2,14 @@ import { AlertCircle, Bold, BookOpenText, ChevronDown, Code2, Eye, EyeOff, FileU
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 
 import { api } from "@/platform/http/api";
-import type { CourseTopic, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog } from "@/shared/types";
+import { DEFAULT_QUESTION_TYPES, type CourseTopic, type TeacherBookArchiveImportPreview, type TeacherBookAssetInput, type TeacherBookImportPreview, type TeacherBookNavigationItem, type TeacherBookPage, type TeacherCatalog } from "@/shared/types";
 import { MarkdownContent } from "@/modules/student/components/MarkdownContent";
 import { createUuid } from "@/shared/utils/uuid";
 import { indexMarkdownHeadings } from "@/modules/student/components/knowledgeBook";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { TextInputDialog } from "@/shared/ui/TextInputDialog";
 
-type Props = { workspaceId: string; catalog?: TeacherCatalog; onCatalogChange?: (catalog: TeacherCatalog) => void };
+type Props = { workspaceId: string; catalog?: TeacherCatalog; onCatalogChange?: (catalog: TeacherCatalog) => void; onDirtyChange?: (dirty: boolean) => void };
 
 type MarkdownFormat = "bold" | "italic" | "heading" | "code" | "link" | "list" | "quote";
 
@@ -87,7 +87,7 @@ function withTopicUpdate(catalog: TeacherCatalog, topicId: string, update: (topi
 }
 
 function newKnowledgePoint(name = "未命名知识点", sortOrder = 0) {
-  return { id: createUuid(), name, markdown: "", status: "enabled" as const, sort_order: sortOrder };
+  return { id: createUuid(), name, markdown: "", status: "enabled" as const, sort_order: sortOrder, question_types: [...DEFAULT_QUESTION_TYPES] };
 }
 
 type TeacherBookTreeGroup = { topicId: string; topicName: string; topicStatus: CourseTopic["status"]; items: TeacherBookNavigationItem[] };
@@ -104,7 +104,21 @@ function groupNavigation(items: TeacherBookNavigationItem[]): TeacherBookTreeGro
   }, []);
 }
 
-export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Props) {
+function disabledLast<T>(items: T[], isDisabled: (item: T) => boolean): T[] {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => Number(isDisabled(left.item)) - Number(isDisabled(right.item)) || left.index - right.index)
+    .map(({ item }) => item);
+}
+
+function sortBookTreeGroups(groups: TeacherBookTreeGroup[]): TeacherBookTreeGroup[] {
+  return disabledLast(groups, (group) => group.topicStatus === "disabled").map((group) => ({
+    ...group,
+    items: disabledLast(group.items, (item) => item.knowledge_point_status === "disabled"),
+  }));
+}
+
+export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange, onDirtyChange }: Props) {
   const [navigation, setNavigation] = useState<TeacherBookNavigationItem[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [page, setPage] = useState<TeacherBookPage | null>(null);
@@ -118,7 +132,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
   const [catalogDraft, setCatalogDraft] = useState<TeacherCatalog | null>(catalog ?? null);
   const [directoryCollapsed, setDirectoryCollapsed] = useState(false);
   const [directoryQuery, setDirectoryQuery] = useState("");
-  const [collapsedTopicIds, setCollapsedTopicIds] = useState<string[]>([]);
+  const [collapsedTopicIds, setCollapsedTopicIds] = useState<string[]>(() => (catalog?.topics ?? []).map((topic) => topic.id));
   const [directorySaving, setDirectorySaving] = useState(false);
   const [catalogInput, setCatalogInput] = useState<CatalogInputState | null>(null);
   const [catalogDeleteTarget, setCatalogDeleteTarget] = useState<CatalogDeleteTarget | null>(null);
@@ -129,9 +143,25 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [pendingSelectedId, setPendingSelectedId] = useState<string | null>(null);
   const pageRequestId = useRef(0);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const contentHistory = useRef<{ past: string[]; future: string[]; value: string }>({ past: [], future: [], value: "" });
+  const directoryCollapseInitialized = useRef(Boolean(catalog));
+
+  const hasUnsavedChanges = Boolean(page && (content !== page.draft_markdown || editorAssets.length > 0));
+
+  useEffect(() => {
+    onDirtyChange?.(hasUnsavedChanges);
+  }, [hasUnsavedChanges, onDirtyChange]);
+
+  const requestSelect = (nextId: string) => {
+    if (nextId === selectedId || !hasUnsavedChanges) {
+      setSelectedId(nextId);
+      return;
+    }
+    setPendingSelectedId(nextId);
+  };
 
   const replaceEditorContent = useCallback((next: string) => {
     contentHistory.current = { past: [], future: [], value: next };
@@ -175,6 +205,10 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
     try {
       const result = await api.getTeacherBookNavigation(workspaceId);
       setNavigation(result.items);
+      if (!directoryCollapseInitialized.current) {
+        setCollapsedTopicIds(Array.from(new Set(result.items.map((item) => item.topic_id))));
+        directoryCollapseInitialized.current = true;
+      }
       setSelectedId((current) => current || result.items[0]?.knowledge_point_id || "");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -220,31 +254,41 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
 
   const groups = useMemo<TeacherBookTreeGroup[]>(() => {
     const navigationGroups = groupNavigation(navigation);
-    if (!catalogDraft) return navigationGroups;
+    if (!catalogDraft) return sortBookTreeGroups(navigationGroups);
 
     const navigationByTopic = new Map(navigationGroups.map((group) => [group.topicId, group]));
-    return catalogDraft.topics.map((topic) => {
+    return sortBookTreeGroups(disabledLast(catalogDraft.topics, (topic) => topic.status === "disabled").map((topic) => {
       const navigationGroup = navigationByTopic.get(topic.id);
       const navigationByPoint = new Map(navigationGroup?.items.map((item) => [item.knowledge_point_id, item]));
       return {
         topicId: topic.id,
         topicName: topic.name || "未命名主题",
         topicStatus: topic.status,
-        items: topic.knowledge_points.map((point) => navigationByPoint.get(point.id) ?? {
-          topic_id: topic.id,
-          topic_name: topic.name || "未命名主题",
-          knowledge_point_id: point.id,
-          title: point.name || "未命名知识点",
-          sort_order: point.sort_order,
-          topic_status: topic.status,
-          knowledge_point_status: point.status,
-          has_draft: false,
-          has_published: false,
-          revision: 0,
-          published_revision: null,
-        }),
+        items: disabledLast(topic.knowledge_points.map((point) => {
+          const navigationItem = navigationByPoint.get(point.id);
+          return navigationItem ? {
+            ...navigationItem,
+            topic_name: topic.name || "未命名主题",
+            title: point.name || "未命名知识点",
+            topic_status: topic.status,
+            knowledge_point_status: point.status,
+            sort_order: point.sort_order,
+          } : {
+            topic_id: topic.id,
+            topic_name: topic.name || "未命名主题",
+            knowledge_point_id: point.id,
+            title: point.name || "未命名知识点",
+            sort_order: point.sort_order,
+            topic_status: topic.status,
+            knowledge_point_status: point.status,
+            has_draft: false,
+            has_published: false,
+            revision: 0,
+            published_revision: null,
+          };
+        }), (item) => item.knowledge_point_status === "disabled"),
       };
-    });
+    }));
   }, [catalogDraft, navigation]);
 
   const filteredGroups = useMemo(() => {
@@ -641,9 +685,10 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
           <label className="teacher-book-tree-search"><Search size={15} /><input type="search" aria-label="搜索教材目录" value={directoryQuery} onChange={(event) => setDirectoryQuery(event.target.value)} placeholder="搜索主题或知识点" /></label>
           <div className="teacher-book-tree-groups">{filteredGroups.map((group) => {
             const topicExpanded = directoryQuery.trim().length > 0 || !collapsedTopicIds.includes(group.topicId);
-            return <section className="teacher-book-tree-topic" key={group.topicId}>
+            const topicDisabled = group.topicStatus === "disabled";
+            return <section className={`teacher-book-tree-topic ${topicDisabled ? "is-disabled" : ""}`} key={group.topicId}>
               <div className="teacher-book-tree-topic-heading">
-                <button type="button" className="teacher-book-topic-toggle" aria-label={`${topicExpanded ? "折叠" : "展开"}主题 ${group.topicName}`} aria-expanded={topicExpanded} onClick={() => setCollapsedTopicIds((current) => topicExpanded ? [...current, group.topicId] : current.filter((id) => id !== group.topicId))}><ChevronDown size={14} /><span>{group.topicName}</span>{group.topicStatus === "disabled" && <small className="teacher-book-tree-status is-disabled"><span className="teacher-book-tree-status-dot" aria-hidden="true" />已停用</small>}<small className="teacher-book-tree-count">{group.items.length}</small></button>
+                <button type="button" className={`teacher-book-topic-toggle ${topicDisabled ? "is-disabled" : ""}`} aria-label={`${topicExpanded ? "折叠" : "展开"}主题 ${group.topicName}${topicDisabled ? "（已停用）" : ""}`} aria-expanded={topicExpanded} onClick={() => setCollapsedTopicIds((current) => topicExpanded ? [...current, group.topicId] : current.filter((id) => id !== group.topicId))}><ChevronDown size={14} /><span>{group.topicName}</span><small className="teacher-book-tree-count">{group.items.length}</small></button>
                 <details className="teacher-book-tree-menu"><summary aria-label={`${group.topicName}目录选项`}><MoreHorizontal size={16} /></summary><div>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void addKnowledgePoint(group.topicId); }} disabled={!catalogDraft || directorySaving}><Plus size={14} />新增知识点</button>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void editTopic(group.topicId); }} disabled={!catalogDraft || directorySaving}><Pencil size={14} />编辑主题</button>
@@ -651,14 +696,14 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
                   <button type="button" className="danger" onClick={(event) => { closeTreeMenu(event); requestRemoveTopic(group.topicId); }} disabled={!catalogDraft || directorySaving}><Trash2 size={14} />删除主题</button>
                 </div></details>
               </div>
-              {topicExpanded && <div className="teacher-book-tree-topic-items">{group.items.map((item) => <div className={`teacher-book-tree-point ${selectedId === item.knowledge_point_id ? "active" : ""}`} key={item.knowledge_point_id}>
-                <button className="teacher-book-tree-point-main" aria-label={item.title} type="button" onClick={() => setSelectedId(item.knowledge_point_id)}><span>{item.title}</span>{item.knowledge_point_status === "disabled" ? <small className="teacher-book-tree-status is-disabled"><span className="teacher-book-tree-status-dot" aria-hidden="true" />已停用</small> : item.has_published && <small className="teacher-book-tree-status is-published"><span className="teacher-book-tree-status-dot" aria-hidden="true" />已发布</small>}</button>
+              {topicExpanded && <div className="teacher-book-tree-topic-items">{group.items.map((item) => { const pointDisabled = item.knowledge_point_status === "disabled"; return <div className={`teacher-book-tree-point ${selectedId === item.knowledge_point_id ? "active" : ""} ${pointDisabled ? "is-disabled" : ""}`} key={item.knowledge_point_id}>
+                <button className="teacher-book-tree-point-main" aria-label={`${item.title}${pointDisabled ? "（已停用）" : ""}`} type="button" onClick={() => requestSelect(item.knowledge_point_id)}><span>{item.title}</span></button>
                 <details className="teacher-book-tree-menu"><summary aria-label={`${item.title}选项`}><MoreHorizontal size={15} /></summary><div>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void editKnowledgePoint(group.topicId, item.knowledge_point_id); }} disabled={!catalogDraft || directorySaving}><Pencil size={14} />编辑知识点</button>
                   <button type="button" onClick={(event) => { closeTreeMenu(event); void toggleKnowledgePoint(group.topicId, item.knowledge_point_id); }} disabled={!catalogDraft || directorySaving}>{item.knowledge_point_status === "enabled" ? <EyeOff size={14} /> : <Eye size={14} />}{item.knowledge_point_status === "enabled" ? "停用知识点" : "启用知识点"}</button>
                   <button type="button" className="danger" onClick={(event) => { closeTreeMenu(event); requestRemoveKnowledgePoint(group.topicId, item.knowledge_point_id); }} disabled={!catalogDraft || directorySaving}><Trash2 size={14} />删除知识点</button>
                 </div></details>
-              </div>)}</div>}
+              </div>; })}</div>}
             </section>;
           })}</div>
           {!filteredGroups.length && <p className="teacher-empty-state">未找到匹配的主题或知识点。</p>}
@@ -674,6 +719,7 @@ export function TeacherBookEditor({ workspaceId, catalog, onCatalogChange }: Pro
       </div>
       {catalogInput && <TextInputDialog key={`${catalogInput.kind}-${catalogInput.topicId ?? ""}-${catalogInput.pointId ?? ""}`} open title={catalogInput.title} description={catalogInput.description} label={catalogInput.label} initialValue={catalogInput.value} placeholder={catalogInput.placeholder} confirmLabel={catalogInput.confirmLabel} onClose={() => setCatalogInput(null)} onConfirm={(value) => { void submitCatalogInput(value); }} />}
       {catalogDeleteTarget && <ConfirmDialog open title={`删除${catalogDeleteTarget.kind === "topic" ? "主题" : "知识点"}“${catalogDeleteTarget.name}”？`} description={catalogDeleteTarget.kind === "topic" ? "该主题及其知识点会从当前教材目录移除；已有学习记录不会受影响。" : "该知识点会从当前教材目录移除；已有教材版本和学习记录不会受影响。"} onClose={() => setCatalogDeleteTarget(null)} onConfirm={() => { void confirmCatalogDelete(); }} />}
+      {pendingSelectedId && <ConfirmDialog open title="有未保存的教材修改" description="切换知识点会丢弃当前 Markdown 修改和待入库图片。确定继续切换吗？" confirmLabel="继续切换" cancelLabel="留在当前编辑" onClose={() => setPendingSelectedId(null)} onConfirm={() => { const nextId = pendingSelectedId; setPendingSelectedId(null); setSelectedId(nextId); }} />}
     </div>
   );
 }
