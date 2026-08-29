@@ -179,6 +179,23 @@ def _public_runtime_settings() -> dict[str, Any]:
     }
 
 
+def _public_learning_topic(topic: dict[str, Any]) -> dict[str, Any]:
+    """Project teacher-only knowledge-point settings out of the student catalog."""
+    public_topic = {
+        key: value for key, value in topic.items() if key != "knowledge_points"
+    }
+    public_topic["knowledge_points"] = [
+        {
+            key: value
+            for key, value in point.items()
+            if key != "question_types"
+        }
+        for point in topic.get("knowledge_points", [])
+        if point.get("status", "enabled") == "enabled"
+    ]
+    return public_topic
+
+
 def create_app(
     *,
     gateway_factory: GatewayFactory = BackendGateway,
@@ -1457,16 +1474,11 @@ def create_app(
         authorization_service.require(
             principal, Permission.LEARNING_CONTENT_READ_WORKSPACE, workspace_id=workspace_id
         )
-        catalog = (await request.app.state.gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        catalog = dict(
+            (await request.app.state.gateway.get_teaching_catalog(principal, workspace_id))["catalog"]
+        )
         catalog["topics"] = [
-            {
-                **topic,
-                "knowledge_points": [
-                    point
-                    for point in topic.get("knowledge_points", [])
-                    if point.get("status", "enabled") == "enabled"
-                ],
-            }
+            _public_learning_topic(topic)
             for topic in catalog.get("topics", [])
             if topic.get("status", "enabled") == "enabled"
         ]
