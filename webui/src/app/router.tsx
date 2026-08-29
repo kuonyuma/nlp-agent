@@ -16,8 +16,10 @@ export function AppRouter() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route element={<AuthGate><AppShell /></AuthGate>}>
+        <Route element={<AuthGate allowGuest><AppShell /></AuthGate>}>
           <Route index element={<StudentRoutes />} />
+        </Route>
+        <Route element={<AuthGate><AppShell /></AuthGate>}>
           <Route path="teacher/*" element={<TeacherRoutes />} />
           <Route path="developer/*" element={<DeveloperRoutes />} />
           <Route path="admin/*" element={<AdminRoutes />} />
