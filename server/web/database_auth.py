@@ -24,6 +24,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
+from configs.settings import auth_env_bool, auth_env_int
 from server.infrastructure.mysql.models import (
     SessionModel,
     UserModel,
@@ -133,16 +134,14 @@ class DatabaseSessionAuth:
     def from_config(cls, config: dict[str, Any]) -> "DatabaseSessionAuth":
         return cls(
             cookie_name=str(config.get("cookie_name", "nlp_session")),
-            ttl_s=int(
-                config.get("auth_session_ttl_s", config.get("cookie_ttl_s", 86_400))
-            ),
+            ttl_s=auth_env_int("NLP_AGENT_AUTH_SESSION_TTL_S", 86_400),
             # Secure is the production-safe default.  Local HTTP development
             # may explicitly opt out through NLP_AGENT_AUTH_COOKIE_SECURE=false.
-            secure=bool(config.get("cookie_secure", True)),
+            secure=auth_env_bool("NLP_AGENT_AUTH_COOKIE_SECURE", bool(config.get("cookie_secure", True))),
             allowed_origins=list(config.get("allowed_origins", [])),
-            idle_timeout_s=int(config.get("auth_idle_timeout_s", 900)),
-            max_login_attempts=int(config.get("auth_max_login_attempts", 5)),
-            rate_window_s=int(config.get("auth_rate_window_s", 300)),
+            idle_timeout_s=auth_env_int("NLP_AGENT_AUTH_IDLE_TIMEOUT_S", 900),
+            max_login_attempts=auth_env_int("NLP_AGENT_AUTH_MAX_LOGIN_ATTEMPTS", 5),
+            rate_window_s=auth_env_int("NLP_AGENT_AUTH_RATE_WINDOW_S", 300),
         )
 
     @staticmethod

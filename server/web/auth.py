@@ -17,6 +17,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, VerifyMismatchError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from configs.settings import auth_env_bool, auth_env_int
 from core.identity import AuthenticatedPrincipal
 
 
@@ -131,8 +132,8 @@ class SameOriginSessionAuth:
         return cls(
             secret=str(config.get("auth_secret", "")),
             cookie_name=str(config.get("cookie_name", "nlp_session")),
-            ttl_s=int(config.get("cookie_ttl_s", 86_400)),
-            secure=bool(config.get("cookie_secure", False)),
+            ttl_s=auth_env_int("NLP_AGENT_AUTH_SESSION_TTL_S", 86_400),
+            secure=auth_env_bool("NLP_AGENT_AUTH_COOKIE_SECURE", bool(config.get("cookie_secure", False))),
             allowed_origins=list(config.get("allowed_origins", [])),
             username=str(config.get("auth_username", "")) if include_credentials else "",
             password_hash=str(config.get("auth_password_hash", "")) if include_credentials else "",
@@ -143,9 +144,9 @@ class SameOriginSessionAuth:
                 ).split(",")
                 if item.strip()
             ),
-            idle_timeout_s=int(config.get("auth_idle_timeout_s", 900)),
-            max_login_attempts=int(config.get("auth_max_login_attempts", 5)),
-            rate_window_s=int(config.get("auth_rate_window_s", 300)),
+            idle_timeout_s=auth_env_int("NLP_AGENT_AUTH_IDLE_TIMEOUT_S", 900),
+            max_login_attempts=auth_env_int("NLP_AGENT_AUTH_MAX_LOGIN_ATTEMPTS", 5),
+            rate_window_s=auth_env_int("NLP_AGENT_AUTH_RATE_WINDOW_S", 300),
         )
 
     @property

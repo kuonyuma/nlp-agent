@@ -1,7 +1,9 @@
 """Application settings and compatibility accessors for typed model routes."""
 
+import os
 from pathlib import Path
 
+from dotenv import dotenv_values
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from core.runtime_config import load_runtime_config
@@ -184,13 +186,7 @@ class Settings(BaseSettings):
         if self.NLP_AGENT_AUTH_PASSWORD_HASH:
             config["auth_password_hash"] = self.NLP_AGENT_AUTH_PASSWORD_HASH
         config["auth_roles"] = self.NLP_AGENT_AUTH_ROLES
-        config["auth_session_ttl_s"] = self.NLP_AGENT_AUTH_SESSION_TTL_S
-        config["auth_idle_timeout_s"] = self.NLP_AGENT_AUTH_IDLE_TIMEOUT_S
-        config["auth_max_login_attempts"] = self.NLP_AGENT_AUTH_MAX_LOGIN_ATTEMPTS
-        config["auth_rate_window_s"] = self.NLP_AGENT_AUTH_RATE_WINDOW_S
         config["audit_successful_reads"] = self.NLP_AGENT_AUDIT_SUCCESSFUL_READS
-        if self.NLP_AGENT_AUTH_COOKIE_SECURE is not None:
-            config["cookie_secure"] = self.NLP_AGENT_AUTH_COOKIE_SECURE
         self._apply_network_overrides(
             config,
             host=self.NLP_AGENT_WEB_HOST,
@@ -292,3 +288,33 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+_AUTH_DOTENV = dotenv_values(BASE_DIR / ".env")
+
+
+def auth_env_value(name: str, default: str | None = None) -> str | None:
+    """Read auth settings with the same precedence as model API keys.
+
+    ``os.environ`` wins, then the pydantic-settings populated field (which
+    already reflects ``.env``), then a direct ``.env`` lookup as a fallback.
+    """
+    if name in os.environ:
+        return os.environ[name]
+    value = getattr(settings, name, None)
+    if value is not None:
+        return str(value)
+    if name in _AUTH_DOTENV:
+        return str(_AUTH_DOTENV[name])
+    return default
+
+
+def auth_env_int(name: str, default: int) -> int:
+    raw = auth_env_value(name)
+    return int(raw) if raw not in (None, "") else default
+
+
+def auth_env_bool(name: str, default: bool) -> bool:
+    raw = auth_env_value(name)
+    if raw is None or raw == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
