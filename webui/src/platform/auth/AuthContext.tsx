@@ -47,7 +47,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (username: string, password: string) => {
-    setIsLoading(true);
     setError("");
     try {
       const session = await api.login(username, password);
@@ -57,19 +56,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       setError(reason instanceof Error ? reason.message : "登录失败");
       throw reason;
-    } finally {
-      setIsLoading(false);
     }
   }, []);
 
   const logout = useCallback(async () => {
     try {
       await api.logout();
+    } catch (err) {
+      console.error("Logout failed:", err);
     } finally {
       // A locally expired/revoked cookie must not leave the React tree looking
       // authenticated after the server has rejected logout.
       setUser(null);
       setError("");
+      // Redirect to login page
+      window.location.href = "/";
     }
   }, []);
 

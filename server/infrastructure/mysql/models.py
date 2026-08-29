@@ -57,6 +57,15 @@ class UserModel(TimestampedModel, Base):
     last_login_at: Mapped[datetime | None] = mapped_column(
         DATETIME(fsp=6), nullable=True, index=True
     )
+    # 手机号注册：``phone_number`` 与 ``registration_source`` 在数据库已存在，
+    # 但 develop 合并后的模型缺失定义，导致 ``server/user/service.py`` 里的
+    # ``UserModel.phone_number`` 查询/赋值会抛 AttributeError。此处补齐保持一致。
+    phone_number: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, unique=True, index=True
+    )
+    registration_source: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="manual"
+    )
 
     sessions: Mapped[list["SessionModel"]] = relationship(back_populates="user")
 
@@ -188,6 +197,7 @@ class AuthorizationAuditLogModel(Base):
     __table_args__ = (
         Index("ix_nlp_authorization_audit_actor_created", "actor_user_id", "created_at"),
         Index("ix_nlp_authorization_audit_target_created", "target_user_id", "created_at"),
+        Index("ix_nlp_authorization_audit_created_at", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
@@ -437,6 +447,15 @@ class CourseCatalogVersionModel(Base):
 
 class ConversationModel(TimestampedModel, Base):
     __tablename__ = "nlp_conversations"
+    __table_args__ = (
+        Index(
+            "ix_nlp_conversations_owner_status_activity",
+            "owner_user_id",
+            "status",
+            "last_message_at",
+            "created_at",
+        ),
+    )
     id: Mapped[str] = mapped_column(SESSION_IDENTIFIER, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_workspaces.id", ondelete="RESTRICT"), nullable=False, index=True)
     owner_user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="RESTRICT"), nullable=False, index=True)
@@ -993,6 +1012,30 @@ class SandboxArtifactModel(Base):
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     size_bytes: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False, server_default="0")
     expires_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
+
+
+class AuthCodeModel(Base):
+    """Shared (DB-backed) store for one-time verification codes.
+
+    Replaces the previous in-process dicts so that captcha / SMS codes
+    survive multi-instance deployments: the instance that generates a code
+    and the instance that verifies it no longer need to be the same process.
+    ``client_ip`` is recorded to enable server-side send-rate limiting.
+    """
+
+    __tablename__ = "nlp_auth_codes"
+    __table_args__ = (
+        Index("ix_nlp_auth_codes_kind_subject", "kind", "subject"),
+        Index("ix_nlp_auth_codes_kind_ip_created", "kind", "client_ip", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, index=True)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), server_default=func.utc_timestamp(6), nullable=False)
 
 
