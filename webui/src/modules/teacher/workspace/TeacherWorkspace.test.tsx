@@ -1,25 +1,28 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { GuidedBlueprintCatalogEditor } from "./TeacherCatalogManager";
+import { GuidedBlueprintCatalogEditor } from "./TeacherCatalogEditor";
 import { TeacherWorkspace } from "./TeacherWorkspace";
 import { TeacherRoutes } from "../routes";
 
-const { ensureAuthMock, getSettingsMock, getTeacherCatalog, updateTeacherCatalog } = vi.hoisted(() => ({
+const { ensureAuthMock, getSettingsMock, getTeacherCatalog, getTeacherOverviewMock, updateTeacherCatalog } = vi.hoisted(() => ({
   ensureAuthMock: vi.fn(),
   getSettingsMock: vi.fn(),
   getTeacherCatalog: vi.fn().mockResolvedValue({ catalog: { workspace_id: "default", topics: [{ id: "transformer", name: "Transformer", description: "", status: "enabled", knowledge_points: [{ id: "attention", name: "注意力", markdown: "# Attention", status: "enabled", sort_order: 0 }] }], exercise_blueprints: [], review_blueprints: [], guided_blueprints: [] } }),
+  getTeacherOverviewMock: vi.fn().mockResolvedValue({ workspace_id: "default", period_days: 30, summary: { questions: 2, sessions: 2, students: 2, error_questions: 0, exercises: 3, exercise_pass_rate: 66.67, guided_sessions: 1 }, weak_topics: [{ topic_id: "transformer", topic: "Transformer", questions: 2, errors: 0, exercises: 3, average_score: 70, pass_rate: 66.67, misconceptions: 1, risk: "medium" }], topic_distribution: [{ name: "Transformer", count: 2, percentage: 100 }], difficulty_distribution: [{ name: "入门", count: 2, percentage: 100 }], mode_distribution: [{ name: "讲解", count: 2, percentage: 100 }], daily_questions: [{ date: "2026-07-19", count: 2 }], knowledge_point_stats: [{ knowledge_point_id: "attention", name: "注意力", topic: "Transformer", exercises: 3, average_score: 70, pass_rate: 66.67, weak_criteria: [{ criterion: "概念准确", hit_rate: 100 }, { criterion: "步骤完整", hit_rate: 33.33 }] }],
+  }),
   updateTeacherCatalog: vi.fn().mockImplementation(async (_workspaceId, next) => ({ catalog: { workspace_id: "default", ...next } })),
 }));
 vi.mock("@/platform/http/api", () => ({
   ensureAuth: ensureAuthMock,
-  api: { getSettings: getSettingsMock, getTeacherOverview: vi.fn().mockResolvedValue({ workspace_id: "default", period_days: 30, summary: { questions: 2, sessions: 2, students: 2, error_questions: 0, exercises: 3, exercise_pass_rate: 66.67, guided_sessions: 1 }, weak_topics: [{ topic_id: "transformer", topic: "Transformer", questions: 2, errors: 0, exercises: 3, average_score: 70, pass_rate: 66.67, misconceptions: 1, risk: "medium" }], topic_distribution: [{ name: "Transformer", count: 2, percentage: 100 }], difficulty_distribution: [{ name: "入门", count: 2, percentage: 100 }], mode_distribution: [{ name: "讲解", count: 2, percentage: 100 }], daily_questions: [{ date: "2026-07-19", count: 2 }], knowledge_point_stats: [{ knowledge_point_id: "attention", name: "注意力", topic: "Transformer", exercises: 3, average_score: 70, pass_rate: 66.67, weak_criteria: [{ criterion: "概念准确", hit_rate: 100 }, { criterion: "步骤完整", hit_rate: 33.33 }] }] }), getTeacherCatalog, updateTeacherCatalog },
+  api: { getSettings: getSettingsMock, getTeacherOverview: getTeacherOverviewMock, getTeacherCatalog, updateTeacherCatalog },
 }));
 
 describe("TeacherWorkspace catalog CRUD", () => {
   beforeEach(() => {
     updateTeacherCatalog.mockClear();
     getTeacherCatalog.mockClear();
+    getTeacherOverviewMock.mockClear();
     ensureAuthMock.mockResolvedValue({ roles: ["teacher"], workspace_ids: ["default"] });
     getSettingsMock.mockResolvedValue({ preferences: { settings: {} }, runtime: { default_model_profile: "deepseek", model_profiles: {} } });
   });
@@ -64,47 +67,53 @@ describe("TeacherWorkspace catalog CRUD", () => {
     expect(await screen.findByRole("heading", { name: "学生问题" })).toBeVisible();
   });
 
-  it("creates a topic immediately and persists the catalog through FastAPI", async () => {
+  it("does not load analytics data for catalog editor pages", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
-    fireEvent.change(await screen.findByPlaceholderText("例如：Transformer"), { target: { value: "词向量" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建主题" }));
-    expect(screen.queryByDisplayValue("词向量")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "词向量 展开" }));
+
+    expect(await screen.findByRole("heading", { name: "主题与知识点" })).toBeVisible();
+    expect(getTeacherOverviewMock).not.toHaveBeenCalled();
+  });
+
+  it("creates a topic in the shared editor and persists the catalog through FastAPI", async () => {
+    history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建主题" }));
+    fireEvent.change(screen.getByLabelText("主题名称"), { target: { value: "词向量" } });
     expect(screen.getByDisplayValue("词向量")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "保存教学目录" }));
     await waitFor(() => expect(updateTeacherCatalog).toHaveBeenCalledWith("default", expect.objectContaining({ topics: expect.arrayContaining([expect.objectContaining({ name: "词向量" })]) })));
     expect(screen.getByRole("status")).toHaveTextContent("已保存并同步到后端。");
   });
 
-  it("toggles a topic from its full header control without a separate arrow button", async () => {
+  it("opens a topic editor directly instead of requiring an expandable card", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
 
-    const topicToggle = await screen.findByRole("button", { name: "Transformer 展开" });
-    expect(topicToggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("button", { name: "Transformer 收起" })).not.toBeInTheDocument();
-
-    fireEvent.click(topicToggle);
-    expect(screen.getByRole("button", { name: "Transformer 收起" })).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByRole("heading", { name: "主题与知识点" })).toBeVisible();
     expect(screen.getByDisplayValue("Transformer")).toBeVisible();
+    expect(screen.getByRole("button", { name: "折叠主题 Transformer" })).toHaveAttribute("aria-expanded", "true");
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Transformer 收起" }));
-    expect(screen.queryByDisplayValue("Transformer")).not.toBeInTheDocument();
+  it("keeps the Markdown toolbar read-only while previewing", async () => {
+    history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
+
+    expect(await screen.findByRole("button", { name: "选择知识点 注意力" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "选择知识点 注意力" }));
+    fireEvent.click(screen.getByRole("button", { name: "预览知识点说明" }));
+
+    expect(screen.getByRole("button", { name: "加粗" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回编辑知识点说明" })).toBeVisible();
   });
 
   it("edits, disables, creates and deletes knowledge points", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
-    expect(await screen.findByRole("button", { name: "Transformer 展开" })).toBeVisible();
-    expect(screen.queryByDisplayValue("Transformer")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Transformer 展开" }));
-    expect(screen.getByRole("button", { name: "注意力 展开" })).toBeVisible();
-    expect(screen.queryByDisplayValue("注意力")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "选择知识点 注意力" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "选择知识点 注意力" }));
+    expect(screen.getByDisplayValue("注意力")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /^主题设置/ }));
     const topicName = screen.getByDisplayValue("Transformer"); fireEvent.change(topicName, { target: { value: "新版 Transformer" } });
     fireEvent.click(screen.getAllByRole("button", { name: "停用" })[0]); expect(screen.getAllByRole("button", { name: "启用" })[0]).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "添加知识点" }));
-    expect(screen.queryByDisplayValue("新知识点")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "新知识点 展开" }));
+    fireEvent.click(screen.getByRole("button", { name: "新增知识点" }));
     expect(screen.getByDisplayValue("新知识点")).toBeVisible();
-    fireEvent.click(screen.getAllByRole("button", { name: "删除" })[2]);
+    fireEvent.click(screen.getByRole("button", { name: "删除当前知识点" }));
     expect(screen.getByRole("alertdialog", { name: "删除知识点“新知识点”？" })).toBeVisible();
     expect(screen.getByDisplayValue("新知识点")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
@@ -115,50 +124,45 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("creates, edits status and deletes an exercise blueprint", async () => {
     history.replaceState({}, "", "/teacher/exercises"); render(<TeacherWorkspace />);
-    fireEvent.change(await screen.findByLabelText("exercise蓝图名称"), { target: { value: "Attention 练习" } });
+    fireEvent.click(await screen.findByRole("button", { name: "新建出题蓝图" }));
+    fireEvent.change(screen.getByLabelText("exercise蓝图名称"), { target: { value: "Attention 练习" } });
     fireEvent.change(screen.getByLabelText("exercise所属主题"), { target: { value: "transformer" } });
     fireEvent.change(screen.getByLabelText("exercise关联知识点"), { target: { value: "attention" } });
     fireEvent.change(screen.getByLabelText("exerciseMarkdown 指令"), { target: { value: "考察 Q、K、V 的作用。" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建单题草稿蓝图" }));
-    expect(screen.queryByDisplayValue("Attention 练习")).not.toBeInTheDocument(); expect(screen.getByText("草稿")).toBeVisible();
-    expect(screen.getByLabelText("主题：Transformer")).toBeVisible();
-    expect(screen.getByText("知识点")).toBeVisible();
-    expect(screen.getByText("1 张蓝图")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Attention 练习 展开" }));
-    expect(screen.getByDisplayValue("Attention 练习")).toBeVisible();
+    expect(screen.getByDisplayValue("Attention 练习")).toBeVisible(); expect(screen.getAllByText("草稿").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "折叠主题 Transformer" })).toBeVisible();
+    expect(screen.getByText("Transformer · 注意力")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "出题蓝图", level: 2 })).toBeVisible();
     expect(screen.queryByText("解释难度")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保存教学目录" }));
     await waitFor(() => expect(updateTeacherCatalog).toHaveBeenCalledWith("default", expect.objectContaining({
       exercise_blueprints: [expect.not.objectContaining({ level: expect.anything() })],
     })));
     fireEvent.click(screen.getByRole("button", { name: "启用" })); expect(screen.getByRole("button", { name: "停用" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "删除" })); expect(screen.getByDisplayValue("Attention 练习")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "删除当前出题蓝图" })); expect(screen.getByDisplayValue("Attention 练习")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "确认删除" })); expect(screen.queryByDisplayValue("Attention 练习")).not.toBeInTheDocument();
   });
 
   it("creates and deletes a review blueprint with its own structured fields", async () => {
     history.replaceState({}, "", "/teacher/reviews"); render(<TeacherWorkspace />);
-    fireEvent.change(await screen.findByLabelText("review蓝图名称"), { target: { value: "Transformer 复习" } });
+    fireEvent.click(await screen.findByRole("button", { name: "新建复习蓝图" }));
+    fireEvent.change(screen.getByLabelText("review蓝图名称"), { target: { value: "Transformer 复习" } });
     fireEvent.change(screen.getByLabelText("review所属主题"), { target: { value: "transformer" } });
     fireEvent.change(screen.getByLabelText("review关联知识点"), { target: { value: "attention" } });
     fireEvent.change(screen.getByLabelText("reviewMarkdown 指令"), { target: { value: "先回顾再练习。" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建单题草稿蓝图" }));
-    expect(screen.queryByDisplayValue("Transformer 复习")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Transformer 复习 展开" }));
-    expect(screen.getByDisplayValue("Transformer 复习")).toBeVisible(); expect(screen.getAllByDisplayValue("简答")).toHaveLength(2);
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(screen.getByDisplayValue("Transformer 复习")).toBeVisible(); expect(screen.getAllByDisplayValue("简答")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "删除当前复习蓝图" }));
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
     expect(screen.queryByDisplayValue("Transformer 复习")).not.toBeInTheDocument();
   });
 
   it("creates an editable guided blueprint with a Markdown direction", async () => {
     history.replaceState({}, "", "/teacher/guided"); render(<TeacherWorkspace />);
-    fireEvent.change(await screen.findByLabelText("guided蓝图名称"), { target: { value: "QKV 追问路径" } });
+    fireEvent.click(await screen.findByRole("button", { name: "新建引导蓝图" }));
+    fireEvent.change(screen.getByLabelText("guided蓝图名称"), { target: { value: "QKV 追问路径" } });
     fireEvent.change(screen.getByLabelText("guided所属主题"), { target: { value: "transformer" } });
     fireEvent.change(screen.getByLabelText("guided关联知识点"), { target: { value: "attention" } });
     fireEvent.change(screen.getByLabelText("guidedMarkdown 指令"), { target: { value: "先让学生区分 Q、K、V，再追问权重。" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建引导草稿蓝图" }));
-    fireEvent.click(screen.getByRole("button", { name: "QKV 追问路径 展开" }));
     expect(screen.getByDisplayValue("先让学生区分 Q、K、V，再追问权重。")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "保存教学目录" }));
     await waitFor(() => expect(updateTeacherCatalog).toHaveBeenCalledWith("default", expect.objectContaining({ guided_blueprints: [expect.objectContaining({ guidance: "先让学生区分 Q、K、V，再追问权重。" })] })));
@@ -171,9 +175,9 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("presents manual catalog creation without a preset import action", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
-    expect(await screen.findByRole("button", { name: "创建主题" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "新建主题" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "导入 NLP 课件" })).not.toBeInTheDocument();
-    expect(screen.getByText("主题、知识点和蓝图均由教师手动创建并保存；不会导入预置课程数据。")).toBeVisible();
+    expect(screen.getByText(/维护学生学习范围与智能体可引用的知识边界/)).toBeVisible();
   });
 
   it("renders question statistics without raw question text", async () => {
