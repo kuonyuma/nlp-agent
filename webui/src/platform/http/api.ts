@@ -1,4 +1,4 @@
-import type { AuthSession, AuthorizationAuditRecord, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, RbacPermission, RbacRole, ReleaseNoteEntry, SettingsRuntime, SystemMenu, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { AuthSession, AuthorizationAuditRecord, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, RbacPermission, RbacRole, ReleaseNoteEntry, SettingsRuntime, SystemMenu, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 import type { FeedbackThread, FeedbackThreadList } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
@@ -245,4 +245,35 @@ export const api = {
       `/classrooms/${encodeURIComponent(classroomId)}/join-requests/${encodeURIComponent(requestId)}/reject`,
       { method: "POST" },
     ),
+
+  // ---------------------------------------------------------------------------
+  // Registration (public)
+  // ---------------------------------------------------------------------------
+  getCaptcha: () =>
+    request<{ captcha_id: string; image: string }>("/auth/captcha"),
+  register: (data: { phone_number: string; sms_code: string; password: string; display_name?: string; captcha_id: string; captcha_code: string }) =>
+    request<UserProfile>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  sendSmsCode: (phoneNumber: string, captchaId: string, captchaCode: string) =>
+    request<{ message: string }>("/auth/sms/send", {
+      method: "POST",
+      body: JSON.stringify({ phone_number: phoneNumber, captcha_id: captchaId, captcha_code: captchaCode }),
+    }),
+
+  // ---------------------------------------------------------------------------
+  // Self-service profile (当前用户)
+  // ---------------------------------------------------------------------------
+  getCurrentUser: () => request<UserProfile>("/users/me"),
+  updateProfile: (data: { display_name: string }) =>
+    request<UserProfile>("/users/me", {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  changePassword: (data: { current_password: string; new_password: string }) =>
+    request<void>("/users/me/password", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 };

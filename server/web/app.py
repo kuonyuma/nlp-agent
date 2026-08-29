@@ -11,12 +11,13 @@ from typing import Annotated, Any
 
 logger = logging.getLogger(__name__)
 
-from fastapi import Depends, FastAPI, Header, Query, Request, Response, Security, WebSocket, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, Security, WebSocket, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyCookie
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from configs.settings import settings
@@ -105,6 +106,14 @@ from server.release_notes.service import (
 )
 from server.web.websocket import WebSocketHub, websocket_endpoint
 from server.web.feedback import get_feedback_thread, list_feedback_threads, mark_feedback_read, submit_feedback
+from server.auth.dependencies import get_db_session
+from server.auth import code_store
+from server.auth.captcha import generate_captcha_image
+from server.user.schemas import SmsCodeRequest, UserCreate, UserRegister
+from server.user.service import UserService, generate_sms_code
+from server.user.tencent_sms import create_tencent_sms_provider_from_env
+
+DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 GatewayFactory = Callable[[], BackendGateway]
@@ -330,17 +339,21 @@ def create_app(
         finally:
             end_authorization_audit(audit_token)
         session_factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
-        if session_factory is not None and decisions:
-            async with session_factory() as session:
-                async with session.begin():
-                    for decision in decisions:
-                        await rbac_service.audit(
-                            session, actor_user_id=decision.actor_user_id, target_user_id=None,
-                            decision=decision.decision, reason_code="authorization_required",
-                            permission_code=decision.permission_code, resource_type=decision.resource_type,
-                            resource_id=decision.resource_id,
-                            detail={"workspace_id": decision.workspace_id, "request_id": request.state.request_id},
-                        )
+        if session_factory is not None and decisions and response.status_code != 401:
+            try:
+                async with session_factory() as session:
+                    async with session.begin():
+                        for decision in decisions:
+                            await rbac_service.audit(
+                                session, actor_user_id=decision.actor_user_id, target_user_id=None,
+                                decision=decision.decision, reason_code="authorization_required",
+                                permission_code=decision.permission_code, resource_type=decision.resource_type,
+                                resource_id=decision.resource_id,
+                                detail={"workspace_id": decision.workspace_id, "request_id": request.state.request_id},
+                            )
+            except Exception as audit_exc:
+                import logging
+                logging.getLogger("audit").warning("authorization audit flush failed: %s", audit_exc)
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
@@ -543,6 +556,75 @@ def create_app(
             status_code=200 if ready else 503,
         )
 
+    @app.get("/api/v1/auth/captcha", tags=["auth"])
+    async def get_captcha(db: DbSession):
+        """Generate a CAPTCHA image for registration/SMS verification.
+
+        The answer is persisted in ``nlp_auth_codes`` (shared across all
+        instances) with a short TTL; verification goes through
+        ``code_store.consume_code``.
+        """
+        captcha_id, image_data, code = generate_captcha_image()
+        await code_store.put_code(
+            db,
+            kind="captcha",
+            subject=captcha_id,
+            code=code,
+            ttl_s=code_store.CAPTCHA_TTL_S,
+        )
+        return {"captcha_id": captcha_id, "image": image_data}
+
+    @app.post("/api/v1/auth/sms/send", status_code=status.HTTP_200_OK, tags=["auth"])
+    async def send_sms_code(body: SmsCodeRequest, db: DbSession, request: Request):
+        """Validate the image CAPTCHA, then issue an SMS verification code.
+
+        Server-side controls (the frontend 60s countdown is UX only):
+        - the CAPTCHA answer is consumed single-use from ``nlp_auth_codes``;
+        - per-phone cooldown / per-phone hourly / per-IP hourly send limits;
+        - real delivery via Tencent Cloud SMS when ``TENCENT_SMS_*`` env vars
+          are configured, otherwise the code is printed to the server console
+          (development fallback);
+        - the code is stored hashed with a hard 120s expiry enforced at
+          consumption time.
+        """
+        await code_store.purge_expired(db)
+        if not await code_store.consume_code(
+            db, kind="captcha", subject=body.captcha_id, code=body.captcha_code
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired CAPTCHA",
+            )
+        phone = body.phone_number.strip()
+        client_ip = request.client.host if request.client else None
+        allowed, reason = await code_store.sms_send_allowed(
+            db, phone=phone, client_ip=client_ip
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason
+            )
+        code = generate_sms_code()
+        provider = create_tencent_sms_provider_from_env()
+        if provider is not None:
+            if not await provider.send_verification_code(phone, code):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="SMS gateway failed to deliver the code",
+                )
+        else:
+            # Development fallback: no Tencent Cloud credentials configured.
+            print(f"[SMS] Verification code for {phone}: {code}")
+        await code_store.put_code(
+            db,
+            kind="sms",
+            subject=phone,
+            code=code,
+            ttl_s=code_store.SMS_CODE_TTL_S,
+            client_ip=client_ip,
+        )
+        return {"message": "SMS code sent successfully"}
+
     @app.post("/api/v1/auth/login", status_code=status.HTTP_200_OK, tags=["auth"])
     async def login(body: LoginBody, request: Request, response: Response):
         factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
@@ -618,6 +700,68 @@ def create_app(
             "permissions": sorted(principal.permissions),
             "csrf_token": claims.csrf_token,
             "expires_at": claims.expires_at_epoch if isinstance(claims, DatabaseSessionClaims) else claims.expires_at,
+        }
+
+    @app.post("/api/v1/auth/register", status_code=status.HTTP_201_CREATED, tags=["auth"])
+    async def register_user(body: UserRegister, db: DbSession):
+        """Register a new account via phone number (image CAPTCHA + SMS code).
+
+        The account's ``username`` is set to the digits of the phone number so
+        that ``database_auth.login`` (which matches on ``username_lower``) can
+        authenticate the user with their phone number directly.
+        """
+        # 1. Validate the image CAPTCHA (single-use, DB-backed, 120s TTL).
+        if not await code_store.consume_code(
+            db, kind="captcha", subject=body.captcha_id, code=body.captcha_code
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired CAPTCHA",
+            )
+        # 2. Validate the SMS code issued by /auth/sms/send.  The 120s expiry
+        #    is enforced by code_store at consumption time.
+        if not await code_store.consume_code(
+            db, kind="sms", subject=body.phone_number.strip(), code=body.sms_code
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired SMS code",
+            )
+        # 3. Reject duplicate phones (username == phone digits).
+        phone = body.phone_number.strip()
+        username = "".join(ch for ch in phone if ch.isdigit()) or phone
+        existing = await db.scalar(
+            select(UserModel).where(
+                (UserModel.username_lower == username.casefold())
+                | (UserModel.phone_number == phone)
+            )
+        )
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This phone number is already registered",
+            )
+        # 4. Create the account.  ``create_user`` provisions a personal workspace
+        #    and assigns the default least-privilege ``guest`` (游客) role, which is
+        #    the correct self-registration identity: a curious outsider who just
+        #    wants to try the agent.  Admins promote accounts to student/teacher/
+        #    developer later through the user-management roles API.
+        service = UserService(db)
+        user = await service.create_user(
+            UserCreate(
+                username=username,
+                display_name=(body.display_name or "").strip() or username,
+                password=body.password,
+            )
+        )
+        user.phone_number = phone
+        user.registration_source = "phone"
+        await db.flush()
+        return {
+            "message": "User registered successfully",
+            "user_id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
         }
 
     @app.post("/api/v1/auth/guest", status_code=status.HTTP_200_OK, tags=["auth"])
