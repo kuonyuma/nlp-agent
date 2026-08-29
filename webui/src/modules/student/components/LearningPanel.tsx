@@ -93,9 +93,9 @@ export function LearningPanel({ open, onClose, title, context, meta, messages, c
   const coveredCount = knowledgePoints.filter((point) => point.covered).length;
   const completedResponses = messages.filter((message) => message.role === "assistant" && message.status === "completed").length;
   const userQuestions = messages.filter((message) => message.role === "user").length;
-  const progress = Math.min(100, knowledgePoints.length
-    ? Math.round(20 + (coveredCount / knowledgePoints.length) * 60 + Math.min(completedResponses, 3) * 6)
-    : Math.min(100, Math.max(10, userQuestions * 14 + concepts.length * 6)));
+  const progress = knowledgePoints.length
+    ? Math.round((coveredCount / knowledgePoints.length) * 80 + (Math.min(completedResponses, 3) / 3) * 20)
+    : Math.min(100, userQuestions * 14 + concepts.length * 6);
   const hasPracticeMaterial = messages.length > 0 && completedResponses > 0;
   const pointNames = knowledgePoints.map((point) => point.name);
 

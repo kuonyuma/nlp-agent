@@ -313,7 +313,7 @@ function SandboxPhaseZeroPanel({ onExplainCode, initialSource }: { onExplainCode
       if (!running) runCode();
       return;
     }
-    if (hasModifier && event.key.toLowerCase() === "s") {
+    if (hasModifier && !event.altKey && event.key.toLowerCase() === "s") {
       event.preventDefault();
       downloadSource();
       return;

@@ -27,7 +27,12 @@ const CODE_EXTENSIONS: Record<string, string> = {
   yaml: "yaml", yml: "yaml", sh: "bash", bash: "bash", zsh: "bash", sql: "sql", java: "java",
   c: "c", h: "c", cpp: "cpp", hpp: "cpp", cs: "csharp", go: "go", rs: "rust", rb: "ruby",
   php: "php", swift: "swift", kt: "kotlin", vue: "markup", svelte: "markup", toml: "toml",
-  ini: "ini", env: "bash", dockerfile: "docker", makefile: "makefile",
+  ini: "ini", env: "bash",
+};
+// Extensionless files like Dockerfile / Makefile are matched by basename instead.
+const CODE_FILENAMES: Record<string, string> = {
+  dockerfile: "docker",
+  makefile: "makefile",
 };
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd"]);
 
@@ -39,8 +44,9 @@ function extensionOf(name: string) {
 
 function describeFile(file: File): ImportedFile {
   const extension = extensionOf(file.name);
+  const baseName = file.name.toLowerCase().replace(/\.[^.]*$/, "");
   const isMarkdown = MARKDOWN_EXTENSIONS.has(extension) || /readme(?:\.[\w-]+)?$/i.test(file.name);
-  const codeLanguage = CODE_EXTENSIONS[extension] ?? "";
+  const codeLanguage = CODE_EXTENSIONS[extension] ?? CODE_FILENAMES[baseName] ?? "";
   const language = isMarkdown ? "markdown" : codeLanguage ? "code" : "text";
   return {
     id: createUuid(),
@@ -76,6 +82,7 @@ export function FilesPanel() {
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const filesRef = useRef<ImportedFile[]>(files);
+  const dragDepth = useRef(0);
   const selected = files.find((file) => file.id === selectedId) ?? files[0] ?? null;
 
   const persistFiles = (next: ImportedFile[]) => {
@@ -115,7 +122,9 @@ export function FilesPanel() {
     }
     if (!nextFiles.length) return;
     commitFiles([...filesRef.current, ...nextFiles]);
-    setSelectedId(nextFiles[0].id);
+    // The list sorts newest-first, so select the last file of the batch to keep
+    // the preview aligned with the top of the list.
+    setSelectedId(nextFiles[nextFiles.length - 1].id);
   };
 
   const removeFile = (id: string) => {
@@ -131,6 +140,7 @@ export function FilesPanel() {
 
   const onDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
+    dragDepth.current = 0;
     setDragging(false);
     void importFiles(event.dataTransfer.files);
   };
@@ -146,9 +156,10 @@ export function FilesPanel() {
     <section
       className={["files-panel", dragging && "dragging"].filter(Boolean).join(" ")}
       aria-label="文件工具"
-      onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
-      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
-      onDragEnd={() => setDragging(false)}
+      onDragEnter={(event) => { event.preventDefault(); dragDepth.current += 1; setDragging(true); }}
+      onDragOver={(event) => { event.preventDefault(); }}
+      onDragLeave={(event) => { event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDragging(false); }}
+      onDragEnd={() => { dragDepth.current = 0; setDragging(false); }}
       onDrop={onDrop}
     >
       <header className="files-panel-toolbar">
