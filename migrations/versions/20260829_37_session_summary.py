@@ -1,7 +1,7 @@
 """add LLM-generated session title basis timestamp
 
-Revision ID: 20260820_25
-Revises: 20260820_24
+Revision ID: 20260829_37_session_summary
+Revises: 20260829_36_usage_indexes
 """
 
 from alembic import op
@@ -10,8 +10,8 @@ from sqlalchemy import inspect
 from sqlalchemy.dialects.mysql import DATETIME
 
 
-revision = "20260820_25"
-down_revision = "20260820_24"
+revision = "20260829_37_session_summary"
+down_revision = "20260829_36_usage_indexes"
 branch_labels = None
 depends_on = None
 
