@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { within } from "@testing-library/react";
 
 import { GuidedBlueprintCatalogEditor } from "./TeacherCatalogEditor";
 import { TeacherWorkspace } from "./TeacherWorkspace";
@@ -108,12 +109,18 @@ describe("TeacherWorkspace catalog CRUD", () => {
     expect(await screen.findByRole("button", { name: "选择知识点 注意力" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "选择知识点 注意力" }));
     expect(screen.getByDisplayValue("注意力")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /^主题设置/ }));
+    fireEvent.click(screen.getByRole("button", { name: "选择主题 Transformer" }));
     const topicName = screen.getByDisplayValue("Transformer"); fireEvent.change(topicName, { target: { value: "新版 Transformer" } });
-    fireEvent.click(screen.getAllByRole("button", { name: "停用" })[0]); expect(screen.getAllByRole("button", { name: "启用" })[0]).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "新增知识点" }));
+    const topicMenu = screen.getByRole("button", { name: "新版 Transformer目录选项" }).closest("details"); expect(topicMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "新版 Transformer目录选项" }));
+    fireEvent.click(within(topicMenu as HTMLElement).getByRole("button", { name: "停用主题" }));
+    expect(screen.getByRole("button", { name: "新版 Transformer目录选项" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "新版 Transformer目录选项" }));
+    fireEvent.click(within(topicMenu as HTMLElement).getByRole("button", { name: "新增知识点" }));
     expect(screen.getByDisplayValue("新知识点")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "删除当前知识点" }));
+    const pointMenu = screen.getByRole("button", { name: "新知识点选项" }).closest("details"); expect(pointMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "新知识点选项" }));
+    fireEvent.click(within(pointMenu as HTMLElement).getByRole("button", { name: "删除知识点" }));
     expect(screen.getByRole("alertdialog", { name: "删除知识点“新知识点”？" })).toBeVisible();
     expect(screen.getByDisplayValue("新知识点")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
@@ -124,7 +131,10 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("creates, edits status and deletes an exercise blueprint", async () => {
     history.replaceState({}, "", "/teacher/exercises"); render(<TeacherWorkspace />);
-    fireEvent.click(await screen.findByRole("button", { name: "新建出题蓝图" }));
+    await screen.findByRole("heading", { name: "出题蓝图", level: 2 });
+    const createMenu = screen.getByRole("button", { name: "出题蓝图目录选项" }).closest("details"); expect(createMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "出题蓝图目录选项" }));
+    fireEvent.click(within(createMenu as HTMLElement).getByRole("button", { name: "新建出题蓝图" }));
     fireEvent.change(screen.getByLabelText("exercise蓝图名称"), { target: { value: "Attention 练习" } });
     fireEvent.change(screen.getByLabelText("exercise所属主题"), { target: { value: "transformer" } });
     fireEvent.change(screen.getByLabelText("exercise关联知识点"), { target: { value: "attention" } });
@@ -138,27 +148,38 @@ describe("TeacherWorkspace catalog CRUD", () => {
     await waitFor(() => expect(updateTeacherCatalog).toHaveBeenCalledWith("default", expect.objectContaining({
       exercise_blueprints: [expect.not.objectContaining({ level: expect.anything() })],
     })));
-    fireEvent.click(screen.getByRole("button", { name: "启用" })); expect(screen.getByRole("button", { name: "停用" })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "删除当前出题蓝图" })); expect(screen.getByDisplayValue("Attention 练习")).toBeVisible();
+    const blueprintMenu = screen.getByRole("button", { name: "Attention 练习选项" }).closest("details"); expect(blueprintMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Attention 练习选项" }));
+    fireEvent.click(within(blueprintMenu as HTMLElement).getByRole("button", { name: "启用出题蓝图" }));
+    fireEvent.click(screen.getByRole("button", { name: "Attention 练习选项" }));
+    fireEvent.click(within(blueprintMenu as HTMLElement).getByRole("button", { name: "删除出题蓝图" })); expect(screen.getByDisplayValue("Attention 练习")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "确认删除" })); expect(screen.queryByDisplayValue("Attention 练习")).not.toBeInTheDocument();
   });
 
   it("creates and deletes a review blueprint with its own structured fields", async () => {
     history.replaceState({}, "", "/teacher/reviews"); render(<TeacherWorkspace />);
-    fireEvent.click(await screen.findByRole("button", { name: "新建复习蓝图" }));
+    await screen.findByRole("heading", { name: "复习蓝图", level: 2 });
+    const createMenu = screen.getByRole("button", { name: "复习蓝图目录选项" }).closest("details"); expect(createMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "复习蓝图目录选项" }));
+    fireEvent.click(within(createMenu as HTMLElement).getByRole("button", { name: "新建复习蓝图" }));
     fireEvent.change(screen.getByLabelText("review蓝图名称"), { target: { value: "Transformer 复习" } });
     fireEvent.change(screen.getByLabelText("review所属主题"), { target: { value: "transformer" } });
     fireEvent.change(screen.getByLabelText("review关联知识点"), { target: { value: "attention" } });
     fireEvent.change(screen.getByLabelText("reviewMarkdown 指令"), { target: { value: "先回顾再练习。" } });
     expect(screen.getByDisplayValue("Transformer 复习")).toBeVisible(); expect(screen.getAllByDisplayValue("简答")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "删除当前复习蓝图" }));
+    const blueprintMenu = screen.getByRole("button", { name: "Transformer 复习选项" }).closest("details"); expect(blueprintMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Transformer 复习选项" }));
+    fireEvent.click(within(blueprintMenu as HTMLElement).getByRole("button", { name: "删除复习蓝图" }));
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
     expect(screen.queryByDisplayValue("Transformer 复习")).not.toBeInTheDocument();
   });
 
   it("creates an editable guided blueprint with a Markdown direction", async () => {
     history.replaceState({}, "", "/teacher/guided"); render(<TeacherWorkspace />);
-    fireEvent.click(await screen.findByRole("button", { name: "新建引导蓝图" }));
+    await screen.findByRole("heading", { name: "引导蓝图", level: 2 });
+    const createMenu = screen.getByRole("button", { name: "引导蓝图目录选项" }).closest("details"); expect(createMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "引导蓝图目录选项" }));
+    fireEvent.click(within(createMenu as HTMLElement).getByRole("button", { name: "新建引导蓝图" }));
     fireEvent.change(screen.getByLabelText("guided蓝图名称"), { target: { value: "QKV 追问路径" } });
     fireEvent.change(screen.getByLabelText("guided所属主题"), { target: { value: "transformer" } });
     fireEvent.change(screen.getByLabelText("guided关联知识点"), { target: { value: "attention" } });
@@ -175,7 +196,10 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("presents manual catalog creation without a preset import action", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
-    expect(await screen.findByRole("button", { name: "新建主题" })).toBeVisible();
+    await screen.findByRole("heading", { name: "主题与知识点", level: 2 });
+    const createMenu = screen.getByRole("button", { name: "主题与知识点目录选项" }).closest("details"); expect(createMenu).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "主题与知识点目录选项" }));
+    expect(within(createMenu as HTMLElement).getByRole("button", { name: "新建主题" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "导入 NLP 课件" })).not.toBeInTheDocument();
     expect(screen.getByText(/维护学生学习范围与智能体可引用的知识边界/)).toBeVisible();
   });

@@ -1633,3 +1633,36 @@ button { color: inherit; }
 .teacher-catalog-empty p { margin:0; font-size:11px; }
 @media (max-width:1000px) { .teacher-catalog-layout { grid-template-columns:240px minmax(0,1fr); }.teacher-catalog-breadcrumb > small { display:none; }.teacher-catalog-editor-content { padding-inline:28px; } }
 @media (max-width:760px) { .teacher-content-catalog { height:auto; min-height:calc(100vh - 58px); overflow:visible; }.teacher-main.teacher-catalog-main { display:block; height:auto; overflow:visible; }.teacher-catalog-page { min-height:calc(100vh - 94px); }.teacher-catalog-layout { min-height:680px; grid-template-columns:1fr; grid-template-rows:260px minmax(420px,1fr); overflow:visible; }.teacher-catalog-layout.directory-collapsed { grid-template-columns:1fr; grid-template-rows:48px minmax(420px,1fr); }.teacher-catalog-directory { border-right:0; border-bottom:1px solid #e3e3ed; }.teacher-catalog-directory.collapsed > .teacher-catalog-directory-expand { width:100%; }.teacher-catalog-workspace-header { align-items:flex-start; flex-direction:column; }.teacher-catalog-workspace-actions { width:100%; flex-wrap:wrap; }.teacher-catalog-field-grid { grid-template-columns:1fr; }.teacher-catalog-editor-content { padding:20px 16px 34px; }.teacher-catalog-page-summary { min-height:100px; padding-inline:17px; }.teacher-catalog-page-summary > svg { display:none; } }
+
+/* Catalog pages use the same viewport workbench geometry as the knowledge book.
+   Keep the directory fixed and let the Markdown pane consume every remaining
+   pixel instead of sizing itself from the amount of content. */
+.teacher-main.teacher-catalog-main .teacher-content-catalog { display: flex; min-height: 0; }
+.teacher-content-catalog .teacher-catalog-page { height: 100%; min-height: 0; }
+.teacher-content-catalog .teacher-catalog-page-summary { flex: 0 0 auto; }
+.teacher-content-catalog .teacher-catalog-layout { height: 100%; min-height: 0; }
+.teacher-content-catalog .teacher-catalog-directory { overflow: hidden; }
+.teacher-content-catalog .teacher-book-tree-groups { min-height: 0; flex: 1 1 auto; overflow: auto; }
+.teacher-content-catalog .teacher-catalog-workspace { display: flex; min-height: 0; flex-direction: column; }
+.teacher-content-catalog .teacher-book-workspace-scroll { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: auto; }
+.teacher-content-catalog .teacher-catalog-editor-content { display: flex; width: 100%; max-width: none; min-height: 100%; box-sizing: border-box; flex-direction: column; gap: 18px; margin: 0; padding: 22px 30px 34px; }
+.teacher-content-catalog .teacher-catalog-editor-content > .teacher-catalog-markdown-editor { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
+.teacher-content-catalog .teacher-catalog-editor-content > .teacher-catalog-markdown-editor .teacher-book-markdown-toolbar { flex: 0 0 auto; }
+.teacher-content-catalog .teacher-catalog-editor-content > .teacher-catalog-markdown-editor .teacher-book-textarea,
+.teacher-content-catalog .teacher-catalog-editor-content > .teacher-catalog-markdown-editor .teacher-book-preview { min-height: 0; flex: 1 1 auto; }
+.teacher-content-catalog .teacher-catalog-markdown-textarea { height: 100%; resize: none; }
+.teacher-content-catalog .teacher-catalog-markdown-preview { overflow: auto; }
+.teacher-content-catalog .teacher-book-tree-actions .teacher-book-tree-menu button { width: 100% !important; height: auto; min-height: 30px; }
+.teacher-content-catalog .teacher-catalog-blueprint-point > span { display: block; padding: 3px 7px 2px; color: #9698a8; font-size: 10px; }
+.teacher-content-catalog .teacher-catalog-blueprint-point > .teacher-book-tree-point { margin-top: 1px; }
+.teacher-content-catalog .teacher-book-tree-topic-heading > .teacher-book-tree-menu > summary,
+.teacher-content-catalog .teacher-book-tree-point .teacher-book-tree-menu > summary { opacity: 1; }
+
+@media (max-width: 760px) {
+  .teacher-content-catalog { height: auto; min-height: calc(100vh - 58px); overflow: visible; }
+  .teacher-main.teacher-catalog-main { display: block; height: auto; overflow: visible; }
+  .teacher-content-catalog .teacher-catalog-page { height: auto; min-height: calc(100vh - 94px); }
+  .teacher-content-catalog .teacher-catalog-layout { height: auto; min-height: 680px; }
+  .teacher-content-catalog .teacher-book-workspace-scroll { overflow: visible; }
+  .teacher-content-catalog .teacher-catalog-editor-content { min-height: 420px; }
+}
