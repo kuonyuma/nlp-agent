@@ -56,9 +56,18 @@ def redis_config() -> RedisTransportConfig:
 
 async def run_worker() -> None:
     from redis.asyncio import Redis
+    from server.quota.bootstrap import (
+        configure_usage_reporter,
+        shutdown_usage_reporter,
+    )
 
     database_runtime = MySQLRuntime.from_runtime(settings.database_runtime)
     await database_runtime.start()
+    usage_reporter = configure_usage_reporter(
+        settings.NLP_AGENT_DATABASE_URL.strip(),
+        required=True,
+        quota_enforcement=settings.quota_enforcement_enabled,
+    )
     sandbox_model_service, sandbox_manager = configure_worker_sandbox_service(
         database_runtime.session_factory
     )
@@ -66,6 +75,8 @@ async def run_worker() -> None:
     redis = Redis.from_url(config.url, decode_responses=True)
     gateway_config = settings.gateway_runtime
     repository = build_turn_execution_state(gateway_config)
+    if getattr(repository, "quota_service", None) is not None:
+        await asyncio.to_thread(repository.quota_service.verify_schema)
     engine = LangGraphAgentEngine()
     publisher = RedisEventPublisher(redis, config)
     reliability = TurnReliabilityService()
@@ -182,4 +193,5 @@ async def run_worker() -> None:
             await sandbox_manager.close()
         repository.close()
         await redis.aclose()
+        shutdown_usage_reporter(usage_reporter)
         await database_runtime.close()

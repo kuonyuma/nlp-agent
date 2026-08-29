@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     NLP_AGENT_REDIS_URL: str = ""
     NLP_AGENT_STATE_FACTORY: str = ""
     NLP_AGENT_DATABASE_URL: str = ""
+    NLP_AGENT_QUOTA_ENFORCEMENT: bool = False
     NLP_AGENT_DB_POOL_SIZE: int = 10
     NLP_AGENT_DB_MAX_OVERFLOW: int = 20
     NLP_AGENT_DB_POOL_RECYCLE_S: int = 1800
@@ -158,6 +159,13 @@ class Settings(BaseSettings):
         if self.NLP_AGENT_STATE_FACTORY.strip():
             config["state_factory"] = self.NLP_AGENT_STATE_FACTORY.strip()
         return config
+
+    @property
+    def quota_enforcement_enabled(self) -> bool:
+        return bool(
+            self.NLP_AGENT_QUOTA_ENFORCEMENT
+            or self.gateway_runtime.get("quota_enforcement", False)
+        )
 
     @property
     def database_runtime(self) -> dict:

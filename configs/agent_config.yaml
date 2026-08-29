@@ -27,6 +27,9 @@ gateway:
   max_events_per_session: 50000
   retention_cleanup_interval_s: 3600
   knowledge_point_prompt_budget: 12000
+  # Phase 2 fail-closed admission/settlement switch. Enable only after the
+  # quota migrations and developer policies have been provisioned.
+  quota_enforcement: false
   transport: in_process
   redis_url: redis://127.0.0.1:6379/0
   redis_turn_stream: nlp-agent:turns

@@ -34,6 +34,10 @@ class MissingUsageAttributionError(RuntimeError):
     """Raised when an LLM invocation cannot resolve mandatory usage attribution."""
 
 
+class UsageReporterUnavailableError(RuntimeError):
+    """Raised when a required model-process usage Reporter is not configured."""
+
+
 class UsageFrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

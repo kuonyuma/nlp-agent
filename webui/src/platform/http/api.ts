@@ -32,7 +32,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: "include",
   });
   if (!response.ok) {
-    const problem = await response.json().catch(() => ({})) as { detail?: string; title?: string; code?: string };
+    const problem = await response.json().catch(() => ({})) as { detail?: string; title?: string; code?: string; remaining_micro?: number; reset_at?: string; retryable?: boolean };
     throw new ApiError(problem.detail ?? problem.title ?? `HTTP ${response.status}`, response.status, problem.code);
   }
   if (response.status === 204) return undefined as T;
@@ -121,6 +121,7 @@ export const api = {
     return request<SessionListResponse>(`/sessions${suffix}`);
   },
   getSessionStats: () => request<AgentSessionStats>("/sessions/stats"),
+  getUsage: (days = 30) => request<Record<string, unknown>>(`/usage/me?days=${encodeURIComponent(String(days))}`),
   createSession: (workspaceId = "default") =>
     request<SessionSummary>("/sessions", {
       method: "POST",

@@ -214,6 +214,17 @@ def test_auth_session_exposes_human_readable_account_identity(web_app):
         assert session.json()["display_name"] == "nova"
 
 
+def test_usage_me_requires_authentication_and_reports_persistence_unavailable_without_mysql(web_app):
+    app, _engine = web_app
+    with TestClient(app) as client:
+        assert client.get("/api/v1/usage/me").status_code == 401
+        authenticate(client)
+        response = client.get("/api/v1/usage/me")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "usage_unavailable"
+
+
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
     app, _engine = student_web_app
     with TestClient(app) as client:

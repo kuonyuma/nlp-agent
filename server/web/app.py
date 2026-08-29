@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, Security, WebSocket, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyCookie
 from sqlalchemy import select
@@ -44,6 +44,7 @@ from server.web.auth import (
 )
 from server.web.database_auth import DatabaseSessionAuth, DatabaseSessionClaims
 from server.agent.session_service import DatabaseSessionService, local_session_service
+from server.quota.errors import QuotaRejectedError
 from server.web.contracts import (
     CreateSessionBody,
     LoginBody,
@@ -167,6 +168,7 @@ def _problem(
     code: str,
     title: str,
     detail: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None)
     body: dict[str, Any] = {
@@ -179,6 +181,8 @@ def _problem(
         body["detail"] = detail
     if request_id:
         body["request_id"] = request_id
+    if extra:
+        body.update(extra)
     return JSONResponse(body, status_code=status_code, media_type="application/problem+json")
 
 
@@ -247,6 +251,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         gateway = gateway_factory()
+        usage_reporter = None
+        usage_reader = None
         if (
             not auth_injected
             and gateway.authorization_session_factory is not None
@@ -275,6 +281,26 @@ def create_app(
             manager=sandbox_manager,
         )
         await gateway.start()
+        from server.quota.bootstrap import (
+            configure_usage_reporter,
+            shutdown_usage_reporter,
+        )
+        from server.quota.usage import UsageReadService
+
+        database_url = settings.NLP_AGENT_DATABASE_URL.strip()
+        if not auth_injected:
+            usage_reporter = configure_usage_reporter(
+                database_url,
+                required=True,
+                quota_enforcement=settings.quota_enforcement_enabled,
+            )
+            if getattr(gateway, "authorization_session_factory", None) is not None:
+                usage_reader = UsageReadService(
+                    database_url,
+                    quota_enforcement=settings.quota_enforcement_enabled,
+                )
+        app.state.quota_usage_reporter = usage_reporter
+        app.state.quota_usage_reader = usage_reader
         redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
         authorization_channel = str(settings.gateway_runtime.get("redis_authorization_channel", "nlp-agent:authorization"))
 
@@ -346,6 +372,9 @@ def create_app(
             await gateway.begin_shutdown()
             await hub.close()
             await gateway.close()
+            shutdown_usage_reporter(usage_reporter)
+            if usage_reader is not None:
+                usage_reader.close()
 
     app = FastAPI(
         title="NLP Agent Web API",
@@ -1845,6 +1874,48 @@ def create_app(
             user_id=principal.user_id,
         )
         return updated
+
+    @app.get("/api/v1/usage/me", tags=["usage"])
+    async def usage_me(
+        request: Request,
+        principal: Principal,
+        days: int = Query(30, ge=1, le=365),
+    ):
+        reader = getattr(request.app.state, "quota_usage_reader", None)
+        if reader is None:
+            return _problem(
+                request,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="usage_unavailable",
+                title="Usage persistence is unavailable",
+            )
+        return await asyncio.to_thread(
+            reader.user_snapshot,
+            principal.user_id,
+            days=days,
+        )
+
+    @app.exception_handler(QuotaRejectedError)
+    async def quota_rejected_error(request: Request, error: QuotaRejectedError):
+        problem = error.problem
+        status_code = (
+            status.HTTP_403_FORBIDDEN
+            if problem.code == "quota_model_not_allowed"
+            else status.HTTP_429_TOO_MANY_REQUESTS
+        )
+        return _problem(
+            request,
+            status_code=status_code,
+            code=problem.code.value,
+            title="Quota admission rejected",
+            detail=problem.reason,
+            extra={
+                "remaining_micro": problem.remaining_micro,
+                "reset_at": problem.reset_at.isoformat() if problem.reset_at else None,
+                "allowed_model_profiles": list(problem.allowed_model_profiles),
+                "retryable": problem.retryable,
+            },
+        )
 
     @app.websocket("/ws/v1")
     async def websocket_route(websocket: WebSocket):

@@ -25,6 +25,8 @@ from gateway.contracts import (
     TurnRecord,
     TurnStatus,
 )
+from server.quota.contracts import AdmitTurn
+from server.quota.service import QuotaService
 
 
 def _now() -> datetime:
@@ -32,11 +34,18 @@ def _now() -> datetime:
 
 
 class MySQLGatewayRepository:
-    def __init__(self, url: str, *, knowledge_point_prompt_budget: int = 12_000) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        knowledge_point_prompt_budget: int = 12_000,
+        quota_enforcement: bool = False,
+    ) -> None:
         if not url.startswith("mysql+aiomysql://"):
             raise ValueError("MySQL Gateway repository requires mysql+aiomysql DSN")
         self._engine = create_engine(url.replace("mysql+aiomysql://", "mysql+pymysql://"), pool_pre_ping=True)
         self.knowledge_point_prompt_budget = max(1, knowledge_point_prompt_budget)
+        self.quota_service = QuotaService(self._engine) if quota_enforcement else None
 
     def _row(self, turn_id: str) -> dict[str, Any] | None:
         with self._engine.connect() as c:
@@ -91,7 +100,24 @@ class MySQLGatewayRepository:
         if identity["workspace_id"] != workspace_id or identity["owner_user_id"] != user_id:
             raise PermissionError("conversation identity does not match the current session")
 
-    def create_turn(self, *, turn_id: str, session_id: str, workspace_id: str, user_id: str, input_text: str, idempotency_key: str | None, learning_context=None, learning_progress=None, exercise_state=None, dispatch_payload: str | None = None, **_: Any) -> tuple[TurnRecord, bool]:
+    def create_turn(
+        self,
+        *,
+        turn_id: str,
+        session_id: str,
+        workspace_id: str,
+        user_id: str,
+        input_text: str,
+        idempotency_key: str | None,
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        dispatch_payload: str | None = None,
+        quota_admission: AdmitTurn | None = None,
+        quota_role_codes: tuple[str, ...] = (),
+        quota_classroom_ids: tuple[str, ...] = (),
+        **_: Any,
+    ) -> tuple[TurnRecord, bool]:
         with self._engine.begin() as c:
             self._ensure_conversation(
                 c,
@@ -103,7 +129,28 @@ class MySQLGatewayRepository:
             if idempotency_key:
                 old = c.execute(text("SELECT * FROM nlp_turns WHERE user_id=:u AND conversation_id=:s AND idempotency_key=:k"), {"u": user_id, "s": session_id, "k": idempotency_key}).mappings().first()
                 if old:
+                    if (
+                        old["status"] == "failed"
+                        and old.get("error_kind") == "dispatch_failed"
+                        and self.quota_service is not None
+                        and quota_admission is not None
+                    ):
+                        self.quota_service.admit_in_transaction(
+                            c,
+                            quota_admission.model_copy(
+                                update={"turn_id": old["id"]}
+                            ),
+                            role_codes=quota_role_codes,
+                            classroom_ids=quota_classroom_ids,
+                        )
                     return self._record(dict(old)), True
+            if self.quota_service is not None and quota_admission is not None:
+                self.quota_service.admit_in_transaction(
+                    c,
+                    quota_admission,
+                    role_codes=quota_role_codes,
+                    classroom_ids=quota_classroom_ids,
+                )
             state = {"context": learning_context.model_dump(mode="json") if learning_context else None, "progress": learning_progress.model_dump(mode="json") if learning_progress else None, "exercise": exercise_state.model_dump(mode="json") if exercise_state else None}
             c.execute(text("INSERT INTO nlp_turns(id,conversation_id,workspace_id,user_id,status,input_text,learning_state_json,idempotency_key) VALUES(:id,:s,:w,:u,'accepted',:input,:state,:key)"), {"id": turn_id, "s": session_id, "w": workspace_id, "u": user_id, "input": input_text, "state": json.dumps(state), "key": idempotency_key})
             if dispatch_payload is not None:
@@ -855,4 +902,7 @@ class MySQLGatewayRepository:
     def select_guided_blueprint(self, *, workspace_id: str, topic_id: str):
         return next((item for item in self.get_teaching_catalog(workspace_id)["catalog"]["guided_blueprints"] if item.get("topic_id") == topic_id and item.get("status", "enabled") == "enabled"), None)
 
-    def close(self) -> None: self._engine.dispose()
+    def close(self) -> None:
+        if self.quota_service is not None:
+            self.quota_service.close()
+        self._engine.dispose()

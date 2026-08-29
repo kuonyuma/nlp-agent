@@ -32,6 +32,7 @@ from core.model_runtime.usage import (
     InvocationStatus,
     ModelIdentity,
     ModelInvocation,
+    UsageReporterUnavailableError,
     resolve_usage_attribution,
 )
 from core.observability.context import current_telemetry_context
@@ -288,6 +289,12 @@ class ResilientChatModel:
         if invocation is None:
             return
         if self.reporter_slot is None or self.reporter_slot.reporter is None:
+            if self.reporter_slot is not None and getattr(
+                self.reporter_slot, "required", False
+            ):
+                raise UsageReporterUnavailableError(
+                    "This model process requires a configured usage Reporter"
+                )
             return
         outcome = InvocationOutcome(
             status=status,
@@ -316,6 +323,14 @@ class ResilientChatModel:
             self.reporter_slot is not None
             and self.reporter_slot.reporter is not None
         )
+        if (
+            self.reporter_slot is not None
+            and getattr(self.reporter_slot, "required", False)
+            and not has_reporter
+        ):
+            raise UsageReporterUnavailableError(
+                "This model process requires a configured usage Reporter"
+            )
         if has_reporter:
             attribution = resolve_usage_attribution()
         else:

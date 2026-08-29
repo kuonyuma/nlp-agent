@@ -37,6 +37,7 @@ from server.web.contracts import (
     parse_command_payload,
 )
 from server.web.protocol import control_event, gateway_event_envelope
+from server.quota.errors import QuotaRejectedError
 
 
 # The gateway repeats these checks at its transport-independent boundary.
@@ -464,25 +465,37 @@ class WebSocketConnection:
         await self._terminate(code=code, reason=reason)
 
 
-def _command_error(error: Exception) -> tuple[str, str]:
+def _command_error(error: Exception) -> tuple[str, str, dict[str, Any]]:
     name = type(error).__name__
+    if isinstance(error, QuotaRejectedError):
+        problem = error.problem
+        return (
+            problem.code.value,
+            problem.reason,
+            {
+                "remaining_micro": problem.remaining_micro,
+                "reset_at": problem.reset_at.isoformat() if problem.reset_at else None,
+                "allowed_model_profiles": list(problem.allowed_model_profiles),
+                "retryable": problem.retryable,
+            },
+        )
     if isinstance(error, ValidationError):
-        return "validation_error", "command payload is invalid"
+        return "validation_error", "command payload is invalid", {}
     if name == "TeachingConfigurationError":
-        return "teaching_configuration_error", str(error)
+        return "teaching_configuration_error", str(error), {}
     if isinstance(error, ValueError):
-        return "invalid_command", str(error)
+        return "invalid_command", str(error), {}
     if isinstance(error, FileNotFoundError):
-        return "not_found", str(error)
+        return "not_found", str(error), {}
     if isinstance(error, PermissionError):
-        return "forbidden", "resource access is forbidden"
+        return "forbidden", "resource access is forbidden", {}
     if name == "TurnConflictError":
-        return "turn_conflict", str(error)
+        return "turn_conflict", str(error), {}
     if name == "ResourceNotFoundError":
-        return "not_found", str(error)
+        return "not_found", str(error), {}
     if name == "GatewayNotStartedError":
-        return "gateway_unavailable", "Backend Gateway is not ready"
-    return "internal_error", "command failed"
+        return "gateway_unavailable", "Backend Gateway is not ready", {}
+    return "internal_error", "command failed", {}
 
 
 async def _dispatch_command(
@@ -721,14 +734,14 @@ async def _receive_commands(
                 await connection.close(code=4401, reason="authentication expired")
                 return
             except (json.JSONDecodeError, ValidationError, ValueError, PermissionError, RuntimeError, LookupError, FileNotFoundError) as error:
-                code, message = _command_error(error)
+                code, message, details = _command_error(error)
                 session_id = command.payload.get("session_id") if command is not None else None
                 await connection.send(
                     control_event(
                         "command.error",
                         request_id=request_id,
                         session_id=session_id if isinstance(session_id, str) else None,
-                        payload={"code": code, "message": message},
+                        payload={"code": code, "message": message, **details},
                     )
                 )
     # A browser may cancel an upgrade while the server is yielding to its

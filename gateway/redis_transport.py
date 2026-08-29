@@ -432,7 +432,8 @@ class TurnTaskCodec:
                 "teaching_materials": task.teaching_materials.model_dump(mode="json") if task.teaching_materials else None,
                 "guided_session_id": task.guided_session_id,
                 "exercise_session_id": task.exercise_session_id,
-                "model_profile": task.model_profile,
+                  "model_profile": task.model_profile,
+                  "reservation_id": task.reservation_id,
                 "authorization": (
                     {
                         "submitter_user_id": task.authorization.submitter_user_id,
@@ -463,7 +464,8 @@ class TurnTaskCodec:
             teaching_materials=TeachingMaterials.model_validate(value["teaching_materials"]) if value["teaching_materials"] else TeachingMaterials(),
             guided_session_id=value.get("guided_session_id"),
             exercise_session_id=value.get("exercise_session_id"),
-            model_profile=value.get("model_profile"),
+              model_profile=value.get("model_profile"),
+              reservation_id=value.get("reservation_id"),
             authorization=(
                 ExecutionAuthorizationContext(**value["authorization"])
                 if value.get("authorization") else None

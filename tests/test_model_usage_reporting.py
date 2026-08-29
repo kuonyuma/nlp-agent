@@ -29,6 +29,7 @@ from core.model_runtime.runtime import (
 from core.model_runtime.usage import (
     CanonicalTokenUsage,
     MissingUsageAttributionError,
+    UsageReporterUnavailableError,
     UsageAttributionContext,
     bind_usage_attribution,
 )
@@ -570,6 +571,19 @@ async def test_missing_attribution_raises_before_calling_provider():
     # No attribution or telemetry context bound
     with pytest.raises(MissingUsageAttributionError):
         await resilient.ainvoke([HumanMessage(content="hi")])
+
+    assert fake.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_required_reporter_fails_before_calling_provider():
+    slot = ModelUsageReporterSlot(required=True)
+    fake = FakeRawModel([AIMessage(content="must not run")])
+    resilient = ResilientChatModel([_candidate("cand-no-reporter", fake)], reporter_slot=slot)
+
+    with bind_usage_attribution(_sample_attribution()):
+        with pytest.raises(UsageReporterUnavailableError, match="requires"):
+            await resilient.ainvoke([HumanMessage(content="hi")])
 
     assert fake.calls == 0
 
