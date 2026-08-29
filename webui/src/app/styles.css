@@ -1705,3 +1705,27 @@ button { color: inherit; }
   .teacher-content-book .teacher-book-source,
   .teacher-content-book .teacher-book-preview { margin: 10px 10px 12px; }
 }
+
+/* Keep the book and blueprint workbenches aligned on desktop. */
+@media (min-width: 1001px) {
+  .teacher-content-book .teacher-book-layout { grid-template-columns: 290px minmax(0, 1fr); height: 100%; flex: 1 1 auto; overflow: hidden; }
+}
+@media (min-width: 761px) and (max-width: 1000px) {
+  .teacher-content-book .teacher-book-layout { grid-template-columns: 240px minmax(0, 1fr); height: 100%; flex: 1 1 auto; overflow: hidden; }
+}
+
+/* Blueprint pages use the same readable tree scale as the knowledge book. */
+.teacher-content-catalog .teacher-book-topic-toggle { font-size: 13px; }
+.teacher-content-catalog .teacher-book-tree-point-main { min-height: 34px; padding: 8px 9px; font-size: 13px; }
+.teacher-content-catalog .teacher-catalog-blueprint-point-heading > span { font-size: 12px; }
+
+/* Keep the preview switch at the far right of the Markdown toolbar. */
+.teacher-content-catalog .teacher-book-markdown-toolbar > small { flex: 0 0 auto; margin-left: 0; }
+.teacher-content-catalog .teacher-catalog-preview-toggle { flex: 0 0 auto; min-height: 30px; margin-left: auto; padding: 0 10px; border-color: #dedfea; border-radius: 8px; background: #fff; color: #5d6070; font-size: 11px; }
+.teacher-content-catalog .teacher-catalog-preview-toggle:hover,
+.teacher-content-catalog .teacher-catalog-preview-toggle.active { border-color: #c6c0ef; background: #eeebff; color: #5547b6; }
+
+@media (max-width: 760px) {
+  .teacher-content-catalog .teacher-book-markdown-toolbar > small { width: 100%; margin-left: 0; }
+  .teacher-content-catalog .teacher-catalog-preview-toggle { margin-left: 0; }
+}

@@ -98,8 +98,8 @@ function MarkdownEditor({ label, value, onChange, placeholder, inputAriaLabel }:
         <span className="teacher-catalog-toolbar-divider" aria-hidden="true" />
         {markdownTools.map(({ format, label: toolLabel, shortcut, icon: Icon }) => <button key={format} type="button" disabled={preview} title={shortcut ? `${toolLabel}（${shortcut}）` : toolLabel} aria-label={toolLabel} onMouseDown={(event) => event.preventDefault()} onClick={() => apply(format)}><Icon size={14} />{toolLabel}</button>)}
       </div>
-      <button type="button" className={preview ? "active" : ""} aria-label={preview ? `返回编辑${label}` : `预览${label}`} onClick={() => setPreview((current) => !current)}>{preview ? <MessageSquareQuote size={14} /> : <Eye size={14} />}{preview ? "返回编辑" : "预览"}</button>
       <small>支持 Markdown、代码块和 Ctrl/Cmd+Z、Y；此处不上传图片，也不生成小标题目录。</small>
+      <button type="button" className={`teacher-catalog-preview-toggle ${preview ? "active" : ""}`} aria-label={preview ? `返回编辑${label}` : `预览${label}`} onClick={() => setPreview((current) => !current)}>{preview ? <MessageSquareQuote size={14} /> : <Eye size={14} />}{preview ? "返回编辑" : "预览"}</button>
     </div>
     {preview ? <div className="teacher-book-preview teacher-catalog-markdown-preview"><MarkdownContent>{value || "暂无内容"}</MarkdownContent></div> : <textarea ref={editorRef} className="teacher-book-textarea teacher-catalog-markdown-textarea" aria-label={inputAriaLabel ?? `${label} Markdown`} value={value} onChange={(event) => update(event.target.value)} onKeyDown={onKeyDown} placeholder={placeholder} />}
   </section>;
@@ -123,8 +123,8 @@ function CatalogEditorLayout({ eyebrow, title, description, sidebarTitle, count,
   count: number;
   search: string;
   onSearch: (value: string) => void;
-  createLabel: string;
-  onCreate: () => void;
+  createLabel?: string;
+  onCreate?: () => void;
   canCreate?: boolean;
   directory: ReactNode;
   selected: boolean;
@@ -153,7 +153,7 @@ function CatalogEditorLayout({ eyebrow, title, description, sidebarTitle, count,
     <div className={`teacher-book-layout teacher-catalog-layout ${directoryCollapsed ? "directory-collapsed" : ""}`}>
       <aside className={`teacher-book-tree teacher-catalog-directory ${directoryCollapsed ? "collapsed" : ""}`} aria-label={`${sidebarTitle}目录`}>
         <button type="button" className="teacher-book-tree-collapsed-toggle" aria-label={`展开${sidebarTitle}目录`} onClick={() => setDirectoryCollapsed(false)}><PanelLeftOpen size={16} /></button>
-        <div className="teacher-book-tree-heading"><div><strong>{sidebarTitle}目录</strong><small>{count} 个项目</small></div><div className="teacher-book-tree-actions"><DirectoryMenu label={`${sidebarTitle}目录选项`}><button type="button" onClick={(event) => { closeDirectoryMenu(event); onCreate(); }} disabled={!canCreate}><Plus size={14} />{createLabel}</button></DirectoryMenu><button type="button" aria-label={`收起${sidebarTitle}目录`} onClick={() => setDirectoryCollapsed(true)}><PanelLeftClose size={15} /></button></div></div>
+        <div className="teacher-book-tree-heading"><div><strong>{sidebarTitle}目录</strong><small>{count} 个项目</small></div><div className="teacher-book-tree-actions">{onCreate && <DirectoryMenu label={`${sidebarTitle}目录选项`}><button type="button" onClick={(event) => { closeDirectoryMenu(event); onCreate(); }} disabled={!canCreate}><Plus size={14} />{createLabel}</button></DirectoryMenu>}<button type="button" aria-label={`收起${sidebarTitle}目录`} onClick={() => setDirectoryCollapsed(true)}><PanelLeftClose size={15} /></button></div></div>
         <label className="teacher-book-tree-search"><span aria-hidden="true">⌕</span><input type="search" aria-label={`搜索${sidebarTitle}`} value={search} onChange={(event) => onSearch(event.target.value)} placeholder={`搜索${sidebarTitle}`} /></label>
         <div className="teacher-book-tree-groups teacher-catalog-directory-list">{directory}</div>
       </aside>
@@ -162,7 +162,7 @@ function CatalogEditorLayout({ eyebrow, title, description, sidebarTitle, count,
           <header className="teacher-book-page-heading teacher-catalog-workspace-header"><div className="teacher-book-page-heading-info"><div className="teacher-book-page-breadcrumb"><span className="teacher-book-page-topic">{eyebrow}</span><span className="teacher-book-page-chevron" aria-hidden="true">›</span><h3>{selectedTitle}</h3></div><span className="teacher-book-version"><strong>{sidebarTitle}</strong><span aria-hidden="true">·</span><span>{selectedMeta}</span>{status && <StatusPill status={status} />}</span></div><div className="teacher-book-page-actions teacher-catalog-workspace-actions">{saveProps?.onSave && <button type="button" className="teacher-book-publish" onClick={saveProps.onSave} disabled={saveProps.saving}><Save size={15} />{saveProps.saving ? "正在保存…" : "保存教学目录"}</button>}</div></header>
           <div className="teacher-book-workspace-scroll teacher-catalog-workspace-scroll">{children}</div>
           {saveProps?.saveMessage && <p className="teacher-catalog-save-message" role="status">{saveProps.saveMessage}</p>}
-        </> : <div className="teacher-catalog-empty"><BookOpen size={30} /><strong>还没有可编辑项目</strong><p>{canCreate ? `点击左上角“${createLabel}”开始创建。` : "请先在主题与知识点页面创建并启用知识点。"}</p></div>}
+        </> : <div className="teacher-catalog-empty"><BookOpen size={30} /><strong>还没有可编辑项目</strong><p>{onCreate && canCreate ? `点击左上角“${createLabel}”开始创建。` : "请在知识点旁的“···”菜单中新建蓝图。"}</p></div>}
       </main>
     </div>
   </div>;
@@ -237,15 +237,26 @@ function blueprintMatches(item: Blueprint, topic: CourseTopic | undefined, query
   return `${item.name} ${content} ${topic?.name ?? ""} ${point?.name ?? ""}`.toLocaleLowerCase().includes(query);
 }
 
-function BlueprintDirectory({ kind, topics, blueprints, selectedId, query, collapsedTopicIds, onSelect, onToggle, onToggleStatus, onDelete }: { kind: BlueprintKind; topics: CourseTopic[]; blueprints: Blueprint[]; selectedId: string; query: string; collapsedTopicIds: string[]; onSelect: (id: string) => void; onToggle: (id: string) => void; onToggleStatus: (item: Blueprint) => void; onDelete: (item: Blueprint) => void }) {
+function BlueprintDirectory({ kind, topics, blueprints, selectedId, query, collapsedTopicIds, onSelect, onToggle, onCreate, onToggleStatus, onDelete }: { kind: BlueprintKind; topics: CourseTopic[]; blueprints: Blueprint[]; selectedId: string; query: string; collapsedTopicIds: string[]; onSelect: (id: string) => void; onToggle: (id: string) => void; onCreate: (topicId: string, pointId: string) => void; onToggleStatus: (item: Blueprint) => void; onDelete: (item: Blueprint) => void }) {
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleTopics = sortedLast(topics, (topic) => topic.status === "disabled").filter((topic) => topic.knowledge_points.some((point) => blueprints.some((item) => item.topic_id === topic.id && item.knowledge_point_id === point.id && blueprintMatches(item, topic, normalizedQuery))) || topic.name.toLocaleLowerCase().includes(normalizedQuery));
+  const visibleTopics = sortedLast(topics, (topic) => topic.status === "disabled").filter((topic) => {
+    if (!normalizedQuery) return true;
+    return topic.name.toLocaleLowerCase().includes(normalizedQuery) || topic.knowledge_points.some((point) => point.name.toLocaleLowerCase().includes(normalizedQuery) || blueprints.some((item) => item.topic_id === topic.id && item.knowledge_point_id === point.id && blueprintMatches(item, topic, normalizedQuery)));
+  });
   if (!visibleTopics.length) return <p className="teacher-catalog-empty-inline">还没有匹配的蓝图。</p>;
   return <>{visibleTopics.map((topic) => {
     const expanded = normalizedQuery.length > 0 || !collapsedTopicIds.includes(topic.id);
-    const matchingPoints = topic.knowledge_points.filter((point) => topic.name.toLocaleLowerCase().includes(normalizedQuery) || blueprints.some((item) => item.topic_id === topic.id && item.knowledge_point_id === point.id && blueprintMatches(item, topic, normalizedQuery)));
+    const matchingPoints = topic.knowledge_points.filter((point) => !normalizedQuery || topic.name.toLocaleLowerCase().includes(normalizedQuery) || point.name.toLocaleLowerCase().includes(normalizedQuery) || blueprints.some((item) => item.topic_id === topic.id && item.knowledge_point_id === point.id && blueprintMatches(item, topic, normalizedQuery)));
     const visiblePoints = sortedLast(matchingPoints, (point) => point.status === "disabled");
-    return <section className={`teacher-book-tree-topic ${topic.status === "disabled" ? "is-disabled" : ""}`} key={topic.id}><div className="teacher-book-tree-topic-heading"><button type="button" className={`teacher-book-topic-toggle ${topic.status === "disabled" ? "is-disabled" : ""}`} aria-label={`${expanded ? "折叠" : "展开"}主题 ${topic.name}`} aria-expanded={expanded} onClick={() => onToggle(topic.id)}><ChevronDown size={14} /><span>{topic.name || "未命名主题"}</span><small className="teacher-book-tree-count">{blueprints.filter((item) => item.topic_id === topic.id).length}</small></button></div>{expanded && <div className="teacher-book-tree-topic-items">{visiblePoints.map((point) => <div className="teacher-catalog-blueprint-point" key={point.id}><span>{point.name || "未命名知识点"}</span>{sortedLast(blueprints.filter((item) => item.topic_id === topic.id && item.knowledge_point_id === point.id && blueprintMatches(item, topic, normalizedQuery)), (item) => item.status === "disabled").map((item) => <div className={`teacher-book-tree-point ${selectedId === item.id ? "active" : ""} ${item.status === "disabled" ? "is-disabled" : ""}`} key={item.id}><button type="button" className="teacher-book-tree-point-main" aria-label={`选择${blueprintName(kind)} ${item.name}`} onClick={() => onSelect(item.id)}><FilePlus2 size={13} /><span>{item.name || "未命名蓝图"}</span></button><DirectoryMenu label={`${item.name}选项`}><button type="button" onClick={(event) => { closeDirectoryMenu(event); onToggleStatus(item); }}>{item.status === "enabled" ? <EyeOff size={14} /> : <Eye size={14} />}{item.status === "enabled" ? `停用${blueprintName(kind)}` : `启用${blueprintName(kind)}`}</button><button type="button" className="danger" onClick={(event) => { closeDirectoryMenu(event); onDelete(item); }}><Trash2 size={14} />删除{blueprintName(kind)}</button></DirectoryMenu></div>)}</div>)}</div>}</section>;
+    return <section className={`teacher-book-tree-topic ${topic.status === "disabled" ? "is-disabled" : ""}`} key={topic.id}>
+      <div className="teacher-book-tree-topic-heading">
+        <button type="button" className={`teacher-book-topic-toggle ${topic.status === "disabled" ? "is-disabled" : ""}`} aria-label={`${expanded ? "折叠" : "展开"}主题 ${topic.name}`} aria-expanded={expanded} onClick={() => onToggle(topic.id)}><ChevronDown size={14} /><span>{topic.name || "未命名主题"}</span><small className="teacher-book-tree-count">{blueprints.filter((item) => item.topic_id === topic.id).length}</small></button>
+      </div>
+      {expanded && <div className="teacher-book-tree-topic-items">{visiblePoints.map((point) => <div className={`teacher-catalog-blueprint-point ${point.status === "disabled" ? "is-disabled" : ""}`} key={point.id}>
+        <div className="teacher-catalog-blueprint-point-heading"><span>{point.name || "未命名知识点"}</span><DirectoryMenu label={`${point.name}${blueprintName(kind)}选项`}><button type="button" onClick={(event) => { closeDirectoryMenu(event); onCreate(topic.id, point.id); }} disabled={topic.status === "disabled" || point.status === "disabled"}><Plus size={14} />新建{blueprintName(kind)}</button></DirectoryMenu></div>
+        {sortedLast(blueprints.filter((item) => item.topic_id === topic.id && item.knowledge_point_id === point.id && blueprintMatches(item, topic, normalizedQuery)), (item) => item.status === "disabled").map((item) => <div className={`teacher-book-tree-point ${selectedId === item.id ? "active" : ""} ${item.status === "disabled" ? "is-disabled" : ""}`} key={item.id}><button type="button" className="teacher-book-tree-point-main" aria-label={`选择${blueprintName(kind)} ${item.name}`} onClick={() => onSelect(item.id)}><FilePlus2 size={13} /><span>{item.name || "未命名蓝图"}</span></button><DirectoryMenu label={`${item.name}选项`}><button type="button" onClick={(event) => { closeDirectoryMenu(event); onToggleStatus(item); }}>{item.status === "enabled" ? <EyeOff size={14} /> : <Eye size={14} />}{item.status === "enabled" ? `停用${blueprintName(kind)}` : `启用${blueprintName(kind)}`}</button><button type="button" className="danger" onClick={(event) => { closeDirectoryMenu(event); onDelete(item); }}><Trash2 size={14} />删除{blueprintName(kind)}</button></DirectoryMenu></div>)}
+      </div>)}</div>}
+    </section>;
   })}</>;
 }
 
@@ -253,7 +264,9 @@ function RubricEditor({ rubric, onChange }: { rubric: RubricPoint[]; onChange: (
   return <fieldset className="teacher-catalog-rubric"><legend>评分标准</legend>{rubric.length ? rubric.map((item, index) => <div key={item.id ?? index}><input aria-label={`评分标准 ${index + 1}`} value={item.criterion} placeholder="例如：正确解释注意力权重" onChange={(event) => onChange(rubric.map((value, i) => i === index ? { ...value, criterion: event.target.value } : value))} /><input aria-label={`评分权重 ${index + 1}`} type="number" min="0" max="100" value={item.weight} onChange={(event) => onChange(rubric.map((value, i) => i === index ? { ...value, weight: Number(event.target.value) } : value))} /><button type="button" aria-label={`删除评分标准 ${index + 1}`} onClick={() => onChange(rubric.filter((_, i) => i !== index))}><Trash2 size={14} /></button></div>) : <p>启用蓝图前至少添加一条评分标准。</p>}<button type="button" onClick={() => onChange([...rubric, { criterion: "", weight: 0 }])}><Plus size={14} />添加评分标准</button></fieldset>;
 }
 
-function BlueprintEditor({ kind, topics, blueprints, exerciseBlueprints = [], onChange, saveProps }: { kind: BlueprintKind; topics: CourseTopic[]; blueprints: Blueprint[]; exerciseBlueprints?: ExerciseBlueprint[]; onChange: (items: Blueprint[]) => void; saveProps?: SaveProps }) {
+const questionTypeOptions = ["简答", "选择题", "判断题", "填空题", "编程题"];
+
+function BlueprintEditor({ kind, topics, blueprints, onChange, saveProps }: { kind: BlueprintKind; topics: CourseTopic[]; blueprints: Blueprint[]; onChange: (items: Blueprint[]) => void; saveProps?: SaveProps }) {
   const [selectedId, setSelectedId] = useState(blueprints[0]?.id ?? "");
   const [query, setQuery] = useState("");
   const [collapsedTopicIds, setCollapsedTopicIds] = useState<string[]>([]);
@@ -261,33 +274,31 @@ function BlueprintEditor({ kind, topics, blueprints, exerciseBlueprints = [], on
   const selected = blueprints.find((item) => item.id === selectedId) ?? blueprints[0];
   const topic = topics.find((item) => item.id === selected?.topic_id);
   const point = topic?.knowledge_points.find((item) => item.id === selected?.knowledge_point_id);
-  const activeTopics = topics.filter((item) => item.status === "enabled" && item.knowledge_points.some((pointItem) => pointItem.status === "enabled"));
   const questionSelected = selected && "instructions" in selected ? selected : undefined;
-  const reviewSelected = selected && "exercise_blueprint_id" in selected ? selected : undefined;
 
   const update = (next: Blueprint) => onChange(blueprints.map((item) => item.id === next.id ? next : item));
-  const create = () => {
-    const firstTopic = activeTopics[0] ?? topics.find((item) => item.knowledge_points.length > 0);
-    const firstPoint = firstTopic?.knowledge_points.find((item) => item.status === "enabled") ?? firstTopic?.knowledge_points[0];
-    if (!firstTopic || !firstPoint) return;
-    const base = { id: makeId(kind), name: `未命名${blueprintName(kind)}`, topic_id: firstTopic.id, knowledge_point_id: firstPoint.id, status: "draft" as const };
+  const create = (topicId: string, pointId: string) => {
+    const targetTopic = topics.find((item) => item.id === topicId);
+    const targetPoint = targetTopic?.knowledge_points.find((item) => item.id === pointId);
+    if (!targetTopic || !targetPoint || targetTopic.status === "disabled" || targetPoint.status === "disabled") return;
+    const base = { id: makeId(kind), name: `${targetPoint.name || "未命名知识点"} · ${blueprintName(kind)}`, topic_id: targetTopic.id, knowledge_point_id: targetPoint.id, status: "draft" as const };
     const item: Blueprint = kind === "guided" ? { ...base, guidance: "请补充教师希望模型采用的引导路径、提问顺序和应聚焦的误区。" } : { ...base, instructions: "请补充这张蓝图的题干范围、数据要求与讲评规则。", question_type: "简答", rubric: [], ...(kind === "review" ? { exercise_blueprint_id: null } : {}) } as Blueprint;
     onChange([...blueprints, item]);
     setSelectedId(item.id);
   };
-  const updateTopic = (topicId: string) => { if (!selected) return; const nextTopic = topics.find((item) => item.id === topicId); const nextPoint = nextTopic?.knowledge_points.find((item) => item.status === "enabled") ?? nextTopic?.knowledge_points[0]; update({ ...selected, topic_id: topicId, knowledge_point_id: nextPoint?.id ?? "" }); };
   const confirmRemove = () => { if (deleteTarget) { onChange(blueprints.filter((item) => item.id !== deleteTarget.id)); setDeleteTarget(null); } };
   const instructionValue = kind === "guided" ? (selected && "guidance" in selected ? selected.guidance : "") : (questionSelected?.instructions ?? "");
   const selectionMeta = topic && point ? `${topic.name} · ${point.name}` : "等待关联主题和知识点";
+  const questionTypes = questionSelected && !questionTypeOptions.includes(questionSelected.question_type) ? [questionSelected.question_type, ...questionTypeOptions] : questionTypeOptions;
 
-  return <CatalogEditorLayout eyebrow={kind === "guided" ? "GUIDED MODE" : kind === "review" ? "REVIEW BLUEPRINT" : "EXERCISE BLUEPRINT"} title={blueprintName(kind)} description={kind === "guided" ? "为智能体定义分步追问和启发路径；教师保存后，学生引导模式会使用启用的蓝图。" : `为每个知识点维护${kind === "review" ? "复习" : "练习"}生成规则。右侧编辑区支持 Markdown，保存后由后端校验并同步到学生端。`} sidebarTitle={blueprintName(kind)} count={blueprints.length} search={query} onSearch={setQuery} createLabel={`新建${blueprintName(kind)}`} onCreate={create} canCreate={activeTopics.length > 0} directory={<BlueprintDirectory kind={kind} topics={topics} blueprints={blueprints} selectedId={selected?.id ?? ""} query={query} collapsedTopicIds={collapsedTopicIds} onSelect={setSelectedId} onToggle={(topicId) => setCollapsedTopicIds((current) => current.includes(topicId) ? current.filter((id) => id !== topicId) : [...current, topicId])} onToggleStatus={(item) => update({ ...item, status: item.status === "enabled" ? "disabled" : "enabled" })} onDelete={setDeleteTarget} />} selected={Boolean(selected)} selectedTitle={selected?.name || `未命名${blueprintName(kind)}`} selectedMeta={selectionMeta} status={selected?.status} saveProps={saveProps}>
-    {selected && <div className="teacher-catalog-editor-content"><div className="teacher-catalog-field-grid"><label>{blueprintName(kind)}名称<input aria-label={`${kind}蓝图名称`} value={selected.name} onChange={(event) => update({ ...selected, name: event.target.value })} placeholder={`例如：${kind === "guided" ? "QKV 追问路径" : "注意力概念辨析"}`} /></label><label>所属主题<select aria-label={`${kind}所属主题`} value={selected.topic_id} onChange={(event) => updateTopic(event.target.value)}>{topics.map((value) => <option value={value.id} key={value.id}>{value.name}</option>)}</select></label><label>关联知识点<select aria-label={`${kind}关联知识点`} value={selected.knowledge_point_id} onChange={(event) => update({ ...selected, knowledge_point_id: event.target.value })}>{(topics.find((value) => value.id === selected.topic_id)?.knowledge_points ?? []).map((value) => <option value={value.id} key={value.id}>{value.name}</option>)}</select></label>{kind !== "guided" && questionSelected && <label>题型<input aria-label={`${kind}题型`} value={questionSelected.question_type} onChange={(event) => update({ ...questionSelected, question_type: event.target.value })} placeholder="例如：简答" /></label>}{kind === "review" && reviewSelected && <label>关联练习蓝图<select aria-label="关联练习蓝图" value={reviewSelected.exercise_blueprint_id ?? ""} onChange={(event) => update({ ...reviewSelected, exercise_blueprint_id: event.target.value || null })}><option value="">不关联，使用自身指令</option>{exerciseBlueprints.filter((item) => item.topic_id === selected.topic_id && item.knowledge_point_id === selected.knowledge_point_id).map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>}</div><MarkdownEditor key={`${kind}-${selected.id}`} label={blueprintField(kind)} inputAriaLabel={kind === "guided" ? "guidedMarkdown 指令" : `${kind}Markdown 指令`} value={instructionValue} onChange={(value) => update(kind === "guided" ? { ...selected, guidance: value } as GuidedBlueprint : { ...selected, instructions: value } as ExerciseBlueprint | ReviewBlueprint)} placeholder={kind === "guided" ? "描述模型应该怎样分步追问、提示和收束。" : "描述题干范围、数据要求、解题方向与讲评规则。"} />{kind !== "guided" && questionSelected && <RubricEditor rubric={questionSelected.rubric} onChange={(rubric) => update({ ...questionSelected, rubric })} />}<p className="teacher-catalog-form-note"><Save size={14} />当前编辑只更新本地目录草稿；点击右上角“保存教学目录”后才会调用教师目录接口。</p></div>}
+  return <CatalogEditorLayout eyebrow={kind === "guided" ? "GUIDED MODE" : kind === "review" ? "REVIEW BLUEPRINT" : "EXERCISE BLUEPRINT"} title={blueprintName(kind)} description={kind === "guided" ? "为智能体定义分步追问和启发路径；教师保存后，学生引导模式会使用启用的蓝图。" : `为每个知识点维护${kind === "review" ? "复习" : "练习"}生成规则。右侧编辑区支持 Markdown，保存后由后端校验并同步到学生端。`} sidebarTitle={blueprintName(kind)} count={blueprints.length} search={query} onSearch={setQuery} directory={<BlueprintDirectory kind={kind} topics={topics} blueprints={blueprints} selectedId={selected?.id ?? ""} query={query} collapsedTopicIds={collapsedTopicIds} onSelect={setSelectedId} onToggle={(topicId) => setCollapsedTopicIds((current) => current.includes(topicId) ? current.filter((id) => id !== topicId) : [...current, topicId])} onCreate={create} onToggleStatus={(item) => update({ ...item, status: item.status === "enabled" ? "disabled" : "enabled" })} onDelete={setDeleteTarget} />} selected={Boolean(selected)} selectedTitle={selected?.name || `未命名${blueprintName(kind)}`} selectedMeta={selectionMeta} status={selected?.status} saveProps={saveProps}>
+    {selected && <div className="teacher-catalog-editor-content"><div className="teacher-catalog-field-grid">{kind !== "guided" && questionSelected && <label>题型<select aria-label={`${kind}题型`} value={questionSelected.question_type} onChange={(event) => update({ ...questionSelected, question_type: event.target.value })}>{questionTypes.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>}</div><MarkdownEditor key={`${kind}-${selected.id}`} label={blueprintField(kind)} inputAriaLabel={kind === "guided" ? "guidedMarkdown 指令" : `${kind}Markdown 指令`} value={instructionValue} onChange={(value) => update(kind === "guided" ? { ...selected, guidance: value } as GuidedBlueprint : { ...selected, instructions: value } as ExerciseBlueprint | ReviewBlueprint)} placeholder={kind === "guided" ? "描述模型应该怎样分步追问、提示和收束。" : "描述题干范围、数据要求、解题方向与讲评规则。"} />{kind !== "guided" && questionSelected && <RubricEditor rubric={questionSelected.rubric} onChange={(rubric) => update({ ...questionSelected, rubric })} />}<p className="teacher-catalog-form-note"><Save size={14} />当前编辑只更新本地目录草稿；点击右上角“保存教学目录”后才会调用教师目录接口。</p></div>}
     {deleteTarget && <ConfirmDialog open title={`删除${blueprintName(kind)}“${deleteTarget.name || "未命名"}”？`} description="该蓝图会从当前教师目录移除；已有学习记录和已生成题目不会受影响。" onClose={() => setDeleteTarget(null)} onConfirm={confirmRemove} />}
   </CatalogEditorLayout>;
 }
 
-export function BlueprintCatalogEditor({ kind, topics, blueprints, exerciseBlueprints, onChange, saveProps }: { kind: "exercise" | "review"; topics: CourseTopic[]; blueprints: Array<ExerciseBlueprint | ReviewBlueprint>; exerciseBlueprints: ExerciseBlueprint[]; onChange: (items: Array<ExerciseBlueprint | ReviewBlueprint>) => void; saveProps?: SaveProps }) {
-  return <BlueprintEditor kind={kind} topics={topics} blueprints={blueprints} exerciseBlueprints={exerciseBlueprints} onChange={(items) => onChange(items as Array<ExerciseBlueprint | ReviewBlueprint>)} saveProps={saveProps} />;
+export function BlueprintCatalogEditor({ kind, topics, blueprints, onChange, saveProps }: { kind: "exercise" | "review"; topics: CourseTopic[]; blueprints: Array<ExerciseBlueprint | ReviewBlueprint>; onChange: (items: Array<ExerciseBlueprint | ReviewBlueprint>) => void; saveProps?: SaveProps }) {
+  return <BlueprintEditor kind={kind} topics={topics} blueprints={blueprints} onChange={(items) => onChange(items as Array<ExerciseBlueprint | ReviewBlueprint>)} saveProps={saveProps} />;
 }
 
 export function GuidedBlueprintCatalogEditor({ topics, blueprints = [], onChange, saveProps }: { topics: CourseTopic[]; blueprints?: GuidedBlueprint[]; onChange: (items: GuidedBlueprint[]) => void; saveProps?: SaveProps }) {
