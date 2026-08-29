@@ -558,7 +558,12 @@ async def test_call_site_attribution_purposes():
         # 5. Evaluation: FlashExerciseStudentSimulator -> purpose="evaluation", user_id="system"
         fake_sim = FakeRawModel([[AIMessageChunk(content="student answer")]])
         model_sim = ResilientChatModel([_candidate("sim-c", fake_sim)], reporter_slot=slot)
-        simulator = FlashExerciseStudentSimulator()
+        # This test exercises the attribution wrapper in ``answer``. Avoid the
+        # production constructor because it builds a real Provider model and
+        # therefore requires an API key that CI deliberately does not expose.
+        simulator = FlashExerciseStudentSimulator.__new__(
+            FlashExerciseStudentSimulator
+        )
         simulator.model = model_sim
         profile = ExerciseStudentProfile(id="prof-1", role="student", behavior_rules=["polite"])
         blueprint = ExerciseBlueprintFixture(
