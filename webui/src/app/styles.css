@@ -1719,13 +1719,28 @@ button { color: inherit; }
 .teacher-content-catalog .teacher-book-tree-point-main { min-height: 34px; padding: 8px 9px; font-size: 13px; }
 .teacher-content-catalog .teacher-catalog-blueprint-point-heading > span { font-size: 12px; }
 
-/* Keep the preview switch at the far right of the Markdown toolbar. */
-.teacher-content-catalog .teacher-book-markdown-toolbar > small { flex: 0 0 auto; margin-left: 0; }
-.teacher-content-catalog .teacher-catalog-preview-toggle { flex: 0 0 auto; min-height: 30px; margin-left: auto; padding: 0 10px; border-color: #dedfea; border-radius: 8px; background: #fff; color: #5d6070; font-size: 11px; }
-.teacher-content-catalog .teacher-catalog-preview-toggle:hover,
-.teacher-content-catalog .teacher-catalog-preview-toggle.active { border-color: #c6c0ef; background: #eeebff; color: #5547b6; }
+/* Blueprint point actions stay on the same row as the point label. */
+.teacher-content-catalog .teacher-catalog-blueprint-point-heading { display: flex; min-width: 0; min-height: 34px; align-items: center; gap: 2px; padding: 0 7px; }
+.teacher-content-catalog .teacher-catalog-blueprint-point-heading > span { min-width: 0; flex: 1 1 auto; overflow: hidden; color: #656775; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.teacher-content-catalog .teacher-catalog-blueprint-point-heading .teacher-book-tree-menu { flex: 0 0 auto; margin-right: 0; }
+.teacher-content-catalog .teacher-catalog-blueprint-point-heading .teacher-book-tree-menu > summary { opacity: 1; }
+.teacher-content-catalog .teacher-catalog-blueprint-point.is-disabled { opacity: .52; }
+.teacher-content-catalog .teacher-catalog-workspace-actions button.active { border-color: #c6c0ef; background: #eeebff; color: #5547b6; }
+
+/* Question types belong to the knowledge point and are reused by blueprints. */
+.teacher-catalog-question-types { display: grid; gap: 10px; margin: 0; padding: 14px; border: 1px solid #e2e1eb; border-radius: 10px; background: #fcfcfe; }
+.teacher-catalog-question-types legend { padding: 0 5px; color: #4b4e5d; font-size: 12px; font-weight: 700; }
+.teacher-catalog-question-types > p { margin: -2px 0 0; color: #9698a7; font-size: 11px; }
+.teacher-catalog-question-type-options { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.teacher-catalog-question-type-options label { display: inline-flex; align-items: center; gap: 6px; color: #555869; font-size: 12px; font-weight: 500; }
+.teacher-catalog-question-type-options input { accent-color: #6758c9; }
+.teacher-catalog-custom-type { display: flex; max-width: 360px; gap: 8px; }
+.teacher-catalog-custom-type input { min-width: 0; flex: 1; min-height: 34px; box-sizing: border-box; padding: 7px 9px; border: 1px solid #dedfea; border-radius: 7px; outline: 0; background: #fff; color: #343746; font: 12px/1.4 "Segoe UI",sans-serif; }
+.teacher-catalog-custom-type input:focus { border-color: #6758c9; box-shadow: 0 0 0 3px rgb(103 88 201 / 10%); }
+.teacher-catalog-custom-type button { display: inline-flex; min-height: 34px; align-items: center; gap: 5px; padding: 0 10px; border: 1px solid #dcd8f4; border-radius: 7px; background: #faf9ff; color: #5547b6; font-size: 11px; font-weight: 650; cursor: pointer; }
+.teacher-catalog-custom-type button:disabled { cursor: not-allowed; opacity: .5; }
 
 @media (max-width: 760px) {
   .teacher-content-catalog .teacher-book-markdown-toolbar > small { width: 100%; margin-left: 0; }
-  .teacher-content-catalog .teacher-catalog-preview-toggle { margin-left: 0; }
+  .teacher-catalog-custom-type { max-width: none; }
 }

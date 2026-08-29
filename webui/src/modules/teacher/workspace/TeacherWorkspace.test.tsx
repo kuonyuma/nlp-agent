@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { GuidedBlueprintCatalogEditor, TopicCatalogEditor } from "./TeacherCatalogEditor";
+import { BlueprintCatalogEditor, GuidedBlueprintCatalogEditor, TopicCatalogEditor } from "./TeacherCatalogEditor";
 import { TeacherWorkspace } from "./TeacherWorkspace";
 import { TeacherRoutes } from "../routes";
+import type { CourseTopic } from "@/shared/types";
 
 const { ensureAuthMock, getSettingsMock, getTeacherCatalog, getTeacherOverviewMock, updateTeacherCatalog } = vi.hoisted(() => ({
   ensureAuthMock: vi.fn(),
@@ -84,12 +86,12 @@ describe("TeacherWorkspace catalog CRUD", () => {
     expect(screen.getByRole("status")).toHaveTextContent("已保存并同步到后端。");
   });
 
-  it("opens a topic editor directly instead of requiring an expandable card", async () => {
+  it("starts with topic groups collapsed while keeping the selected editor visible", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
 
     expect(await screen.findByRole("heading", { name: "主题与知识点" })).toBeVisible();
     expect(screen.getByDisplayValue("Transformer")).toBeVisible();
-    expect(screen.getByRole("button", { name: "折叠主题 Transformer" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "展开主题 Transformer" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("sorts disabled knowledge points to the end and keeps enabled rows unlabelled", () => {
@@ -98,6 +100,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
       { id: "disabled", name: "停用知识点", markdown: "", status: "disabled", sort_order: 1 },
     ] }]} onChange={vi.fn()} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "展开主题 主题" }));
     expect(screen.getAllByRole("button", { name: /选择知识点/ }).map((button) => button.getAttribute("aria-label"))).toEqual([
       "选择知识点 可用知识点",
       "选择知识点 停用知识点",
@@ -124,17 +127,68 @@ describe("TeacherWorkspace catalog CRUD", () => {
   it("keeps the Markdown toolbar read-only while previewing", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
 
-    expect(await screen.findByRole("button", { name: "选择知识点 注意力" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "展开主题 Transformer" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开主题 Transformer" }));
+    expect(screen.getByRole("button", { name: "选择知识点 注意力" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "选择知识点 注意力" }));
-    fireEvent.click(screen.getByRole("button", { name: "预览知识点说明" }));
+    fireEvent.click(screen.getByRole("button", { name: "预览正文" }));
 
     expect(screen.getByRole("button", { name: "加粗" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "返回编辑知识点说明" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "返回编辑" })).toBeVisible();
+  });
+
+  it("stores configurable question types on a knowledge point", () => {
+    function ControlledTopicEditor() {
+      const [topics, setTopics] = useState<CourseTopic[]>([{ id: "topic", name: "主题", description: "", status: "enabled", knowledge_points: [{ id: "point", name: "知识点", markdown: "", status: "enabled", sort_order: 0 }] }]);
+      return <TopicCatalogEditor topics={topics} onChange={setTopics} />;
+    }
+    render(<ControlledTopicEditor />);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开主题 主题" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择知识点 知识点" }));
+    expect(screen.getByRole("group", { name: "知识点可用题型" })).toBeVisible();
+    fireEvent.click(screen.getByRole("checkbox", { name: "代码阅读题" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "自定义题型" }), { target: { value: "实验设计题" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+
+    expect(screen.getByRole("checkbox", { name: "代码阅读题" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "实验设计题" })).toBeChecked();
+  });
+
+  it("uses the selected knowledge point question types in a blueprint", () => {
+    render(<BlueprintCatalogEditor kind="exercise" topics={[{ id: "topic", name: "主题", description: "", status: "enabled", knowledge_points: [{ id: "point", name: "知识点", markdown: "", status: "enabled", sort_order: 0, question_types: ["代码阅读题", "实验设计题"] }] }]} blueprints={[{ id: "blueprint", name: "蓝图", topic_id: "topic", knowledge_point_id: "point", instructions: "说明", question_type: "代码阅读题", status: "draft", rubric: [] }]} onChange={vi.fn()} />);
+
+    const questionType = screen.getByRole("combobox", { name: "exercise题型" });
+    expect(questionType).toHaveValue("代码阅读题");
+    expect(within(questionType).getByRole("option", { name: "实验设计题" })).toBeInTheDocument();
+    expect(within(questionType).queryByRole("option", { name: "选择题" })).not.toBeInTheDocument();
+  });
+
+  it("warns before leaving a teacher page with unsaved edits", async () => {
+    history.replaceState({}, "", "/teacher/topics");
+    render(<TeacherWorkspace />);
+    await screen.findByRole("heading", { name: "主题与知识点", level: 2 });
+    fireEvent.change(screen.getByLabelText("主题名称"), { target: { value: "未保存主题" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "出题蓝图" }));
+    expect(screen.getByRole("alertdialog", { name: "有未保存的修改" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "留在当前页面" }));
+    expect(screen.getByRole("heading", { name: "主题与知识点", level: 2 })).toBeVisible();
+
+    const unload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "出题蓝图" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续离开" }));
+    expect(await screen.findByRole("heading", { name: "出题蓝图", level: 2 })).toBeVisible();
   });
 
   it("edits, disables, creates and deletes knowledge points", async () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
-    expect(await screen.findByRole("button", { name: "选择知识点 注意力" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "展开主题 Transformer" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开主题 Transformer" }));
+    expect(screen.getByRole("button", { name: "选择知识点 注意力" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "选择知识点 注意力" }));
     expect(screen.getByDisplayValue("注意力")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "选择主题 Transformer" }));
@@ -161,6 +215,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
     history.replaceState({}, "", "/teacher/exercises"); render(<TeacherWorkspace />);
     await screen.findByRole("heading", { name: "出题蓝图", level: 2 });
     expect(screen.queryByRole("button", { name: "出题蓝图目录选项" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开主题 Transformer" }));
     const pointCreateMenu = screen.getByRole("button", { name: "注意力出题蓝图选项" }).closest("details"); expect(pointCreateMenu).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "注意力出题蓝图选项" }));
     fireEvent.click(within(pointCreateMenu as HTMLElement).getByRole("button", { name: "新建出题蓝图" }));
@@ -189,6 +244,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
   it("creates and deletes a review blueprint with its own structured fields", async () => {
     history.replaceState({}, "", "/teacher/reviews"); render(<TeacherWorkspace />);
     await screen.findByRole("heading", { name: "复习蓝图", level: 2 });
+    fireEvent.click(screen.getByRole("button", { name: "展开主题 Transformer" }));
     const pointCreateMenu = screen.getByRole("button", { name: "注意力复习蓝图选项" }).closest("details"); expect(pointCreateMenu).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "注意力复习蓝图选项" }));
     fireEvent.click(within(pointCreateMenu as HTMLElement).getByRole("button", { name: "新建复习蓝图" }));
@@ -207,6 +263,7 @@ describe("TeacherWorkspace catalog CRUD", () => {
   it("creates an editable guided blueprint with a Markdown direction", async () => {
     history.replaceState({}, "", "/teacher/guided"); render(<TeacherWorkspace />);
     await screen.findByRole("heading", { name: "引导蓝图", level: 2 });
+    fireEvent.click(screen.getByRole("button", { name: "展开主题 Transformer" }));
     const pointCreateMenu = screen.getByRole("button", { name: "注意力引导蓝图选项" }).closest("details"); expect(pointCreateMenu).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "注意力引导蓝图选项" }));
     fireEvent.click(within(pointCreateMenu as HTMLElement).getByRole("button", { name: "新建引导蓝图" }));
