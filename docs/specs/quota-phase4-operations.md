@@ -13,6 +13,7 @@ Phase 4 负责把 Phase 1～3 产生的 UsageEvent、Quota Ledger、Grant 和 Bu
 | `nlp_quota_provider_billing` | Provider 账单明细及本地匹配结果 | Provider 侧输入事实；匹配状态可刷新 |
 | `nlp_quota_daily_rollups` | 按日、用户、工作空间、Provider、模型和用途的查询聚合 | 否，随原始 UsageEvent 重建 |
 | `nlp_quota_credit_operations` | Gift/Reset 的操作意图和跨请求幂等 | 是，操作记录追加写入 |
+| `nlp_quota_credit_scope_locks` | 按幂等键及所有者周期串行化 Gift/Reset 事务 | 否，纯并发控制状态 |
 | `nlp_quota_alerts` | 用量突增告警及去重状态 | 是，告警状态可运营更新 |
 | `nlp_quota_usage_archive_batches` | UsageEvent 归档批次清单 | 是，归档清单不删除事件 |
 
@@ -46,7 +47,7 @@ Gift 和 Reset 都通过 `QuotaCreditOperationModel` 保存操作意图，再委
 
 ## 6. Ledger 重放与余额修复
 
-`GET /api/v1/developer/quota/buckets/{bucket_id}/replay` 汇总该 Bucket 的 `reserve/settle/reconcile/release` Ledger delta，得到 expected consumed/reserved 和 over-limit 状态，并报告是否与 Bucket 物化值漂移。
+`GET /api/v1/developer/quota/buckets/{bucket_id}/replay` 汇总该 Bucket 的 `reserve/settle/reconcile/release/billing_adjustment` Ledger delta，得到 expected consumed/reserved；over-limit 同时考虑当前有效 Grant、Adjustment 和策略的有限透支，并报告是否与 Bucket 物化值漂移。
 
 `POST /api/v1/developer/quota/buckets/{bucket_id}/repair` 在 Bucket 行锁内把物化值恢复到重放结果，然后追加一条 `balance_repair` Ledger。修复使用 `balance-repair:{idempotency_key}` 幂等；原始流水不改写，因此可以审计修复前后的差异。
 
@@ -58,7 +59,7 @@ Gift 和 Reset 都通过 `QuotaCreditOperationModel` 保存操作意图，再委
 
 ## 8. 教师班级聚合
 
-`GET /api/v1/teacher/quota/classroom` 只允许有课堂范围权限的教师访问，按 active classroom members 聚合原始 UsageEvent，返回学生数、事件数、已计价 Credits、Token 总量以及 pending/unavailable 状态。前端“班级用量”页中的展示值是观察数据，不等价于可用额度，不会把多个 Bucket 的 remaining 相加。
+`GET /api/v1/teacher/quota/classroom` 只允许明确拥有该课堂范围权限的非管理员教师访问，并校验课堂属于请求的工作区；随后按 active classroom members 聚合原始 UsageEvent，返回学生数、事件数、已计价 Credits、Token 总量以及 pending/unavailable 状态。告警可通过 `PATCH /api/v1/developer/quota/alerts/{alert_id}` 标记为 `acknowledged` 或 `resolved`，操作保留 RBAC 审计。前端“班级用量”页中的展示值是观察数据，不等价于可用额度，不会把多个 Bucket 的 remaining 相加。
 
 ## 9. 运维验收清单
 

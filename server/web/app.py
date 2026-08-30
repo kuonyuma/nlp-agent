@@ -35,6 +35,7 @@ from gateway.contracts import (
     TurnConflictError,
 )
 from gateway.core import BackendGateway
+from server.infrastructure.mysql.models import ClassroomModel
 from server.web.auth import (
     AuthenticationError,
     CsrfRejectedError,
@@ -83,6 +84,7 @@ from server.web.contracts import (
     QuotaGrantRevokeBody,
     QuotaPolicyBody,
     QuotaUsageArchiveBody,
+    QuotaAlertStatusBody,
 )
 from server.web.protocol import control_event
 from server.web.developer import developer_snapshot
@@ -255,6 +257,14 @@ def _public_learning_topic(topic: dict[str, Any]) -> dict[str, Any]:
         if point.get("status", "enabled") == "enabled"
     ]
     return public_topic
+
+
+def require_explicit_classroom_membership(
+    principal: AuthenticatedPrincipal, classroom_id: str
+) -> None:
+    """Require object-level classroom scope for every non-admin teacher."""
+    if not principal.is_admin and classroom_id not in principal.classroom_ids:
+        raise HTTPException(status_code=403, detail="当前教师无权查看该课堂")
 
 
 def create_app(
@@ -1490,6 +1500,37 @@ def create_app(
             limit=limit,
         )}
 
+    @app.patch("/api/v1/developer/quota/alerts/{alert_id}", tags=["quota"])
+    async def update_quota_alert(
+        alert_id: str,
+        body: QuotaAlertStatusBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_operations_for(request).update_alert,
+                alert_id,
+                status=body.status,
+                actor_user_id=principal.user_id,
+                reason=body.reason,
+            )
+        except KeyError:
+            return _problem(request, status_code=404, code="quota_alert_not_found", title="告警不存在")
+        except ValueError as error:
+            return _problem(request, status_code=422, code="quota_alert_update_invalid", title="告警状态更新失败", detail=str(error))
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_alert_updated",
+            resource_type="quota_alert",
+            resource_id=alert_id,
+            detail={"status": row["status"], "reason": body.reason},
+        )
+        return row
+
     @app.post("/api/v1/developer/quota/archive", tags=["quota"])
     async def archive_quota_usage_events(
         body: QuotaUsageArchiveBody,
@@ -2495,8 +2536,23 @@ def create_app(
         teacher_service.require_teacher(
             principal, workspace_id, Permission.LEARNING_PROGRESS_READ_CLASSROOM
         )
-        if principal.classroom_ids and classroom_id not in principal.classroom_ids and not principal.is_admin:
-            raise HTTPException(status_code=403, detail="当前教师无权查看该课堂")
+        require_explicit_classroom_membership(principal, classroom_id)
+        factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+        if factory is None:
+            if not principal.is_admin:
+                raise HTTPException(status_code=503, detail="课堂权限数据暂不可用")
+        else:
+            async with factory() as session:
+                classroom = await session.scalar(
+                    select(ClassroomModel).where(
+                        ClassroomModel.id == classroom_id,
+                        ClassroomModel.status == "active",
+                    )
+                )
+            if classroom is None:
+                raise HTTPException(status_code=404, detail="课堂不存在")
+            if classroom.workspace_id != workspace_id:
+                raise HTTPException(status_code=403, detail="课堂不属于当前工作区")
         operations = quota_operations_for(request)
         end = datetime.now(timezone.utc)
         return await asyncio.to_thread(

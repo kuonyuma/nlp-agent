@@ -35,6 +35,7 @@ TABLE_COMMENTS: dict[str, str] = {
     "nlp_quota_grants": "用户、工作区或课堂的可追溯额度分配及撤销状态。",
     "nlp_quota_adjustments": "带操作人、原因和幂等键的手工额度调整流水。",
     "nlp_quota_credit_operations": "赠送与重置 Credits 的幂等操作意图和结果。",
+    "nlp_quota_credit_scope_locks": "按额度主体周期串行化赠送和重置操作的持久化锁。",
     "nlp_quota_daily_rollups": "脱离 Turn 主链路生成的每日 Token 与 Credits 聚合。",
     "nlp_quota_provider_billing": "Provider 账单行、UsageEvent 匹配结果与差异。",
     "nlp_quota_usage_archive_batches": "UsageEvent 非破坏性归档批次清单。",

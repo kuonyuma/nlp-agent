@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import Column, MetaData, String, Table, create_engine, insert, select, update
 from sqlalchemy.pool import StaticPool
 
@@ -13,6 +14,7 @@ from server.quota.models import (
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
     QuotaCreditOperationModel,
+    QuotaCreditScopeLockModel,
     QuotaDailyRollupModel,
     QuotaGrantModel,
     QuotaLedgerEntryModel,
@@ -60,6 +62,7 @@ def _engine():
         QuotaGrantModel,
         QuotaAdjustmentModel,
         QuotaCreditOperationModel,
+        QuotaCreditScopeLockModel,
         QuotaDailyRollupModel,
         QuotaProviderBillingModel,
         QuotaUsageArchiveBatchModel,
@@ -70,7 +73,7 @@ def _engine():
     return engine
 
 
-def _policy_and_binding(engine, *, daily: int = 1_000):
+def _policy_and_binding(engine, *, daily: int = 1_000, max_overdraft: int = 0):
     policy_id = str(uuid4())
     with engine.begin() as connection:
         connection.execute(
@@ -84,7 +87,7 @@ def _policy_and_binding(engine, *, daily: int = 1_000):
                 daily_limit_micro=daily,
                 monthly_limit_micro=None,
                 concurrency_limit=10,
-                max_overdraft_micro=0,
+                max_overdraft_micro=max_overdraft,
                 allowed_model_profiles=["economy"],
                 unlimited=False,
                 effective_from=NOW,
@@ -211,6 +214,95 @@ def test_ledger_replay_repairs_bucket_without_rewriting_original_entries():
     assert (bucket["consumed_micro"], bucket["reserved_micro"]) == (25, 15)
     assert any(row["entry_type"] == "balance_repair" for row in entries)
     assert any(row["reason"] == "provider_usage" for row in entries)
+
+
+def test_ledger_replay_over_limit_includes_grants_adjustments_and_overdraft():
+    engine = _engine()
+    _policy_and_binding(engine, daily=100, max_overdraft=10)
+    service = QuotaService(engine)
+    start = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+    admitted = service.admit_turn(
+        _command("turn-replay-capacity", estimated_micro=40),
+        role_codes=("student",),
+        now=NOW,
+    )
+    service.settle_usage(
+        reservation_id=admitted.reservation_id,
+        operation_id="op-replay-capacity",
+        credits_micro=135,
+        usage_status="exact",
+        now=NOW,
+    )
+    management = QuotaManagementService(engine)
+    management.create_grant(
+        owner_type="user",
+        owner_id="user-1",
+        bucket_type="daily",
+        period_start=start,
+        period_end=start + timedelta(days=1),
+        allocated_micro=20,
+        source_type="grant",
+        created_by="developer-1",
+        reason="replay capacity",
+        idempotency_key="replay-grant-1",
+        effective_from=NOW,
+    )
+    management.create_adjustment(
+        owner_type="user",
+        owner_id="user-1",
+        bucket_type="daily",
+        period_start=start,
+        period_end=start + timedelta(days=1),
+        amount_micro=5,
+        actor_user_id="developer-1",
+        reason="replay adjustment",
+        idempotency_key="replay-adjustment-1",
+    )
+    with engine.connect() as connection:
+        bucket_id = connection.execute(select(QuotaBucketModel.id)).scalar_one()
+
+    replay = QuotaOperationsService(engine).replay_bucket(bucket_id)
+
+    assert replay.expected_consumed_micro == 135
+    assert replay.expected_over_limit is False
+
+
+def test_snapshot_recomputes_over_limit_from_current_grant_capacity():
+    engine = _engine()
+    _policy_and_binding(engine, daily=100)
+    service = QuotaService(engine)
+    admitted = service.admit_turn(
+        _command("turn-snapshot-capacity", estimated_micro=40),
+        role_codes=("student",),
+        now=NOW,
+    )
+    service.settle_usage(
+        reservation_id=admitted.reservation_id,
+        operation_id="op-snapshot-capacity",
+        credits_micro=110,
+        usage_status="exact",
+        now=NOW,
+    )
+    management = QuotaManagementService(engine)
+    start = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+    management.create_grant(
+        owner_type="user",
+        owner_id="user-1",
+        bucket_type="daily",
+        period_start=start,
+        period_end=start + timedelta(days=1),
+        allocated_micro=20,
+        source_type="grant",
+        created_by="developer-1",
+        reason="snapshot capacity",
+        idempotency_key="snapshot-grant-1",
+        effective_from=NOW,
+    )
+
+    snapshot = service.snapshot(user_id="user-1", workspace_id="workspace-1", now=NOW)
+
+    user_bucket = next(row for row in snapshot["buckets"] if row["owner_type"] == "user")
+    assert user_bucket["over_limit"] is False
 
 
 def test_provider_reconciliation_locates_usage_event_and_preserves_source_fact():
@@ -388,6 +480,21 @@ def test_gift_and_reset_credits_are_idempotent_and_append_only():
         effective_from=NOW,
     )
     assert replay["grant_id"] == gift["grant_id"]
+    with pytest.raises(ValueError, match="idempotency key conflicts"):
+        operations.gift_credits(
+            management,
+            owner_type="user",
+            owner_id="user-1",
+            bucket_type="daily",
+            period_start=start,
+            period_end=start + timedelta(days=1),
+            amount_micro=100,
+            actor_user_id="developer-1",
+            reason="welcome",
+            idempotency_key="gift-1",
+            effective_from=NOW,
+            expires_at=NOW + timedelta(hours=1),
+        )
     reset = operations.reset_credits(
         management,
         owner_type="user",
@@ -459,6 +566,42 @@ def test_daily_rollup_alert_and_archive_are_off_path_from_usage_events():
         batch = connection.execute(select(QuotaUsageArchiveBatchModel)).mappings().one()
     assert original["credits_micro"] == 10
     assert original["archive_batch_id"] == batch["id"]
+
+
+def test_alert_status_can_be_acknowledged_and_resolved():
+    engine = _engine()
+    with engine.begin() as connection:
+        connection.execute(
+            insert(QuotaAlertModel).values(
+                id="alert-1",
+                alert_type="usage_spike",
+                severity="high",
+                owner_type="user",
+                owner_id="user-1",
+                window_start=NOW - timedelta(days=1),
+                window_end=NOW,
+                baseline_micro=10,
+                actual_micro=100,
+                threshold_multiplier=2,
+                status="open",
+                dedupe_key="alert-dedupe-1",
+                metadata_json={},
+                created_at=NOW,
+                resolved_at=None,
+            )
+        )
+
+    operations = QuotaOperationsService(engine)
+    acknowledged = operations.update_alert(
+        "alert-1", status="acknowledged", actor_user_id="operator-1", reason="triaged"
+    )
+    resolved = operations.update_alert(
+        "alert-1", status="resolved", actor_user_id="operator-1", reason="handled"
+    )
+
+    assert acknowledged["status"] == "acknowledged"
+    assert resolved["status"] == "resolved"
+    assert resolved["resolved_at"] is not None
 
 
 def test_classroom_aggregate_sums_members_and_returns_usage_status_counts():

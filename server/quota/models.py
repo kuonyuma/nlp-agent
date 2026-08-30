@@ -561,8 +561,26 @@ class QuotaCreditOperationModel(Base):
     grant_id: Mapped[str] = mapped_column(UUID, nullable=False)
     actor_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+
+
+class QuotaCreditScopeLockModel(Base):
+    """A durable row used to serialize credit changes for one owner-period."""
+
+    __tablename__ = "nlp_quota_credit_scope_locks"
+
+    scope_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DATETIME(fsp=6), nullable=False, default=_utc_now
     )
 
@@ -751,6 +769,7 @@ QuotaLedgerEntryModel.__table__.comment = TABLE_COMMENTS["nlp_quota_ledger_entri
 QuotaGrantModel.__table__.comment = TABLE_COMMENTS["nlp_quota_grants"]
 QuotaAdjustmentModel.__table__.comment = TABLE_COMMENTS["nlp_quota_adjustments"]
 QuotaCreditOperationModel.__table__.comment = TABLE_COMMENTS["nlp_quota_credit_operations"]
+QuotaCreditScopeLockModel.__table__.comment = TABLE_COMMENTS["nlp_quota_credit_scope_locks"]
 QuotaDailyRollupModel.__table__.comment = TABLE_COMMENTS["nlp_quota_daily_rollups"]
 QuotaProviderBillingModel.__table__.comment = TABLE_COMMENTS["nlp_quota_provider_billing"]
 QuotaUsageArchiveBatchModel.__table__.comment = TABLE_COMMENTS["nlp_quota_usage_archive_batches"]

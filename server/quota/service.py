@@ -34,6 +34,7 @@ from server.quota.models import (
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
     QuotaCreditOperationModel,
+    QuotaCreditScopeLockModel,
     QuotaDailyRollupModel,
     QuotaGrantModel,
     QuotaLedgerEntryModel,
@@ -1319,6 +1320,27 @@ class QuotaService:
                 ),
             ):
                 grant_micro, adjustment_micro = self._capacity_components(connection, row, at)
+                policy_id = row.get("policy_id")
+                max_overdraft_micro = 0
+                if policy_id is not None:
+                    max_overdraft_micro = int(
+                        connection.execute(
+                            select(func.coalesce(QuotaPolicyModel.max_overdraft_micro, 0)).where(
+                                QuotaPolicyModel.id == policy_id
+                            )
+                        ).scalar_one()
+                        or 0
+                    )
+                limit_micro = row["limit_micro"]
+                consumed_micro = int(row["consumed_micro"])
+                current_over_limit = (
+                    limit_micro is not None
+                    and consumed_micro
+                    > int(limit_micro)
+                    + grant_micro
+                    + adjustment_micro
+                    + max_overdraft_micro
+                )
                 rendered_rows.append(
                     {
                         "owner_type": row["owner_type"],
@@ -1330,10 +1352,12 @@ class QuotaService:
                         "consumed_micro": row["consumed_micro"],
                         "reserved_micro": row["reserved_micro"],
                         "remaining_micro": self._available(
-                            row, 0, grant_micro + adjustment_micro
+                            row,
+                            max_overdraft_micro,
+                            grant_micro + adjustment_micro,
                         ),
                         "reset_at": _aware(row["period_end"]).isoformat(),
-                        "over_limit": bool(row["over_limit"]),
+                        "over_limit": current_over_limit,
                     }
                 )
         return {
@@ -1359,6 +1383,7 @@ class QuotaService:
                 QuotaGrantModel,
                 QuotaAdjustmentModel,
                 QuotaCreditOperationModel,
+                QuotaCreditScopeLockModel,
                 QuotaDailyRollupModel,
                 QuotaProviderBillingModel,
                 QuotaUsageArchiveBatchModel,
@@ -1366,6 +1391,15 @@ class QuotaService:
             ):
                 primary_key = next(iter(model.__table__.primary_key.columns))
                 connection.execute(select(primary_key).limit(1)).first()
+            # The scope-lock migration also adds the timestamps used to make
+            # Gift/Reset requests replay-safe.  Probe those columns so a
+            # partially upgraded production process fails readiness early.
+            connection.execute(
+                select(
+                    QuotaCreditOperationModel.effective_from,
+                    QuotaCreditOperationModel.expires_at,
+                ).limit(1)
+            ).first()
 
     @staticmethod
     def _find_existing_reservation(

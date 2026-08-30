@@ -242,6 +242,11 @@ class QuotaUsageArchiveBody(StrictModel):
     batch_size: StrictInt = Field(default=10_000, ge=1, le=100_000)
 
 
+class QuotaAlertStatusBody(StrictModel):
+    status: Literal["acknowledged", "resolved"]
+    reason: str = Field(min_length=1, max_length=255)
+
+
 class CommandEnvelope(StrictModel):
     v: Literal["1"] = API_VERSION
     type: str = Field(min_length=1, max_length=100)

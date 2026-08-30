@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from server.quota.reaper import QuotaReservationReaper
+from server.worker.runtime import create_worker_quota_reaper
 
 
 @pytest.mark.asyncio
@@ -51,3 +52,24 @@ async def test_reaper_runs_phase4_rollup_and_alert_maintenance():
     await reaper.stop()
 
     assert operations.calls >= 1
+
+
+def test_worker_reaper_factory_injects_phase4_operations_service():
+    class QuotaService:
+        engine = object()
+
+        def expire_reservations(self) -> int:
+            return 0
+
+    class Repository:
+        quota_service = QuotaService()
+
+    reaper = create_worker_quota_reaper(
+        Repository(),
+        {"quota_reap_interval_s": 5, "quota_operations_interval_s": 60},
+    )
+
+    assert reaper is not None
+    assert reaper._operations_service is not None
+    assert reaper._interval_seconds == 5
+    assert reaper._operations_interval_seconds == 60

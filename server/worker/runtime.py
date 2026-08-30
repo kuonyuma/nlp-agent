@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from typing import Any, Mapping
 
 from configs.settings import settings
 from gateway.contracts import GatewayEventType, TurnStatus
@@ -19,6 +20,7 @@ from server.application.turn_reliability import OutboxRelay, TurnReliabilityServ
 from server.infrastructure.mysql import MySQLRuntime
 from server.worker.fencing import FencedTurnExecutor
 from server.quota.notifications import QuotaSnapshotRedisPublisher
+from server.quota.operations import QuotaOperationsService
 from server.quota.reaper import QuotaReservationReaper
 from server.sandbox.manager_rpc import create_sandbox_manager_rpc_client
 from server.sandbox.model_tools import configure_model_sandbox_service
@@ -55,6 +57,26 @@ def redis_config() -> RedisTransportConfig:
         cancel_ttl_s=int(config.get("redis_cancel_ttl_s", 604_800)),
         dead_letter_stream=str(
             config.get("redis_dead_letter_stream", "nlp-agent:turns:dead")
+        ),
+    )
+
+def create_worker_quota_reaper(
+    repository: Any, gateway_config: Mapping[str, Any]
+) -> QuotaReservationReaper | None:
+    """Build the same expiry/maintenance loop for a standalone Worker."""
+    quota_service = getattr(repository, "quota_service", None)
+    if quota_service is None:
+        return None
+    return QuotaReservationReaper(
+        quota_service,
+        interval_seconds=max(
+            1.0,
+            float(gateway_config.get("quota_reap_interval_s", 30)),
+        ),
+        operations_service=QuotaOperationsService(quota_service.engine),
+        operations_interval_seconds=max(
+            1.0,
+            float(gateway_config.get("quota_operations_interval_s", 3_600)),
         ),
     )
 
@@ -188,15 +210,8 @@ async def run_worker() -> None:
         is_terminal=is_terminal,
         reclaim_pending=False,
     )
-    quota_reaper = None
-    if getattr(repository, "quota_service", None) is not None:
-        quota_reaper = QuotaReservationReaper(
-            repository.quota_service,
-            interval_seconds=max(
-                1.0,
-                float(gateway_config.get("quota_reap_interval_s", 30)),
-            ),
-        )
+    quota_reaper = create_worker_quota_reaper(repository, gateway_config)
+    if quota_reaper is not None:
         quota_reaper.start()
 
     async def relay_forever() -> None:

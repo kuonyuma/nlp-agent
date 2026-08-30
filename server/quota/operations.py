@@ -24,9 +24,11 @@ from server.quota.models import (
     QuotaAdjustmentModel,
     QuotaBucketModel,
     QuotaCreditOperationModel,
+    QuotaCreditScopeLockModel,
     QuotaDailyRollupModel,
     QuotaGrantModel,
     QuotaLedgerEntryModel,
+    QuotaPolicyModel,
     QuotaProviderBillingModel,
     QuotaUsageArchiveBatchModel,
     UsageEventModel,
@@ -93,6 +95,21 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
+
+
+def _credit_scope_key(kwargs: Mapping[str, Any]) -> str:
+    return _bounded_idempotency_key(
+        "credit-scope",
+        kwargs["owner_type"],
+        kwargs["owner_id"],
+        kwargs["bucket_type"],
+        _db_time(kwargs["period_start"]).isoformat(),
+        _db_time(kwargs["period_end"]).isoformat(),
+    )
+
+
+def _credit_idempotency_scope_key(operation_key: str) -> str:
+    return _bounded_idempotency_key("credit-idempotency", operation_key)
 
 
 @dataclass(frozen=True)
@@ -241,8 +258,12 @@ class QuotaOperationsService:
         expected_consumed = max(
             0, sum(int(row["consumed_delta_micro"] or 0) for row in entries)
         )
-        limit = bucket["limit_micro"]
-        expected_over_limit = limit is not None and expected_consumed > int(limit)
+        expected_over_limit = QuotaOperationsService._bucket_over_limit(
+            connection,
+            bucket,
+            consumed_micro=expected_consumed,
+            at=datetime.now(UTC),
+        )
         stored_consumed = int(bucket["consumed_micro"])
         stored_reserved = int(bucket["reserved_micro"])
         return BucketReplay(
@@ -477,7 +498,28 @@ class QuotaOperationsService:
                 select(QuotaProviderBillingModel)
                 .where(QuotaProviderBillingModel.idempotency_key == idempotency_key)
                 .with_for_update()
-            ).mappings().one()
+            ).mappings().first()
+            if winner is None:
+                # A concurrent line may use a different idempotency key while
+                # claiming the provider's unique statement identity.  Resolve
+                # the committed winner by that business key before deciding
+                # whether the request is a replay or a conflict.
+                winner = connection.execute(
+                    select(QuotaProviderBillingModel)
+                    .where(
+                        QuotaProviderBillingModel.provider == provider,
+                        QuotaProviderBillingModel.statement_id == statement_id,
+                    )
+                    .with_for_update()
+                ).mappings().first()
+            if winner is None:
+                raise
+            if (
+                winner["operation_id"] != operation_id
+                or winner["billed_credits_micro"] != billed_credits
+                or winner["billed_tokens_json"] != billed_tokens
+            ):
+                raise ValueError("provider statement conflicts with an existing billing line")
             return self._refresh_billing_match(connection, winner, checked_at)
         row = connection.execute(
             select(QuotaProviderBillingModel)
@@ -605,7 +647,17 @@ class QuotaOperationsService:
                 QuotaAdjustmentModel.period_end == bucket["period_end"],
             )
         ).scalar_one()
-        return int(consumed_micro) > int(limit) + int(grant or 0) + int(adjustment or 0)
+        max_overdraft = connection.execute(
+            select(func.coalesce(QuotaPolicyModel.max_overdraft_micro, 0)).where(
+                QuotaPolicyModel.id == bucket["policy_id"]
+            )
+        ).scalar_one()
+        return int(consumed_micro) > (
+            int(limit)
+            + int(grant or 0)
+            + int(adjustment or 0)
+            + int(max_overdraft or 0)
+        )
 
     # ---- Credit operations --------------------------------------------
 
@@ -613,48 +665,43 @@ class QuotaOperationsService:
         return self._credit_operation(management, operation_type="gift", source_type="grant", **kwargs)
 
     def reset_credits(self, management: QuotaManagementService, **kwargs: Any) -> dict[str, Any]:
-        result = self._credit_operation(management, operation_type="reset", source_type="reset", **kwargs)
-        grant_id = result["grant_id"]
-        with self._engine.begin() as connection:
-            prior = connection.execute(
-                select(QuotaGrantModel)
-                .where(
-                    QuotaGrantModel.owner_type == kwargs["owner_type"],
-                    QuotaGrantModel.owner_id == kwargs["owner_id"],
-                    QuotaGrantModel.bucket_type == kwargs["bucket_type"],
-                    QuotaGrantModel.period_start == _db_time(kwargs["period_start"]),
-                    QuotaGrantModel.period_end == _db_time(kwargs["period_end"]),
-                    QuotaGrantModel.status == "active",
-                    QuotaGrantModel.id != grant_id,
-                )
-                .with_for_update()
-            ).mappings().all()
-            for row in prior:
-                connection.execute(
-                    update(QuotaGrantModel)
-                    .where(QuotaGrantModel.id == row["id"])
-                    .values(status="expired", updated_at=_db_time(datetime.now(UTC)))
-                )
-                connection.execute(
-                    insert(QuotaLedgerEntryModel).values(
-                        id=str(uuid.uuid4()),
-                        reservation_id=None,
-                        bucket_id=None,
-                        grant_id=row["id"],
-                        entry_type="grant_reset",
-                        amount_micro=-int(row["allocated_micro"]),
-                        reserved_delta_micro=0,
-                        consumed_delta_micro=0,
-                        idempotency_key=_bounded_idempotency_key(
-                            "grant-reset", kwargs["idempotency_key"], row["id"]
-                        ),
-                        actor_user_id=kwargs["actor_user_id"],
-                        reason=kwargs["reason"],
-                        metadata_json={"replaced_by_grant_id": grant_id},
-                        created_at=_db_time(datetime.now(UTC)),
+        return self._credit_operation(
+            management, operation_type="reset", source_type="reset", **kwargs
+        )
+
+    @staticmethod
+    def _lock_credit_scope(connection: Connection, scope_key: str) -> None:
+        row = connection.execute(
+            select(QuotaCreditScopeLockModel)
+            .where(QuotaCreditScopeLockModel.scope_key == scope_key)
+            .with_for_update()
+        ).mappings().first()
+        if row is None:
+            now = _db_time(datetime.now(UTC))
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(QuotaCreditScopeLockModel).values(
+                            scope_key=scope_key,
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
-                )
-        return result
+            except IntegrityError:
+                # Another process inserted the lock row.  The outer
+                # transaction now waits on the same row below.
+                pass
+            connection.execute(
+                select(QuotaCreditScopeLockModel)
+                .where(QuotaCreditScopeLockModel.scope_key == scope_key)
+                .with_for_update()
+            ).mappings().one()
+        else:
+            connection.execute(
+                update(QuotaCreditScopeLockModel)
+                .where(QuotaCreditScopeLockModel.scope_key == scope_key)
+                .values(updated_at=_db_time(datetime.now(UTC)))
+            )
 
     def _credit_operation(
         self,
@@ -675,6 +722,14 @@ class QuotaOperationsService:
             raise ValueError("amount_micro must be a non-negative integer")
         operation_key = str(kwargs["idempotency_key"])
         with self._engine.begin() as connection:
+            # Serialize both the global idempotency key and the target
+            # owner-period scope before inspecting or writing either record.
+            # This keeps a concurrent reset from expiring another reset's
+            # newly-created Grant.
+            self._lock_credit_scope(
+                connection, _credit_idempotency_scope_key(operation_key)
+            )
+            self._lock_credit_scope(connection, _credit_scope_key(kwargs))
             existing = connection.execute(
                 select(QuotaCreditOperationModel)
                 .where(QuotaCreditOperationModel.idempotency_key == operation_key)
@@ -683,39 +738,88 @@ class QuotaOperationsService:
             if existing is not None:
                 self._assert_credit_operation_matches(existing, operation_type, kwargs)
                 return self._credit_payload(existing)
-        grant = management.create_grant(
-            owner_type=kwargs["owner_type"],
-            owner_id=kwargs["owner_id"],
-            bucket_type=kwargs["bucket_type"],
-            period_start=kwargs["period_start"],
-            period_end=kwargs["period_end"],
-            allocated_micro=amount,
-            source_type=source_type,
-            source_id=kwargs.get("source_id"),
-            created_by=kwargs["actor_user_id"],
-            reason=kwargs["reason"],
-            idempotency_key=_bounded_idempotency_key(
-                f"credit-{operation_type}", operation_key
-            ),
-            effective_from=kwargs["effective_from"],
-            expires_at=kwargs.get("expires_at"),
-        )
-        values = {
-            "id": str(uuid.uuid4()),
-            "operation_type": operation_type,
-            "owner_type": kwargs["owner_type"],
-            "owner_id": kwargs["owner_id"],
-            "bucket_type": kwargs["bucket_type"],
-            "period_start": _db_time(kwargs["period_start"]),
-            "period_end": _db_time(kwargs["period_end"]),
-            "amount_micro": amount,
-            "grant_id": grant["grant_id"],
-            "actor_user_id": kwargs["actor_user_id"],
-            "reason": kwargs["reason"],
-            "idempotency_key": operation_key,
-            "created_at": _db_time(datetime.now(UTC)),
-        }
-        with self._engine.begin() as connection:
+            grant = management.create_grant_in_transaction(
+                connection,
+                owner_type=kwargs["owner_type"],
+                owner_id=kwargs["owner_id"],
+                bucket_type=kwargs["bucket_type"],
+                period_start=kwargs["period_start"],
+                period_end=kwargs["period_end"],
+                allocated_micro=amount,
+                source_type=source_type,
+                source_id=kwargs.get("source_id"),
+                created_by=kwargs["actor_user_id"],
+                reason=kwargs["reason"],
+                idempotency_key=_bounded_idempotency_key(
+                    f"credit-{operation_type}", operation_key
+                ),
+                effective_from=kwargs["effective_from"],
+                expires_at=kwargs.get("expires_at"),
+            )
+            if operation_type == "reset":
+                grant_id = grant["grant_id"]
+                prior = connection.execute(
+                    select(QuotaGrantModel)
+                    .where(
+                        QuotaGrantModel.owner_type == kwargs["owner_type"],
+                        QuotaGrantModel.owner_id == kwargs["owner_id"],
+                        QuotaGrantModel.bucket_type == kwargs["bucket_type"],
+                        QuotaGrantModel.period_start == _db_time(kwargs["period_start"]),
+                        QuotaGrantModel.period_end == _db_time(kwargs["period_end"]),
+                        QuotaGrantModel.status == "active",
+                        QuotaGrantModel.id != grant_id,
+                    )
+                    .with_for_update()
+                ).mappings().all()
+                for row in prior:
+                    connection.execute(
+                        update(QuotaGrantModel)
+                        .where(QuotaGrantModel.id == row["id"])
+                        .values(
+                            status="expired",
+                            updated_at=_db_time(datetime.now(UTC)),
+                        )
+                    )
+                    connection.execute(
+                        insert(QuotaLedgerEntryModel).values(
+                            id=str(uuid.uuid4()),
+                            reservation_id=None,
+                            bucket_id=None,
+                            grant_id=row["id"],
+                            entry_type="grant_reset",
+                            amount_micro=-int(row["allocated_micro"]),
+                            reserved_delta_micro=0,
+                            consumed_delta_micro=0,
+                            idempotency_key=_bounded_idempotency_key(
+                                "grant-reset", operation_key, row["id"]
+                            ),
+                            actor_user_id=kwargs["actor_user_id"],
+                            reason=kwargs["reason"],
+                            metadata_json={"replaced_by_grant_id": grant_id},
+                            created_at=_db_time(datetime.now(UTC)),
+                        )
+                    )
+            values = {
+                "id": str(uuid.uuid4()),
+                "operation_type": operation_type,
+                "owner_type": kwargs["owner_type"],
+                "owner_id": kwargs["owner_id"],
+                "bucket_type": kwargs["bucket_type"],
+                "period_start": _db_time(kwargs["period_start"]),
+                "period_end": _db_time(kwargs["period_end"]),
+                "amount_micro": amount,
+                "grant_id": grant["grant_id"],
+                "actor_user_id": kwargs["actor_user_id"],
+                "reason": kwargs["reason"],
+                "effective_from": _db_time(kwargs["effective_from"]),
+                "expires_at": (
+                    _db_time(kwargs["expires_at"])
+                    if kwargs.get("expires_at") is not None
+                    else None
+                ),
+                "idempotency_key": operation_key,
+                "created_at": _db_time(datetime.now(UTC)),
+            }
             try:
                 with connection.begin_nested():
                     connection.execute(insert(QuotaCreditOperationModel).values(**values))
@@ -724,7 +828,9 @@ class QuotaOperationsService:
                     select(QuotaCreditOperationModel)
                     .where(QuotaCreditOperationModel.idempotency_key == operation_key)
                     .with_for_update()
-                ).mappings().one()
+                ).mappings().first()
+                if winner is None:
+                    raise
                 self._assert_credit_operation_matches(winner, operation_type, kwargs)
                 return self._credit_payload(winner)
             row = connection.execute(
@@ -745,6 +851,13 @@ class QuotaOperationsService:
             and int(row["amount_micro"]) == int(kwargs["amount_micro"])
             and row["actor_user_id"] == kwargs["actor_user_id"]
             and row["reason"] == kwargs["reason"]
+            and row["effective_from"] == _db_time(kwargs["effective_from"])
+            and row["expires_at"]
+            == (
+                _db_time(kwargs["expires_at"])
+                if kwargs.get("expires_at") is not None
+                else None
+            )
         )
         if not same:
             raise ValueError("credit operation idempotency key conflicts with existing operation")
@@ -760,6 +873,8 @@ class QuotaOperationsService:
             "amount_micro": row["amount_micro"],
             "grant_id": row["grant_id"],
             "idempotency_key": row["idempotency_key"],
+            "effective_from": _payload_value(row["effective_from"]),
+            "expires_at": _payload_value(row["expires_at"]),
             "created_at": _payload_value(row["created_at"]),
         }
 
@@ -947,6 +1062,44 @@ class QuotaOperationsService:
                 statement = statement.where(QuotaAlertModel.status == status)
             return [self._alert_payload(row) for row in connection.execute(statement).mappings()]
 
+    def update_alert(
+        self,
+        alert_id: str,
+        *,
+        status: str,
+        actor_user_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        if status not in {"acknowledged", "resolved"}:
+            raise ValueError("alert status must be acknowledged or resolved")
+        if not reason.strip():
+            raise ValueError("reason is required")
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(QuotaAlertModel)
+                .where(QuotaAlertModel.id == alert_id)
+                .with_for_update()
+            ).mappings().first()
+            if row is None:
+                raise KeyError(alert_id)
+            if row["status"] == "resolved" and status != "resolved":
+                raise ValueError("resolved alert cannot be reopened")
+            if row["status"] == status:
+                return self._alert_payload(row)
+            now = datetime.now(UTC)
+            connection.execute(
+                update(QuotaAlertModel)
+                .where(QuotaAlertModel.id == alert_id)
+                .values(
+                    status=status,
+                    resolved_at=_db_time(now) if status == "resolved" else None,
+                )
+            )
+            updated = connection.execute(
+                select(QuotaAlertModel).where(QuotaAlertModel.id == alert_id)
+            ).mappings().one()
+            return self._alert_payload(updated)
+
     def run_maintenance(self, *, now: datetime | None = None) -> dict[str, int]:
         """Refresh the previous UTC day and evaluate its anomaly alerts.
 
@@ -974,32 +1127,43 @@ class QuotaOperationsService:
                     )
                     .order_by(UsageEventModel.occurred_at)
                     .limit(max(1, min(batch_size, 100_000)))
+                    .with_for_update(skip_locked=True)
                 ).scalars()
             )
             batch_id = str(uuid.uuid4())
+            if event_ids:
+                connection.execute(
+                    update(UsageEventModel)
+                    .where(
+                        UsageEventModel.id.in_(event_ids),
+                        UsageEventModel.archived_at.is_(None),
+                    )
+                    .values(
+                        archived_at=_db_time(datetime.now(UTC)),
+                        archive_batch_id=batch_id,
+                    )
+                )
+            claimed_ids = list(
+                connection.execute(
+                    select(UsageEventModel.id).where(
+                        UsageEventModel.archive_batch_id == batch_id
+                    )
+                ).scalars()
+            )
             connection.execute(
                 insert(QuotaUsageArchiveBatchModel).values(
                     id=batch_id,
                     cutoff_at=_db_time(cutoff),
-                    event_count=len(event_ids),
+                    event_count=len(claimed_ids),
                     status="completed",
                     actor_user_id=actor_user_id,
                     created_at=_db_time(datetime.now(UTC)),
                     completed_at=_db_time(datetime.now(UTC)),
                 )
             )
-            if event_ids:
-                connection.execute(
-                    update(UsageEventModel)
-                    .where(UsageEventModel.id.in_(event_ids))
-                    .values(
-                        archived_at=_db_time(datetime.now(UTC)),
-                        archive_batch_id=batch_id,
-                    )
-                )
             return {
                 "batch_id": batch_id,
-                "archived_events": len(event_ids),
+                "archived_events": len(claimed_ids),
                 "cutoff_at": cutoff.isoformat(),
                 "deleted_events": 0,
             }
@@ -1111,4 +1275,5 @@ class QuotaOperationsService:
             "threshold_multiplier": row["threshold_multiplier"],
             "status": row["status"],
             "metadata": row["metadata_json"],
+            "resolved_at": _payload_value(row["resolved_at"]),
         }

@@ -333,6 +333,42 @@ class QuotaManagementService:
         expires_at: datetime | None = None,
         source_id: str | None = None,
     ) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            return self.create_grant_in_transaction(
+                connection,
+                owner_type=owner_type,
+                owner_id=owner_id,
+                bucket_type=bucket_type,
+                period_start=period_start,
+                period_end=period_end,
+                allocated_micro=allocated_micro,
+                source_type=source_type,
+                created_by=created_by,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                effective_from=effective_from,
+                expires_at=expires_at,
+                source_id=source_id,
+            )
+
+    def create_grant_in_transaction(
+        self,
+        connection: Any,
+        *,
+        owner_type: str,
+        owner_id: str,
+        bucket_type: str,
+        period_start: datetime,
+        period_end: datetime,
+        allocated_micro: int,
+        source_type: str,
+        created_by: str,
+        reason: str,
+        idempotency_key: str,
+        effective_from: datetime,
+        expires_at: datetime | None = None,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
         start, end = _validate_period(
             owner_type=owner_type,
             bucket_type=bucket_type,
@@ -347,8 +383,54 @@ class QuotaManagementService:
         expires = _utc(expires_at) if expires_at else None
         if expires is not None and expires <= effective:
             raise ValueError("expires_at must be after effective_from")
-        with self._engine.begin() as connection:
-            existing = connection.execute(
+        existing = connection.execute(
+            select(QuotaGrantModel)
+            .where(
+                QuotaGrantModel.owner_type == owner_type,
+                QuotaGrantModel.owner_id == owner_id,
+                QuotaGrantModel.idempotency_key == idempotency_key,
+            )
+            .with_for_update()
+        ).mappings().first()
+        if existing is not None:
+            if not self._grant_request_matches(
+                existing,
+                owner_type,
+                owner_id,
+                bucket_type,
+                start,
+                end,
+                allocated_micro,
+                source_type,
+                effective,
+                expires,
+            ):
+                raise QuotaDomainError(QuotaErrorCode.GRANT_CONFLICT, "Grant idempotency key conflicts with existing allocation")
+            return self._grant_payload(existing)
+        grant_id = str(uuid.uuid4())
+        try:
+            with connection.begin_nested():
+                connection.execute(
+                    insert(QuotaGrantModel).values(
+                        id=grant_id,
+                        owner_type=owner_type,
+                        owner_id=owner_id,
+                        bucket_type=bucket_type,
+                        period_start=_db_time(start),
+                        period_end=_db_time(end),
+                        source_type=source_type,
+                        source_id=source_id,
+                        allocated_micro=allocated_micro,
+                        effective_from=_db_time(effective),
+                        expires_at=_db_time(expires) if expires else None,
+                        status="active",
+                        reason=reason,
+                        created_by=created_by,
+                        idempotency_key=idempotency_key,
+                    )
+                )
+        except IntegrityError:
+            winner = connection.execute(
                 select(QuotaGrantModel)
                 .where(
                     QuotaGrantModel.owner_type == owner_type,
@@ -357,75 +439,41 @@ class QuotaManagementService:
                 )
                 .with_for_update()
             ).mappings().first()
-            if existing is not None:
-                if not self._grant_request_matches(existing, owner_type, owner_id, bucket_type, start, end, allocated_micro, source_type):
-                    raise QuotaDomainError(QuotaErrorCode.GRANT_CONFLICT, "Grant idempotency key conflicts with existing allocation")
-                return self._grant_payload(existing)
-            grant_id = str(uuid.uuid4())
-            try:
-                with connection.begin_nested():
-                    connection.execute(
-                        insert(QuotaGrantModel).values(
-                            id=grant_id,
-                            owner_type=owner_type,
-                            owner_id=owner_id,
-                            bucket_type=bucket_type,
-                            period_start=_db_time(start),
-                            period_end=_db_time(end),
-                            source_type=source_type,
-                            source_id=source_id,
-                            allocated_micro=allocated_micro,
-                            effective_from=_db_time(effective),
-                            expires_at=_db_time(expires) if expires else None,
-                            status="active",
-                            reason=reason,
-                            created_by=created_by,
-                            idempotency_key=idempotency_key,
-                        )
-                    )
-            except IntegrityError:
-                winner = connection.execute(
-                    select(QuotaGrantModel)
-                    .where(
-                        QuotaGrantModel.owner_type == owner_type,
-                        QuotaGrantModel.owner_id == owner_id,
-                        QuotaGrantModel.idempotency_key == idempotency_key,
-                    )
-                    .with_for_update()
-                ).mappings().first()
-                if winner is None:
-                    raise
-                if not self._grant_request_matches(
-                    winner,
-                    owner_type,
-                    owner_id,
-                    bucket_type,
-                    start,
-                    end,
-                    allocated_micro,
-                    source_type,
-                ):
-                    raise QuotaDomainError(
-                        QuotaErrorCode.GRANT_CONFLICT,
-                        "Grant idempotency key conflicts with existing allocation",
-                    )
-                return self._grant_payload(winner)
-            self._management_ledger(
-                connection,
-                grant_id=grant_id,
-                entry_type="grant",
-                amount_micro=allocated_micro,
-                # The management idempotency key is scoped by owner.  The
-                # ledger key is global, so use the generated grant identity
-                # to allow the same request key for different owners.
-                idempotency_key=f"grant:{grant_id}",
-                actor_user_id=created_by,
-                reason=reason,
-                metadata={"owner_type": owner_type, "owner_id": owner_id, "bucket_type": bucket_type},
-            )
-            row = connection.execute(
-                select(QuotaGrantModel).where(QuotaGrantModel.id == grant_id)
-            ).mappings().one()
+            if winner is None:
+                raise
+            if not self._grant_request_matches(
+                winner,
+                owner_type,
+                owner_id,
+                bucket_type,
+                start,
+                end,
+                allocated_micro,
+                source_type,
+                effective,
+                expires,
+            ):
+                raise QuotaDomainError(
+                    QuotaErrorCode.GRANT_CONFLICT,
+                    "Grant idempotency key conflicts with existing allocation",
+                )
+            return self._grant_payload(winner)
+        self._management_ledger(
+            connection,
+            grant_id=grant_id,
+            entry_type="grant",
+            amount_micro=allocated_micro,
+            # The management idempotency key is scoped by owner.  The
+            # ledger key is global, so use the generated grant identity
+            # to allow the same request key for different owners.
+            idempotency_key=f"grant:{grant_id}",
+            actor_user_id=created_by,
+            reason=reason,
+            metadata={"owner_type": owner_type, "owner_id": owner_id, "bucket_type": bucket_type},
+        )
+        row = connection.execute(
+            select(QuotaGrantModel).where(QuotaGrantModel.id == grant_id)
+        ).mappings().one()
         return self._grant_payload(row)
 
     def get_grant(self, grant_id: str) -> dict[str, Any]:
@@ -726,7 +774,18 @@ class QuotaManagementService:
         }
 
     @staticmethod
-    def _grant_request_matches(row: Any, owner_type: str, owner_id: str, bucket_type: str, start: datetime, end: datetime, allocated_micro: int, source_type: str) -> bool:
+    def _grant_request_matches(
+        row: Any,
+        owner_type: str,
+        owner_id: str,
+        bucket_type: str,
+        start: datetime,
+        end: datetime,
+        allocated_micro: int,
+        source_type: str,
+        effective_from: datetime,
+        expires_at: datetime | None,
+    ) -> bool:
         return all(
             (
                 row["owner_type"] == owner_type,
@@ -736,6 +795,8 @@ class QuotaManagementService:
                 row["period_end"] == _db_time(end),
                 int(row["allocated_micro"]) == allocated_micro,
                 row["source_type"] == source_type,
+                row["effective_from"] == _db_time(effective_from),
+                row["expires_at"] == (_db_time(expires_at) if expires_at else None),
             )
         )
 
