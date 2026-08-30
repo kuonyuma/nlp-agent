@@ -1434,9 +1434,11 @@ button { color: inherit; }
   max-height: 34%;
   flex-direction: column;
   gap: 3px;
-  overflow-y: auto;
+  margin: 0;
   padding: 8px 10px;
+  overflow-y: auto;
   border-bottom: 1px solid var(--border);
+  list-style: none;
 }
 .files-panel-file { display: flex; align-items: center; gap: 2px; border-radius: 9px; }
 .files-panel-file.active { background: color-mix(in srgb, var(--accent-soft) 55%, var(--bg)); }
