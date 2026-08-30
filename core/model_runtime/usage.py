@@ -16,6 +16,7 @@ from core.observability.context import current_telemetry_context
 
 
 UsageSource = Literal["provider", "estimated", "none"]
+UsageSemantics = Literal["final", "cumulative", "delta", "partial"]
 UsagePurpose = Literal[
     "coordinator",
     "worker",
@@ -73,6 +74,7 @@ class CanonicalTokenUsage(UsageFrozenModel):
     reasoning_output_tokens: StrictNonNegativeInt = 0
     total_tokens: StrictNonNegativeInt = 0
     source: UsageSource = "none"
+    semantics: UsageSemantics = "final"
     provider_response_id: str | None = None
 
     @model_validator(mode="after")

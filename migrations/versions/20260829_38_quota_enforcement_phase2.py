@@ -11,7 +11,7 @@ from server.quota.models import (
 )
 
 
-revision = "20260829_38_quota_enforcement_phase2"
+revision = "20260829_38"
 down_revision = "20260829_37_quota_usage_phase1"
 branch_labels = None
 depends_on = None

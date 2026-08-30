@@ -14,6 +14,7 @@ from server.quota.models import (
     PolicyBindingModel,
     PricingRuleModel,
     QuotaBucketModel,
+    QuotaConcurrencyLockModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaReservationModel,
@@ -39,6 +40,7 @@ def quota_engine():
         QuotaPolicyModel,
         PolicyBindingModel,
         QuotaBucketModel,
+        QuotaConcurrencyLockModel,
         QuotaReservationModel,
         QuotaLedgerEntryModel,
     ):
@@ -219,6 +221,42 @@ def test_profile_request_and_concurrency_limits_are_rejected_with_stable_codes(q
     assert request_error.value.problem.code is QuotaErrorCode.REQUEST_LIMIT
 
 
+def test_admission_persists_a_database_concurrency_counter(quota_engine):
+    _policy(quota_engine, concurrency=1)
+    service = QuotaService(quota_engine)
+
+    first = service.admit_turn(
+        _command(turn_id="turn-concurrency-counter"),
+        role_codes=("student",),
+        now=NOW,
+    )
+
+    assert first.allowed is True
+    with quota_engine.connect() as connection:
+        lock = connection.execute(
+            select(QuotaConcurrencyLockModel.__table__).where(
+                QuotaConcurrencyLockModel.user_id == "user-1"
+            )
+        ).mappings().one()
+    assert lock["active_units"] == 1
+
+    service.finish_turn(
+        FinishTurn(
+            reservation_id=first.reservation_id,
+            turn_id="turn-concurrency-counter",
+            idempotency_key="finish-concurrency-counter",
+        ),
+        now=NOW + timedelta(seconds=1),
+    )
+    with quota_engine.connect() as connection:
+        lock = connection.execute(
+            select(QuotaConcurrencyLockModel.__table__).where(
+                QuotaConcurrencyLockModel.user_id == "user-1"
+            )
+        ).mappings().one()
+    assert lock["active_units"] == 0
+
+
 def test_zero_override_uses_versioned_pricing_for_conservative_admission(quota_engine):
     _policy(quota_engine, daily=1_000, monthly=10_000, request=1_000)
     with quota_engine.begin() as connection:
@@ -362,6 +400,13 @@ def test_replaying_a_dispatch_failed_turn_rearms_the_same_reservation(quota_engi
     )
 
     retried = service.admit_turn(command, role_codes=("student",), now=NOW + timedelta(seconds=2))
+    service.settle_usage(
+        reservation_id=retried.reservation_id,
+        operation_id="operation-after-dispatch-retry",
+        credits_micro=20,
+        usage_status="exact",
+        now=NOW + timedelta(seconds=3),
+    )
 
     assert retried.reservation_id == first.reservation_id
     assert retried.reserved_micro == command.estimated_micro
@@ -372,5 +417,13 @@ def test_replaying_a_dispatch_failed_turn_rearms_the_same_reservation(quota_engi
                 QuotaLedgerEntryModel.entry_type == "reserve"
             )
         ).fetchall()
+        settle_entries = connection.execute(
+            select(QuotaLedgerEntryModel.__table__).where(
+                QuotaLedgerEntryModel.entry_type == "settle"
+            )
+        ).fetchall()
+        buckets = connection.execute(select(QuotaBucketModel.__table__)).mappings().all()
     assert len(reservations) == 1
     assert len(reserve_entries) == 4
+    assert len(settle_entries) == 2
+    assert all(row["consumed_micro"] == 20 for row in buckets)

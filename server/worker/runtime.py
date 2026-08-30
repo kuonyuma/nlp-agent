@@ -18,6 +18,7 @@ from gateway.turn_execution import InProcessTurnExecutor
 from server.application.turn_reliability import OutboxRelay, TurnReliabilityService
 from server.infrastructure.mysql import MySQLRuntime
 from server.worker.fencing import FencedTurnExecutor
+from server.quota.reaper import QuotaReservationReaper
 from server.sandbox.manager_rpc import create_sandbox_manager_rpc_client
 from server.sandbox.model_tools import configure_model_sandbox_service
 
@@ -108,6 +109,14 @@ async def run_worker() -> None:
             payload={"status": TurnStatus.CANCELLED.value},
         )
         await publisher.publish(event)
+        quota_service = getattr(repository, "quota_service", None)
+        if quota_service is not None and task.reservation_id is not None:
+            await asyncio.to_thread(
+                quota_service.release_reservation,
+                task.reservation_id,
+                turn_id=task.turn_id,
+                idempotency_key=f"worker-cancelled:{task.turn_id}",
+            )
 
     async def is_terminal(task) -> bool:
         turn = await asyncio.to_thread(repository.get_turn, task.turn_id)
@@ -170,6 +179,16 @@ async def run_worker() -> None:
         is_terminal=is_terminal,
         reclaim_pending=False,
     )
+    quota_reaper = None
+    if getattr(repository, "quota_service", None) is not None:
+        quota_reaper = QuotaReservationReaper(
+            repository.quota_service,
+            interval_seconds=max(
+                1.0,
+                float(gateway_config.get("quota_reap_interval_s", 30)),
+            ),
+        )
+        quota_reaper.start()
 
     async def relay_forever() -> None:
         relay = OutboxRelay(redis, stream=config.task_stream, relay_id=worker_id, authorization_channel=config.authorization_channel)
@@ -186,6 +205,8 @@ async def run_worker() -> None:
     finally:
         relay_task.cancel()
         await asyncio.gather(relay_task, return_exceptions=True)
+        if quota_reaper is not None:
+            await quota_reaper.stop()
         await worker.close()
         await engine.close()
         await sandbox_model_service.close()

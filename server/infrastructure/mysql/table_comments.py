@@ -29,6 +29,7 @@ TABLE_COMMENTS: dict[str, str] = {
     "nlp_quota_policies": "开发者配置的版本化额度策略及请求、周期、并发和模型限制。",
     "nlp_quota_policy_bindings": "额度策略与默认、角色、工作区或用户主体的绑定。",
     "nlp_quota_buckets": "用户或工作区每日/月度额度的原子消耗与预占计数器。",
+    "nlp_quota_concurrency_locks": "按用户维护的并发租约原子计数器，跨进程保护额度并发限制。",
     "nlp_quota_reservations": "Turn 级额度预占、结算状态及并发租约。",
     "nlp_quota_ledger_entries": "额度预占、释放和实际结算的追加式会计流水。",
     "nlp_ws_tickets": "绑定登录会话的一次性 WebSocket 连接票据。",

@@ -1,6 +1,17 @@
 from sqlalchemy import create_engine
 import pytest
 
+from server.infrastructure.mysql.base import Base
+from server.quota.models import (
+    PolicyBindingModel,
+    QuotaBucketModel,
+    QuotaConcurrencyLockModel,
+    QuotaLedgerEntryModel,
+    QuotaPolicyModel,
+    QuotaReservationModel,
+)
+from server.quota.service import QuotaService
+
 
 def test_usage_reporter_bootstrap_configures_and_cleans_up(monkeypatch):
     from server.quota import bootstrap
@@ -26,3 +37,25 @@ def test_required_usage_reporter_rejects_missing_database_configuration():
 
     with pytest.raises(bootstrap.UsageReporterConfigurationError, match="required"):
         bootstrap.configure_usage_reporter("", required=True)
+
+
+def test_quota_schema_verification_probes_counter_primary_key():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            QuotaPolicyModel.__table__,
+            PolicyBindingModel.__table__,
+            QuotaBucketModel.__table__,
+            QuotaConcurrencyLockModel.__table__,
+            QuotaReservationModel.__table__,
+            QuotaLedgerEntryModel.__table__,
+        ],
+    )
+
+    QuotaService(engine).verify_schema()
+
+    with engine.connect() as connection:
+        assert connection.execute(
+            QuotaConcurrencyLockModel.__table__.select()
+        ).first() is None

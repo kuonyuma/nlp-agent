@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from sqlalchemy import Engine, and_, create_engine, insert, select, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
@@ -28,6 +29,7 @@ from server.quota.models import (
     PolicyBindingModel,
     PricingRuleModel,
     QuotaBucketModel,
+    QuotaConcurrencyLockModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaReservationModel,
@@ -181,22 +183,6 @@ class QuotaService:
             )
 
         self._expire_stale_in_transaction(connection, at)
-        if policy.concurrency_limit is not None:
-            active = connection.execute(
-                select(QuotaReservationModel.concurrency_units).where(
-                    QuotaReservationModel.user_id == command.user_id,
-                    QuotaReservationModel.status.in_(_ACTIVE_RESERVATION_STATUSES),
-                    QuotaReservationModel.lease_expires_at > _db_time(at),
-                )
-            ).scalars()
-            active_units = sum(int(units) for units in active)
-            if active_units + 1 > policy.concurrency_limit:
-                raise self._rejection(
-                    QuotaErrorCode.CONCURRENCY_LIMIT,
-                    "The user has reached the concurrent Turn limit",
-                    remaining_micro=0,
-                    retryable=True,
-                )
 
         buckets: list[dict[str, Any]] = []
         for bucket_type, start, end, limit in self._periods(policy, at):
@@ -225,6 +211,14 @@ class QuotaService:
                     retryable=True,
                 )
             buckets.append(bucket)
+
+        if policy.concurrency_limit is not None:
+            self._reserve_concurrency(
+                connection,
+                user_id=command.user_id,
+                concurrency_limit=policy.concurrency_limit,
+                now=at,
+            )
 
         reservation_id = self.reservation_id_for_turn(command.turn_id)
         db_now = _db_time(at)
@@ -415,6 +409,21 @@ class QuotaService:
         if existing_rows:
             metadata = existing_rows[0]["metadata_json"]
             if (
+                metadata.get("usage_status") in {"pending", "unavailable"}
+                and usage_status in {"exact", "estimated"}
+            ):
+                return self.reconcile_usage_in_transaction(
+                    connection,
+                    reservation_id=reservation_id,
+                    operation_id=operation_id,
+                    credits_micro=credits_micro,
+                    usage_status=usage_status,
+                    usage_source=usage_source,
+                    pricing_key=pricing_key,
+                    pricing_version=pricing_version,
+                    now=now,
+                )
+            if (
                 int(metadata.get("credits_micro", -1)) != credits_micro
                 or metadata.get("usage_status") != usage_status
             ):
@@ -434,12 +443,11 @@ class QuotaService:
                 pricing_key=metadata.get("pricing_key", pricing_key),
                 pricing_version=metadata.get("pricing_version", pricing_version),
             )
-        if reservation["status"] in {"released", "expired", "settled"}:
-            raise QuotaDomainError(
-                QuotaErrorCode.RESERVATION_NOT_ACTIVE,
-                f"Reservation is already terminal: {reservation['status']}",
-            )
-
+        terminal_reservation = reservation["status"] in {
+            "released",
+            "expired",
+            "settled",
+        }
         metadata_base = {
             "operation_id": operation_id,
             "credits_micro": credits_micro,
@@ -462,11 +470,12 @@ class QuotaService:
                 metadata={**metadata_base, "over_limit": False},
                 created_at=db_now,
             )
-            connection.execute(
-                update(QuotaReservationModel)
-                .where(QuotaReservationModel.id == reservation_id)
-                .values(status="settling", updated_at=db_now)
-            )
+            if not terminal_reservation:
+                connection.execute(
+                    update(QuotaReservationModel)
+                    .where(QuotaReservationModel.id == reservation_id)
+                    .values(status="settling", updated_at=db_now)
+                )
             return UsageRecordResult(
                 operation_id=operation_id,
                 usage_source=usage_source if usage_source in {"provider", "estimated", "none"} else "provider",
@@ -530,7 +539,7 @@ class QuotaService:
             .values(
                 reserved_micro=max(0, int(reservation["reserved_micro"]) - release_amount),
                 settled_micro=int(reservation["settled_micro"]) + credits_micro,
-                status="settling",
+                status="settled" if terminal_reservation else "settling",
                 over_limit=over_limit or bool(reservation["over_limit"]),
                 updated_at=db_now,
             )
@@ -538,6 +547,205 @@ class QuotaService:
         return UsageRecordResult(
             operation_id=operation_id,
             usage_source=usage_source if usage_source in {"provider", "estimated", "none"} else "provider",
+            credits_micro=credits_micro,
+            usage_status=usage_status,
+            over_limit=over_limit,
+            pricing_key=pricing_key,
+            pricing_version=pricing_version,
+        )
+
+    def reconcile_usage(
+        self,
+        *,
+        reservation_id: str,
+        operation_id: str,
+        credits_micro: int,
+        usage_status: UsageStatus,
+        usage_source: str = "provider",
+        pricing_key: str | None = None,
+        pricing_version: str | None = None,
+        now: datetime | None = None,
+    ) -> UsageRecordResult:
+        """Replace a pending/unavailable fact with priced usage.
+
+        Reconciliation is allowed after Turn finalization.  The original
+        reservation ledger may already have released its hold, so this method
+        writes explicit ``reconcile`` entries against the original buckets and
+        charges the actual usage exactly once by operation id.
+        """
+        with _GLOBAL_QUOTA_LOCK:
+            with self._engine.begin() as connection:
+                return self.reconcile_usage_in_transaction(
+                    connection,
+                    reservation_id=reservation_id,
+                    operation_id=operation_id,
+                    credits_micro=credits_micro,
+                    usage_status=usage_status,
+                    usage_source=usage_source,
+                    pricing_key=pricing_key,
+                    pricing_version=pricing_version,
+                    now=now,
+                )
+
+    def reconcile_usage_in_transaction(
+        self,
+        connection: Connection,
+        *,
+        reservation_id: str,
+        operation_id: str,
+        credits_micro: int,
+        usage_status: UsageStatus,
+        usage_source: str = "provider",
+        pricing_key: str | None = None,
+        pricing_version: str | None = None,
+        now: datetime | None = None,
+    ) -> UsageRecordResult:
+        if isinstance(credits_micro, bool) or not isinstance(credits_micro, int) or credits_micro < 0:
+            raise QuotaDomainError(
+                QuotaErrorCode.INVALID_USAGE,
+                "credits_micro must be a non-negative integer",
+            )
+        if usage_status not in {"exact", "estimated"}:
+            raise QuotaDomainError(
+                QuotaErrorCode.INVALID_USAGE,
+                "reconciliation requires exact or estimated usage",
+            )
+        db_now = _db_time(_utc(now))
+        prefix = f"reconcile:{operation_id}:"
+        reservation = connection.execute(
+            select(QuotaReservationModel)
+            .where(QuotaReservationModel.id == reservation_id)
+            .with_for_update()
+        ).mappings().first()
+        if reservation is None:
+            raise QuotaDomainError(
+                QuotaErrorCode.RESERVATION_NOT_ACTIVE,
+                f"Reservation {reservation_id!r} does not exist",
+            )
+        existing_rows = connection.execute(
+            select(QuotaLedgerEntryModel)
+            .where(
+                QuotaLedgerEntryModel.reservation_id == reservation_id,
+                QuotaLedgerEntryModel.entry_type == "reconcile",
+                QuotaLedgerEntryModel.idempotency_key.like(f"{prefix}%"),
+            )
+        ).mappings().all()
+        if existing_rows:
+            metadata = existing_rows[0]["metadata_json"]
+            if (
+                int(metadata.get("credits_micro", -1)) != credits_micro
+                or metadata.get("usage_status") != usage_status
+            ):
+                raise QuotaDomainError(
+                    QuotaErrorCode.SETTLEMENT_CONFLICT,
+                    "Usage reconciliation has different usage facts",
+                )
+            return UsageRecordResult(
+                operation_id=operation_id,
+                usage_source=metadata.get("usage_source", usage_source),
+                credits_micro=credits_micro,
+                usage_status=usage_status,
+                over_limit=any(
+                    bool(row["metadata_json"].get("over_limit", False))
+                    for row in existing_rows
+                ),
+                pricing_key=metadata.get("pricing_key", pricing_key),
+                pricing_version=metadata.get("pricing_version", pricing_version),
+            )
+        pending = connection.execute(
+            select(QuotaLedgerEntryModel)
+            .where(
+                QuotaLedgerEntryModel.reservation_id == reservation_id,
+                QuotaLedgerEntryModel.entry_type == "settle",
+                QuotaLedgerEntryModel.idempotency_key.like(
+                    f"settle:{operation_id}:%"
+                ),
+            )
+        ).mappings().first()
+        if pending is None or pending["metadata_json"].get("usage_status") not in {
+            "pending",
+            "unavailable",
+        }:
+            raise QuotaDomainError(
+                QuotaErrorCode.SETTLEMENT_CONFLICT,
+                "Only pending or unavailable usage can be reconciled",
+            )
+
+        metadata_base = {
+            "operation_id": operation_id,
+            "credits_micro": credits_micro,
+            "usage_status": usage_status,
+            "usage_source": usage_source,
+            "pricing_key": pricing_key,
+            "pricing_version": pricing_version,
+            "reconciled_from": pending["metadata_json"].get("usage_status"),
+        }
+        bucket_rows = self._reservation_buckets(connection, reservation_id)
+        release_amount = min(int(reservation["reserved_micro"]), credits_micro)
+        over_limit = False
+        if not bucket_rows:
+            self._insert_ledger(
+                connection,
+                reservation_id=reservation_id,
+                bucket_id=None,
+                entry_type="reconcile",
+                amount_micro=credits_micro,
+                reserved_delta_micro=-release_amount,
+                consumed_delta_micro=credits_micro,
+                idempotency_key=f"{prefix}none",
+                reason="usage_reconcile",
+                metadata={**metadata_base, "over_limit": False},
+                created_at=db_now,
+            )
+        for bucket in bucket_rows:
+            bucket_release = min(int(bucket["reserved_micro"]), release_amount)
+            new_consumed = int(bucket["consumed_micro"]) + credits_micro
+            limit = bucket["limit_micro"]
+            bucket_over_limit = limit is not None and new_consumed > int(limit)
+            over_limit = over_limit or bucket_over_limit
+            self._insert_ledger(
+                connection,
+                reservation_id=reservation_id,
+                bucket_id=bucket["id"],
+                entry_type="reconcile",
+                amount_micro=credits_micro,
+                reserved_delta_micro=-bucket_release,
+                consumed_delta_micro=credits_micro,
+                idempotency_key=f"{prefix}{bucket['id']}",
+                reason="usage_reconcile",
+                metadata={**metadata_base, "over_limit": bucket_over_limit},
+                created_at=db_now,
+            )
+            connection.execute(
+                update(QuotaBucketModel)
+                .where(QuotaBucketModel.id == bucket["id"])
+                .values(
+                    consumed_micro=new_consumed,
+                    reserved_micro=max(0, int(bucket["reserved_micro"]) - bucket_release),
+                    over_limit=bucket_over_limit,
+                    version=int(bucket["version"]) + 1,
+                    updated_at=db_now,
+                )
+            )
+        terminal_reservation = reservation["status"] in {
+            "released",
+            "expired",
+            "settled",
+        }
+        connection.execute(
+            update(QuotaReservationModel)
+            .where(QuotaReservationModel.id == reservation_id)
+            .values(
+                reserved_micro=max(0, int(reservation["reserved_micro"]) - release_amount),
+                settled_micro=int(reservation["settled_micro"]) + credits_micro,
+                status="settled" if terminal_reservation else "settling",
+                over_limit=over_limit or bool(reservation["over_limit"]),
+                updated_at=db_now,
+            )
+        )
+        return UsageRecordResult(
+            operation_id=operation_id,
+            usage_source=usage_source,
             credits_micro=credits_micro,
             usage_status=usage_status,
             over_limit=over_limit,
@@ -684,6 +892,13 @@ class QuotaService:
                     updated_at=db_now,
                 )
             )
+        if reservation["status"] in _ACTIVE_RESERVATION_STATUSES:
+            self._release_concurrency(
+                connection,
+                user_id=reservation["user_id"],
+                concurrency_units=int(reservation["concurrency_units"]),
+                now=_utc(now),
+            )
         connection.execute(
             update(QuotaReservationModel)
             .where(QuotaReservationModel.id == command.reservation_id)
@@ -829,10 +1044,12 @@ class QuotaService:
                 QuotaPolicyModel,
                 PolicyBindingModel,
                 QuotaBucketModel,
+                QuotaConcurrencyLockModel,
                 QuotaReservationModel,
                 QuotaLedgerEntryModel,
             ):
-                connection.execute(select(model.id).limit(1)).first()
+                primary_key = next(iter(model.__table__.primary_key.columns))
+                connection.execute(select(primary_key).limit(1)).first()
 
     @staticmethod
     def _find_existing_reservation(
@@ -1071,7 +1288,7 @@ class QuotaService:
     @staticmethod
     def _reservation_buckets(connection: Connection, reservation_id: str) -> list[dict[str, Any]]:
         bucket_ids = connection.execute(
-            select(QuotaLedgerEntryModel.bucket_id)
+            select(QuotaLedgerEntryModel.bucket_id).distinct()
             .where(
                 QuotaLedgerEntryModel.reservation_id == reservation_id,
                 QuotaLedgerEntryModel.entry_type == "reserve",
@@ -1140,6 +1357,116 @@ class QuotaService:
                 now=at,
                 terminal_status="expired",
             )
+
+    @staticmethod
+    def _get_or_create_concurrency_lock(
+        connection: Connection,
+        *,
+        user_id: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Create and lock the per-user counter before changing it.
+
+        The row is deliberately separate from Reservations: counting active
+        Reservations after a normal SELECT is not an atomic admission check
+        when multiple Web/Worker processes share MySQL.
+        """
+        row = connection.execute(
+            select(QuotaConcurrencyLockModel)
+            .where(QuotaConcurrencyLockModel.user_id == user_id)
+            .with_for_update()
+        ).mappings().first()
+        if row is None:
+            values = {
+                "user_id": user_id,
+                "active_units": 0,
+                "version": 1,
+                "updated_at": _db_time(now),
+            }
+            if connection.dialect.name == "mysql":
+                connection.execute(
+                    mysql_insert(QuotaConcurrencyLockModel.__table__)
+                    .values(**values)
+                    .on_duplicate_key_update(
+                        user_id=QuotaConcurrencyLockModel.__table__.c.user_id
+                    )
+                )
+            elif connection.dialect.name == "sqlite":
+                connection.execute(
+                    insert(QuotaConcurrencyLockModel)
+                    .prefix_with("OR IGNORE")
+                    .values(**values)
+                )
+            else:
+                try:
+                    with connection.begin_nested():
+                        connection.execute(insert(QuotaConcurrencyLockModel).values(**values))
+                except IntegrityError:
+                    pass
+            row = connection.execute(
+                select(QuotaConcurrencyLockModel)
+                .where(QuotaConcurrencyLockModel.user_id == user_id)
+                .with_for_update()
+            ).mappings().one()
+        return dict(row)
+
+    @classmethod
+    def _reserve_concurrency(
+        cls,
+        connection: Connection,
+        *,
+        user_id: str,
+        concurrency_limit: int,
+        now: datetime,
+    ) -> None:
+        cls._get_or_create_concurrency_lock(connection, user_id=user_id, now=now)
+        result = connection.execute(
+            update(QuotaConcurrencyLockModel)
+            .where(
+                QuotaConcurrencyLockModel.user_id == user_id,
+                QuotaConcurrencyLockModel.active_units + 1 <= concurrency_limit,
+            )
+            .values(
+                active_units=QuotaConcurrencyLockModel.active_units + 1,
+                version=QuotaConcurrencyLockModel.version + 1,
+                updated_at=_db_time(now),
+            )
+        )
+        if result.rowcount != 1:
+            raise cls._rejection(
+                QuotaErrorCode.CONCURRENCY_LIMIT,
+                "The user has reached the concurrent Turn limit",
+                remaining_micro=0,
+                retryable=True,
+            )
+
+    @classmethod
+    def _release_concurrency(
+        cls,
+        connection: Connection,
+        *,
+        user_id: str,
+        concurrency_units: int,
+        now: datetime,
+    ) -> None:
+        if concurrency_units <= 0:
+            return
+        row = connection.execute(
+            select(QuotaConcurrencyLockModel)
+            .where(QuotaConcurrencyLockModel.user_id == user_id)
+            .with_for_update()
+        ).mappings().first()
+        if row is None:
+            return
+        connection.execute(
+            update(QuotaConcurrencyLockModel)
+            .where(QuotaConcurrencyLockModel.user_id == user_id)
+            .values(
+                active_units=max(0, int(row["active_units"]) - concurrency_units),
+                version=int(row["version"]) + 1,
+                updated_at=_db_time(now),
+            )
+        )
 
     @staticmethod
     def _rejection(

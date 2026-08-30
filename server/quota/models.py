@@ -305,6 +305,29 @@ class QuotaBucketModel(Base):
     )
 
 
+class QuotaConcurrencyLockModel(Base):
+    """Per-user counter used for cross-process atomic concurrency admission."""
+
+    __tablename__ = "nlp_quota_concurrency_locks"
+    __table_args__ = (
+        Index(
+            "ix_nlp_quota_concurrency_locks_updated",
+            "updated_at",
+        ),
+    )
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    active_units: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False, default=0
+    )
+    version: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False, default=1
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+
+
 class QuotaReservationModel(Base):
     """One idempotent Turn reservation and its concurrency lease."""
 
@@ -412,5 +435,6 @@ class QuotaLedgerEntryModel(Base):
 QuotaPolicyModel.__table__.comment = TABLE_COMMENTS["nlp_quota_policies"]
 PolicyBindingModel.__table__.comment = TABLE_COMMENTS["nlp_quota_policy_bindings"]
 QuotaBucketModel.__table__.comment = TABLE_COMMENTS["nlp_quota_buckets"]
+QuotaConcurrencyLockModel.__table__.comment = TABLE_COMMENTS["nlp_quota_concurrency_locks"]
 QuotaReservationModel.__table__.comment = TABLE_COMMENTS["nlp_quota_reservations"]
 QuotaLedgerEntryModel.__table__.comment = TABLE_COMMENTS["nlp_quota_ledger_entries"]

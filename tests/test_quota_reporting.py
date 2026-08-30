@@ -12,11 +12,12 @@ from core.model_runtime.usage import (
     ModelInvocation,
     UsageAttributionContext,
 )
-from server.quota.contracts import AdmitTurn
+from server.quota.contracts import AdmitTurn, FinishTurn
 from server.quota.models import (
     PolicyBindingModel,
     PricingRuleModel,
     QuotaBucketModel,
+    QuotaConcurrencyLockModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaReservationModel,
@@ -81,6 +82,7 @@ def quota_engine():
         QuotaPolicyModel,
         PolicyBindingModel,
         QuotaBucketModel,
+        QuotaConcurrencyLockModel,
         QuotaReservationModel,
         QuotaLedgerEntryModel,
     ):
@@ -270,6 +272,106 @@ async def test_durable_reporter_settles_provider_usage_once(quota_engine):
     assert len(settle_rows) == 2
     assert bucket["consumed_micro"] == 80
     assert bucket["reserved_micro"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_usage_can_be_reconciled_after_turn_reservation_is_closed(quota_engine):
+    policy_id = str(uuid4())
+    with quota_engine.begin() as connection:
+        connection.execute(
+            insert(QuotaPolicyModel).values(
+                id=policy_id,
+                code="student-default",
+                version="2026-08-29.1",
+                name="Student default",
+                status="active",
+                request_limit_micro=100,
+                daily_limit_micro=1_000,
+                monthly_limit_micro=10_000,
+                concurrency_limit=2,
+                max_overdraft_micro=0,
+                allowed_model_profiles=["profile-a"],
+                unlimited=False,
+                effective_from=datetime(2026, 1, 1),
+                effective_until=None,
+                created_by="developer-1",
+            )
+        )
+        connection.execute(
+            insert(PolicyBindingModel).values(
+                id=str(uuid4()),
+                subject_type="role",
+                subject_id="student",
+                policy_id=policy_id,
+                priority=1,
+                status="active",
+                effective_from=datetime(2026, 1, 1),
+                effective_until=None,
+            )
+        )
+    service = QuotaService(quota_engine)
+    admitted = service.admit_turn(
+        AdmitTurn(
+            request_id="req-pending",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            turn_id="turn-pending",
+            model_profile="profile-a",
+            model_role="coordinator",
+            estimated_input_tokens=20,
+            estimated_output_tokens=40,
+            estimated_micro=60,
+            idempotency_key="turn-pending",
+        ),
+        role_codes=("student",),
+        now=datetime(2026, 8, 29, 8, tzinfo=timezone.utc),
+    )
+    reporter = DurableModelUsageReporter(quota_engine, quota_service=service)
+    invocation = _invocation().model_copy(
+        update={
+            "operation_id": str(uuid4()),
+            "attribution": _invocation().attribution.model_copy(
+                update={"reservation_id": admitted.reservation_id}
+            ),
+        }
+    )
+    usage = CanonicalTokenUsage(
+        input_tokens=20,
+        output_tokens=5,
+        total_tokens=25,
+        source="provider",
+    )
+
+    service.finish_turn(
+        FinishTurn(
+            reservation_id=admitted.reservation_id,
+            turn_id="turn-pending",
+            idempotency_key="turn-finished-before-reconcile",
+        ),
+        now=datetime(2026, 8, 29, 8, 2, tzinfo=timezone.utc),
+    )
+    await reporter.report(invocation, usage, _outcome())
+    _insert_pricing_rule(quota_engine)
+
+    await reporter.report(invocation, usage, _outcome())
+    await reporter.report(invocation, usage, _outcome())
+
+    with quota_engine.connect() as connection:
+        event = connection.execute(select(UsageEventModel.__table__)).mappings().one()
+        bucket = connection.execute(
+            select(QuotaBucketModel.__table__).where(
+                QuotaBucketModel.bucket_type == "daily"
+            )
+        ).mappings().one()
+        reconciliations = connection.execute(
+            select(QuotaLedgerEntryModel.__table__).where(
+                QuotaLedgerEntryModel.entry_type == "reconcile"
+            )
+        ).fetchall()
+    assert event["usage_status"] == "exact"
+    assert event["credits_micro"] == 80
+    assert bucket["consumed_micro"] == 80
+    assert len(reconciliations) == 2
 
 
 @pytest.mark.asyncio

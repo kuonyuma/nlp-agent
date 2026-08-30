@@ -54,6 +54,7 @@ from server.application.turn_reliability import TurnReliabilityService
 from server.infrastructure.mysql import MySQLRuntime
 from server.quota.contracts import AdmitTurn, QuotaProblem
 from server.quota.errors import QuotaErrorCode, QuotaRejectedError
+from server.quota.reaper import QuotaReservationReaper
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_UPLOADS_ROOT = _PROJECT_ROOT / ".data" / "uploads"
@@ -136,6 +137,7 @@ class BackendGateway:
             )
         else:
             raise RuntimeError("runtime persistence must be mysql; SQLite is migration-CLI only")
+        self._quota_rollout = settings.quota_rollout
         self.quota_service = getattr(self.repository, "quota_service", None)
         self.sessions = sessions
         self.events = GatewayEventBroker()
@@ -210,8 +212,13 @@ class BackendGateway:
                 else gateway_config.get("retention_cleanup_interval_s", 3_600)
             ),
         )
+        self.quota_reap_interval_s = max(
+            1.0,
+            float(gateway_config.get("quota_reap_interval_s", 30)),
+        )
         self._maintenance_stop = asyncio.Event()
         self._maintenance_task: asyncio.Task[None] | None = None
+        self._quota_reaper: QuotaReservationReaper | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._started = False
         self._accepting = False
@@ -247,6 +254,12 @@ class BackendGateway:
                 self._event_maintenance_loop(),
                 name="gateway-event-retention",
             )
+            if self.quota_service is not None:
+                self._quota_reaper = QuotaReservationReaper(
+                    self.quota_service,
+                    interval_seconds=self.quota_reap_interval_s,
+                )
+                self._quota_reaper.start()
             self._started = True
             self._accepting = True
 
@@ -450,7 +463,9 @@ class BackendGateway:
         turn_id = str(uuid.uuid4())
         quota_admission = None
         reservation_id = None
-        if self.quota_service is not None:
+        if self.quota_service is not None and self._quota_rollout.enabled_for(
+            context.user_id, context.workspace_id
+        ):
             from core.model_runtime.factory import get_global_model_factory
 
             factory = get_global_model_factory()
@@ -1047,6 +1062,9 @@ class BackendGateway:
             if self._maintenance_task is not None:
                 await asyncio.gather(self._maintenance_task, return_exceptions=True)
                 self._maintenance_task = None
+            if self._quota_reaper is not None:
+                await self._quota_reaper.stop()
+                self._quota_reaper = None
             if self._event_bridge is not None:
                 await self._event_bridge.close()
             await self.dispatcher.close(

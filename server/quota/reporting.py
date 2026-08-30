@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Engine, insert, select
+from sqlalchemy import Engine, insert, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import create_engine
@@ -83,31 +83,106 @@ class DurableModelUsageReporter(ModelUsageReporter):
         usage_values = self._values(invocation, usage, outcome, payload)
         try:
             with self._engine.begin() as connection:
-                existing = self._existing_payload(connection, invocation.operation_id)
+                existing = self._existing_event(connection, invocation.operation_id)
                 if existing is not None:
-                    self._assert_replay(existing, payload, invocation.operation_id)
+                    existing_payload = existing["raw_usage_json"]
+                    current_status = existing["usage_status"]
+                    next_status = usage_values["usage_status"]
+                    if existing_payload == payload and not (
+                        current_status in {"pending", "unavailable"}
+                        and next_status in {"exact", "estimated"}
+                    ):
+                        if (
+                            self._quota_service is not None
+                            and existing["reservation_id"]
+                        ):
+                            self._settle_in_transaction(
+                                connection,
+                                reservation_id=existing["reservation_id"],
+                                invocation=invocation,
+                                usage_values=usage_values,
+                            )
+                    elif (
+                        current_status in {"pending", "unavailable"}
+                        and next_status in {"exact", "estimated"}
+                    ):
+                        reservation_id = (
+                            existing["reservation_id"]
+                            or invocation.attribution.reservation_id
+                        )
+                        if self._quota_service is not None and reservation_id:
+                            self._quota_service.reconcile_usage_in_transaction(
+                                connection,
+                                reservation_id=reservation_id,
+                                operation_id=invocation.operation_id,
+                                credits_micro=usage_values["credits_micro"] or 0,
+                                usage_status=next_status,
+                                usage_source=usage.source,
+                                pricing_key=usage_values["pricing_key"],
+                                pricing_version=usage_values["pricing_version"],
+                                now=_utc(outcome.completed_at),
+                            )
+                        mutable_values = {
+                            key: value
+                            for key, value in usage_values.items()
+                            if key
+                            not in {
+                                "id",
+                                "operation_id",
+                                "dedupe_key",
+                                "idempotency_key",
+                                "created_at",
+                            }
+                        }
+                        connection.execute(
+                            update(UsageEventModel)
+                            .where(
+                                UsageEventModel.operation_id
+                                == invocation.operation_id
+                            )
+                            .values(**mutable_values)
+                        )
+                    else:
+                        self._assert_replay(
+                            existing_payload, payload, invocation.operation_id
+                        )
                 else:
                     connection.execute(insert(UsageEventModel).values(**usage_values))
+                    if self._quota_service is not None and invocation.attribution.reservation_id:
+                        self._settle_in_transaction(
+                            connection,
+                            reservation_id=invocation.attribution.reservation_id,
+                            invocation=invocation,
+                            usage_values=usage_values,
+                        )
         except IntegrityError:
             # A concurrent reporter may win the unique operation_id insert.
-            # Re-read after its transaction completes and apply the same
-            # exact-replay/conflict rule.
+            # Re-run against the committed winner so a pending -> exact
+            # report can take the normal reconciliation path as well.
             with self._engine.connect() as connection:
-                existing = self._existing_payload(connection, invocation.operation_id)
+                existing = self._existing_event(connection, invocation.operation_id)
             if existing is None:
                 raise
-            self._assert_replay(existing, payload, invocation.operation_id)
-        if self._quota_service is not None and invocation.attribution.reservation_id:
-            self._quota_service.settle_usage(
-                reservation_id=invocation.attribution.reservation_id,
-                operation_id=invocation.operation_id,
-                credits_micro=usage_values["credits_micro"] or 0,
-                usage_status=usage_values["usage_status"],
-                usage_source=usage.source,
-                pricing_key=usage_values["pricing_key"],
-                pricing_version=usage_values["pricing_version"],
-                now=_utc(outcome.completed_at),
-            )
+            return self._report_sync(invocation, usage, outcome)
+
+    def _settle_in_transaction(
+        self,
+        connection: Connection,
+        *,
+        reservation_id: str,
+        invocation: ModelInvocation,
+        usage_values: dict[str, Any],
+    ) -> None:
+        self._quota_service.settle_usage_in_transaction(
+            connection,
+            reservation_id=reservation_id,
+            operation_id=invocation.operation_id,
+            credits_micro=usage_values["credits_micro"] or 0,
+            usage_status=usage_values["usage_status"],
+            usage_source=usage_values["usage_source"],
+            pricing_key=usage_values["pricing_key"],
+            pricing_version=usage_values["pricing_version"],
+        )
 
     def _values(
         self,
@@ -172,6 +247,11 @@ class DurableModelUsageReporter(ModelUsageReporter):
     ) -> tuple[str | None, int | None, str]:
         if usage.source == "none":
             return None, None, "unavailable"
+        if usage.semantics in {"cumulative", "delta", "partial"} or outcome.status in {
+            "cancelled",
+            "interrupted",
+        }:
+            return None, None, "pending"
         with self._engine.connect() as connection:
             catalog = PricingCatalog(self._pricing_rules(connection, invocation))
         try:
@@ -235,14 +315,14 @@ class DurableModelUsageReporter(ModelUsageReporter):
         ]
 
     @staticmethod
-    def _existing_payload(
+    def _existing_event(
         connection: Connection, operation_id: str
     ) -> dict[str, Any] | None:
         return connection.execute(
-            select(UsageEventModel.raw_usage_json).where(
+            select(UsageEventModel.__table__).where(
                 UsageEventModel.operation_id == operation_id
             )
-        ).scalar_one_or_none()
+        ).mappings().first()
 
     @staticmethod
     def _assert_replay(
