@@ -11,6 +11,7 @@ on each turn.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 UNSELECTED_TOPIC = "未选择主题"
@@ -18,6 +19,14 @@ UNRECOGNIZED_TOPIC = "未识别主题"
 
 LEVEL_LABELS = {"beginner": "入门", "intermediate": "进阶", "advanced": "深入"}
 MODE_LABELS = {"explain": "讲解", "socratic": "引导", "practice": "练习", "review": "复习"}
+ROLE_LABELS = {
+    "guest": "游客",
+    "student": "学生",
+    "teacher": "教师",
+    "developer": "开发者",
+    "admin": "管理员",
+}
+WEEKDAY_LABELS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
 _DEFAULT_LEVEL = "beginner"
 _DEFAULT_MODE = "explain"
 
@@ -84,12 +93,30 @@ def _average_score(score_sum: int, count: int) -> float | None:
     return round(score_sum / count, 2) if count else None
 
 
+def _role_codes(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return sorted({item.strip() for item in value.split(",") if item.strip()})
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return sorted({str(item).strip() for item in value if str(item).strip()})
+    return []
+
+
+def _time_distribution(counter: Counter, total: int, *, labels: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+    result = []
+    for key in sorted(counter):
+        label = labels[key] if labels is not None and 0 <= key < len(labels) else f"{key:02d}:00"
+        result.append({"hour" if labels is None else "weekday": key, "label": label, "count": counter[key], "percentage": _percent(counter[key], total)})
+    return result
+
+
 def build_analytics(
     question_rows: list[dict[str, Any]],
     evidence_rows: list[dict[str, Any]],
     criterion_rows: list[dict[str, Any]],
     guided_rows: list[dict[str, Any]],
     catalog: dict[str, Any],
+    *,
+    period_days: int | None = None,
 ) -> dict[str, Any]:
     """Aggregate structured learning rows into the teacher overview payload.
 
@@ -111,8 +138,12 @@ def build_analytics(
     difficulty_counter: Counter = Counter()
     mode_counter: Counter = Counter()
     daily_counter: Counter = Counter()
+    hourly_counter: Counter = Counter()
+    weekday_counter: Counter = Counter()
     question_by_topic: Counter = Counter()
     error_by_topic: Counter = Counter()
+    student_stats: dict[str, dict[str, Any]] = {}
+    student_topics: dict[str, Counter] = defaultdict(Counter)
     for row in question_rows:
         topic_id = row.get("topic_id")
         topic_counter[_topic_name(topic_id, topic_names)] += 1
@@ -121,10 +152,42 @@ def build_analytics(
         day = row.get("day")
         if day:
             daily_counter[str(day)] += 1
+        hour = row.get("hour")
+        if isinstance(hour, int) and 0 <= hour <= 23:
+            hourly_counter[hour] += 1
+        weekday = row.get("weekday")
+        if isinstance(weekday, int) and 0 <= weekday <= 6:
+            weekday_counter[weekday] += 1
         if topic_id:
             question_by_topic[str(topic_id)] += 1
             if row.get("has_error"):
                 error_by_topic[str(topic_id)] += 1
+        user_id = row.get("user_id")
+        if user_id:
+            key = str(user_id)
+            stat = student_stats.setdefault(
+                key,
+                {
+                    "user_id": key,
+                    "display_name": str(row.get("display_name") or key),
+                    "username": str(row["username"]) if row.get("username") else None,
+                    "role_codes": [],
+                    "questions": 0,
+                    "sessions": set(),
+                    "active_days": set(),
+                    "error_questions": 0,
+                    "last_active": None,
+                },
+            )
+            stat["questions"] += 1
+            stat["sessions"].add(str(row["session_id"])) if row.get("session_id") else None
+            stat["active_days"].add(str(day)) if day else None
+            stat["error_questions"] += 1 if row.get("has_error") else 0
+            roles = _role_codes(row.get("role_codes", row.get("roles")))
+            stat["role_codes"] = sorted(set(stat["role_codes"]) | set(roles))
+            if day and (stat["last_active"] is None or str(day) > stat["last_active"]):
+                stat["last_active"] = str(day)
+            student_topics[key][_topic_name(topic_id, topic_names)] += 1
 
     # --- practice evidence by topic -------------------------------------
     evidence_by_topic: dict[str, dict[str, Any]] = defaultdict(lambda: {"exercises": 0, "score_sum": 0, "passes": 0})
@@ -220,20 +283,88 @@ def build_analytics(
     exercises_total = sum(stat["exercises"] for stat in evidence_by_topic.values())
     passes_total = sum(stat["passes"] for stat in evidence_by_topic.values())
 
+    student_activity = []
+    for user_id, stat in student_stats.items():
+        sessions_count = len(stat["sessions"])
+        role_codes = sorted(stat["role_codes"])
+        top_topic = student_topics[user_id].most_common(1)
+        student_activity.append(
+            {
+                "user_id": stat["user_id"],
+                "display_name": stat["display_name"],
+                "username": stat["username"],
+                "role_codes": role_codes,
+                "questions": stat["questions"],
+                "sessions": sessions_count,
+                "active_days": len(stat["active_days"]),
+                "error_questions": stat["error_questions"],
+                "error_rate": _percent(stat["error_questions"], stat["questions"]),
+                "questions_per_session": _average_score(stat["questions"], sessions_count) or 0.0,
+                "last_active": stat["last_active"],
+                "top_topic": top_topic[0][0] if top_topic else UNSELECTED_TOPIC,
+            }
+        )
+    student_activity.sort(key=lambda item: (-item["questions"], -item["active_days"], item["display_name"]))
+
+    role_totals: dict[str, dict[str, Any]] = {}
+    for stat in student_stats.values():
+        codes = stat["role_codes"] or ["unassigned"]
+        for code in codes:
+            role = role_totals.setdefault(code, {"students": 0, "questions": 0})
+            role["students"] += 1
+            role["questions"] += stat["questions"]
+    role_distribution = [
+        {
+            "code": code,
+            "name": ROLE_LABELS.get(code, "未关联角色" if code == "unassigned" else code),
+            "students": item["students"],
+            "questions": item["questions"],
+            "student_percentage": _percent(item["students"], len(student_stats)),
+            "question_percentage": _percent(item["questions"], question_count),
+        }
+        for code, item in sorted(role_totals.items(), key=lambda pair: (-pair[1]["questions"], pair[0]))
+    ]
+    peak_day = max(daily_counter.items(), key=lambda item: (item[1], item[0])) if daily_counter else None
+    peak_hour = max(hourly_counter.items(), key=lambda item: (item[1], -item[0])) if hourly_counter else None
+    contextualized_questions = sum(1 for row in question_rows if row.get("topic_id"))
+
+    if period_days is None:
+        daily_questions = [{"date": day, "count": count} for day, count in sorted(daily_counter.items())]
+    else:
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=max(1, period_days) - 1)
+        daily_questions = [
+            {"date": (start_date + timedelta(days=offset)).isoformat(), "count": daily_counter.get((start_date + timedelta(days=offset)).isoformat(), 0)}
+            for offset in range(max(1, period_days))
+        ]
+
     return {
         "summary": {
             "questions": question_count,
             "sessions": len(sessions),
             "students": len(students),
+            "active_days": len(daily_counter),
             "error_questions": error_questions,
+            "error_rate": _percent(error_questions, question_count),
+            "questions_per_student": _average_score(question_count, len(students)) or 0.0,
+            "questions_per_session": _average_score(question_count, len(sessions)) or 0.0,
+            "contextualized_questions": contextualized_questions,
+            "context_coverage_rate": _percent(contextualized_questions, question_count),
             "exercises": exercises_total,
             "exercise_pass_rate": _percent(passes_total, exercises_total),
             "guided_sessions": len(guided_rows),
+            "student_role_users": sum(1 for stat in student_stats.values() if "student" in stat["role_codes"]),
         },
         "topic_distribution": _distribution(topic_counter, question_count),
         "difficulty_distribution": _distribution(difficulty_counter, question_count),
         "mode_distribution": _distribution(mode_counter, question_count),
-        "daily_questions": [{"date": day, "count": count} for day, count in sorted(daily_counter.items())],
+        "daily_questions": daily_questions,
+        "hourly_questions": _time_distribution(hourly_counter, question_count),
+        "weekday_questions": _time_distribution(weekday_counter, question_count, labels=WEEKDAY_LABELS),
+        "peak_day": {"date": peak_day[0], "count": peak_day[1]} if peak_day else None,
+        "peak_hour": {"hour": peak_hour[0], "label": f"{peak_hour[0]:02d}:00", "count": peak_hour[1]} if peak_hour else None,
+        "role_distribution": role_distribution,
+        "student_activity": student_activity,
         "weak_topics": weak_topics,
         "knowledge_point_stats": knowledge_point_stats,
     }

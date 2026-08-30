@@ -16,15 +16,35 @@ def catalog():
     }
 
 
-def question(turn_id, *, topic_id=None, level="beginner", mode="explain", has_error=False, session="s1", user="u1", day="2026-01-01"):
+def question(
+    turn_id,
+    *,
+    topic_id=None,
+    level="beginner",
+    mode="explain",
+    has_error=False,
+    session="s1",
+    user="u1",
+    day="2026-01-01",
+    hour=None,
+    weekday=None,
+    display_name=None,
+    username=None,
+    role_codes=None,
+):
     return {
         "session_id": session,
         "user_id": user,
+        "display_name": display_name,
+        "username": username,
+        "role_codes": role_codes or [],
         "has_error": has_error,
         "topic_id": topic_id,
         "level": level,
         "mode": mode,
         "day": day,
+        "hour": hour,
+        "weekday": weekday,
     }
 
 
@@ -135,3 +155,100 @@ def test_topic_with_many_questions_but_no_evidence_is_not_low_risk():
     rows = [question(f"t{i}", topic_id="transformer") for i in range(6)]
     result = build_analytics(rows, [], [], [], catalog())
     assert result["weak_topics"][0]["risk"] == "medium"
+
+
+def test_question_analytics_exposes_student_roles_and_activity_metrics():
+    rows = [
+        question(
+            "t1",
+            topic_id="transformer",
+            session="s1",
+            user="u1",
+            day="2026-01-01",
+            hour=9,
+            weekday=3,
+            display_name="张三",
+            username="zhangsan",
+            role_codes=["student"],
+        ),
+        question(
+            "t2",
+            topic_id="transformer",
+            session="s1",
+            user="u1",
+            day="2026-01-02",
+            hour=10,
+            weekday=4,
+            display_name="张三",
+            username="zhangsan",
+            role_codes=["student"],
+        ),
+        question(
+            "t3",
+            topic_id=None,
+            session="s2",
+            user="u2",
+            day="2026-01-02",
+            hour=10,
+            weekday=4,
+            has_error=True,
+            display_name="李四",
+            username="lisi",
+            role_codes=["guest"],
+        ),
+    ]
+
+    result = build_analytics(rows, [], [], [], catalog())
+
+    assert result["summary"] == {
+        **result["summary"],
+        "questions": 3,
+        "students": 2,
+        "sessions": 2,
+        "active_days": 2,
+        "error_questions": 1,
+        "error_rate": 33.33,
+        "questions_per_student": 1.5,
+        "questions_per_session": 1.5,
+        "contextualized_questions": 2,
+        "context_coverage_rate": 66.67,
+    }
+    roles = {item["code"]: item for item in result["role_distribution"]}
+    assert roles["student"] == {
+        "code": "student",
+        "name": "学生",
+        "students": 1,
+        "questions": 2,
+        "student_percentage": 50.0,
+        "question_percentage": 66.67,
+    }
+    students = {item["user_id"]: item for item in result["student_activity"]}
+    assert students["u1"] == {
+        "user_id": "u1",
+        "display_name": "张三",
+        "username": "zhangsan",
+        "role_codes": ["student"],
+        "questions": 2,
+        "sessions": 1,
+        "active_days": 2,
+        "error_questions": 0,
+        "error_rate": 0.0,
+        "questions_per_session": 2.0,
+        "last_active": "2026-01-02",
+        "top_topic": "Transformer 与注意力",
+    }
+    assert result["hourly_questions"] == [
+        {"hour": 9, "label": "09:00", "count": 1, "percentage": 33.33},
+        {"hour": 10, "label": "10:00", "count": 2, "percentage": 66.67},
+    ]
+    assert result["weekday_questions"] == [
+        {"weekday": 3, "label": "星期四", "count": 1, "percentage": 33.33},
+        {"weekday": 4, "label": "星期五", "count": 2, "percentage": 66.67},
+    ]
+
+
+def test_period_daily_trend_keeps_zero_activity_days_visible():
+    result = build_analytics([], [], [], [], catalog(), period_days=7)
+
+    assert len(result["daily_questions"]) == 7
+    assert all(item["count"] == 0 for item in result["daily_questions"])

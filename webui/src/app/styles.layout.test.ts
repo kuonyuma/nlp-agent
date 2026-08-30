@@ -81,6 +81,19 @@ describe("sandbox titlebar layout", () => {
     expect(bookContentRule).toContain("min-height: 0");
   });
 
+  it("lets student questions use the full teacher viewport while keeping the report scrollable", () => {
+    const teacherMainRule = stylesheet.match(/\.teacher-main\.teacher-questions-main\s*\{([^}]*)\}/)?.[1] ?? "";
+    const questionsContentRule = stylesheet.match(/\.teacher-content-questions\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(teacherMainRule).toContain("display: grid");
+    expect(teacherMainRule).toContain("height: 100vh");
+    expect(teacherMainRule).toContain("grid-template-rows: 58px minmax(0, 1fr)");
+    expect(questionsContentRule).toContain("width: 100%");
+    expect(questionsContentRule).toContain("max-width: none");
+    expect(questionsContentRule).toContain("height: 100%");
+    expect(questionsContentRule).toContain("overflow: auto");
+  });
+
   it("uses a light, borderless D2L-style code surface and a wider reading column", () => {
     expect(stylesheet).toContain(".knowledge-book-article .code-shell { margin: 28px 0 32px; border: 0 !important;");
     expect(stylesheet).toContain(".knowledge-book-article .code-shell pre { border: 0 !important;");

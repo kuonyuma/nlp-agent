@@ -617,15 +617,25 @@ class GatewayRepository:
         result: list[dict[str, Any]] = []
         for row in rows:
             context = json.loads(row["learning_context_json"]) if row["learning_context_json"] else {}
+            created = str(row["created_at"])
+            try:
+                created_at = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            except ValueError:
+                created_at = None
             result.append(
                 {
                     "session_id": row["session_id"],
                     "user_id": row["user_id"],
+                    "display_name": None,
+                    "username": None,
+                    "role_codes": [],
                     "has_error": bool(row["error_kind"]),
                     "topic_id": context.get("topic_id"),
                     "level": context.get("level"),
                     "mode": context.get("mode"),
-                    "day": str(row["created_at"])[:10],
+                    "day": created[:10],
+                    "hour": created_at.hour if created_at else None,
+                    "weekday": created_at.weekday() if created_at else None,
                 }
             )
         return result

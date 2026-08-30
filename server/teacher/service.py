@@ -610,7 +610,10 @@ class TeacherService:
         evidence_rows = await asyncio.to_thread(gateway.repository.exercise_evidence_stats, workspace_id=workspace_id, since=since)
         criterion_rows = await asyncio.to_thread(gateway.repository.exercise_criterion_stats, workspace_id=workspace_id, since=since)
         guided_rows = await asyncio.to_thread(gateway.repository.guided_session_stats, workspace_id=workspace_id, since=since)
-        result = build_analytics(question_rows, evidence_rows, criterion_rows, guided_rows, catalog)
+        result = build_analytics(
+            question_rows, evidence_rows, criterion_rows, guided_rows, catalog,
+            period_days=days,
+        )
         return {"workspace_id": workspace_id, "period_days": days, **result}
 
 

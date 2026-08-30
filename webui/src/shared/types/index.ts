@@ -167,6 +167,30 @@ export interface TeacherBookArchiveImportPreview {
 
 export interface TeacherDistribution { name: string; count: number; percentage: number }
 
+export interface TeacherRoleDistribution {
+  code: string;
+  name: string;
+  students: number;
+  questions: number;
+  student_percentage: number;
+  question_percentage: number;
+}
+
+export interface TeacherStudentActivity {
+  user_id: string;
+  display_name: string;
+  username: string | null;
+  role_codes: string[];
+  questions: number;
+  sessions: number;
+  active_days: number;
+  error_questions: number;
+  error_rate: number;
+  questions_per_session: number;
+  last_active: string | null;
+  top_topic: string;
+}
+
 export interface WeakTopic {
   topic_id: string;
   topic: string;
@@ -199,15 +223,28 @@ export interface TeacherOverview {
     questions: number;
     sessions: number;
     students: number;
+    active_days: number;
     error_questions: number;
+    error_rate: number;
+    questions_per_student: number;
+    questions_per_session: number;
+    contextualized_questions: number;
+    context_coverage_rate: number;
     exercises: number;
     exercise_pass_rate: number;
     guided_sessions: number;
+    student_role_users: number;
   };
   topic_distribution: TeacherDistribution[];
   difficulty_distribution: TeacherDistribution[];
   mode_distribution: TeacherDistribution[];
   daily_questions: Array<{ date: string; count: number }>;
+  hourly_questions: Array<{ hour: number; label: string; count: number; percentage: number }>;
+  weekday_questions: Array<{ weekday: number; label: string; count: number; percentage: number }>;
+  peak_day: { date: string; count: number } | null;
+  peak_hour: { hour: number; label: string; count: number } | null;
+  role_distribution: TeacherRoleDistribution[];
+  student_activity: TeacherStudentActivity[];
   weak_topics: WeakTopic[];
   knowledge_point_stats: KnowledgePointStat[];
 }

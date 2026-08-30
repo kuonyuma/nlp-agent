@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import unquote
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Connection
 
 from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
@@ -206,20 +206,53 @@ class MySQLGatewayRepository:
                 ),
                 {"w": workspace_id, "since": since},
             ).mappings().all()
+            user_ids = sorted({str(row["user_id"]) for row in rows if row["user_id"]})
+            profiles: dict[str, dict[str, Any]] = {}
+            if user_ids:
+                profile_rows = c.execute(
+                    text(
+                        "SELECT u.id AS user_id,u.username,u.display_name,r.code AS role_code "
+                        "FROM nlp_users u "
+                        "LEFT JOIN nlp_user_roles ur ON ur.user_id=u.id "
+                        "AND (ur.expires_at IS NULL OR ur.expires_at>UTC_TIMESTAMP()) "
+                        "LEFT JOIN nlp_roles r ON r.id=ur.role_id AND r.status='active' "
+                        "WHERE u.id IN :user_ids AND u.status='active' AND u.deleted_at IS NULL"
+                    ).bindparams(bindparam("user_ids", expanding=True)),
+                    {"user_ids": user_ids},
+                ).mappings().all()
+                for profile in profile_rows:
+                    item = profiles.setdefault(
+                        str(profile["user_id"]),
+                        {
+                            "display_name": profile["display_name"],
+                            "username": profile["username"],
+                            "role_codes": [],
+                        },
+                    )
+                    if profile["role_code"]:
+                        item["role_codes"].append(str(profile["role_code"]))
+                for item in profiles.values():
+                    item["role_codes"] = sorted(set(item["role_codes"]))
         result: list[dict[str, Any]] = []
         for row in rows:
             context = (self._json(row["learning_state_json"] or {}) or {}).get("context") or {}
             created = row["created_at"]
             day = created.strftime("%Y-%m-%d") if hasattr(created, "strftime") else str(created)[:10]
+            profile = profiles.get(str(row["user_id"]), {})
             result.append(
                 {
                     "session_id": row["conversation_id"],
                     "user_id": row["user_id"],
+                    "display_name": profile.get("display_name"),
+                    "username": profile.get("username"),
+                    "role_codes": profile.get("role_codes", []),
                     "has_error": bool(row["error_kind"]),
                     "topic_id": context.get("topic_id"),
                     "level": context.get("level"),
                     "mode": context.get("mode"),
                     "day": day,
+                    "hour": created.hour if hasattr(created, "hour") else None,
+                    "weekday": created.weekday() if hasattr(created, "weekday") else None,
                 }
             )
         return result

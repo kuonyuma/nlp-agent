@@ -13,7 +13,7 @@ const { ensureAuthMock, getSettingsMock, getTeacherCatalog, updateTeacherCatalog
 }));
 vi.mock("@/platform/http/api", () => ({
   ensureAuth: ensureAuthMock,
-  api: { getSettings: getSettingsMock, getTeacherOverview: vi.fn().mockResolvedValue({ workspace_id: "default", period_days: 30, summary: { questions: 2, sessions: 2, students: 2, error_questions: 0, exercises: 3, exercise_pass_rate: 66.67, guided_sessions: 1 }, weak_topics: [{ topic_id: "transformer", topic: "Transformer", questions: 2, errors: 0, exercises: 3, average_score: 70, pass_rate: 66.67, misconceptions: 1, risk: "medium" }], topic_distribution: [{ name: "Transformer", count: 2, percentage: 100 }], difficulty_distribution: [{ name: "入门", count: 2, percentage: 100 }], mode_distribution: [{ name: "讲解", count: 2, percentage: 100 }], daily_questions: [{ date: "2026-07-19", count: 2 }], knowledge_point_stats: [{ knowledge_point_id: "attention", name: "注意力", topic: "Transformer", exercises: 3, average_score: 70, pass_rate: 66.67, weak_criteria: [{ criterion: "概念准确", hit_rate: 100 }, { criterion: "步骤完整", hit_rate: 33.33 }] }] }), getTeacherCatalog, updateTeacherCatalog },
+  api: { getSettings: getSettingsMock, getTeacherOverview: vi.fn().mockResolvedValue({ workspace_id: "default", period_days: 30, summary: { questions: 2, sessions: 2, students: 2, active_days: 2, error_questions: 0, error_rate: 0, questions_per_student: 1, questions_per_session: 1, contextualized_questions: 2, context_coverage_rate: 100, exercises: 3, exercise_pass_rate: 66.67, guided_sessions: 1, student_role_users: 2 }, role_distribution: [{ code: "student", name: "学生", students: 2, questions: 2, student_percentage: 100, question_percentage: 100 }], student_activity: [{ user_id: "u1", display_name: "张三", username: "zhangsan", role_codes: ["student"], questions: 2, sessions: 2, active_days: 2, error_questions: 0, error_rate: 0, questions_per_session: 1, last_active: "2026-07-19", top_topic: "Transformer" }], hourly_questions: [{ hour: 9, label: "09:00", count: 2, percentage: 100 }], weekday_questions: [{ weekday: 0, label: "星期一", count: 2, percentage: 100 }], weak_topics: [{ topic_id: "transformer", topic: "Transformer", questions: 2, errors: 0, exercises: 3, average_score: 70, pass_rate: 66.67, misconceptions: 1, risk: "medium" }], topic_distribution: [{ name: "Transformer", count: 2, percentage: 100 }], difficulty_distribution: [{ name: "入门", count: 2, percentage: 100 }], mode_distribution: [{ name: "讲解", count: 2, percentage: 100 }], daily_questions: [{ date: "2026-07-19", count: 2 }], knowledge_point_stats: [{ knowledge_point_id: "attention", name: "注意力", topic: "Transformer", exercises: 3, average_score: 70, pass_rate: 66.67, weak_criteria: [{ criterion: "概念准确", hit_rate: 100 }, { criterion: "步骤完整", hit_rate: 33.33 }] }] }), getTeacherCatalog, updateTeacherCatalog },
 }));
 
 describe("TeacherWorkspace catalog CRUD", () => {
@@ -178,9 +178,14 @@ describe("TeacherWorkspace catalog CRUD", () => {
 
   it("renders question statistics without raw question text", async () => {
     history.replaceState({}, "", "/teacher/questions"); render(<TeacherWorkspace />);
-    expect(await screen.findByText("从提问统计发现教学线索")).toBeVisible();
+    expect(await screen.findByText("学生问题全景")).toBeVisible();
     expect(screen.getByText("主题分布")).toBeVisible();
     expect(screen.getByText("模式分布")).toBeVisible();
+    expect(screen.getByText("RBAC 角色分布")).toBeVisible();
+    expect(screen.getByText("学生参与度")).toBeVisible();
+    expect(screen.getByText("张三")).toBeVisible();
+    expect(screen.getByText("小时分布")).toBeVisible();
+    expect(screen.getByText("星期分布")).toBeVisible();
     expect(screen.queryByText("BLEU 的长度惩罚怎么计算？")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("搜索学生问题")).not.toBeInTheDocument();
   });
@@ -205,6 +210,6 @@ describe("TeacherWorkspace catalog CRUD", () => {
     expect(await screen.findByRole("button", { name: "主题与知识点" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "学生问题" }));
 
-    expect(await screen.findByText("从提问统计发现教学线索")).toBeVisible();
+    expect(await screen.findByText("学生问题全景")).toBeVisible();
   });
 });
