@@ -425,40 +425,53 @@ class WebSocketConnection:
                 )
             )
 
+    @staticmethod
+    async def _wait_for_tasks(tasks: list[asyncio.Task[Any]]) -> None:
+        if not tasks:
+            return
+        waiter = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            await waiter
+            raise
+
     async def _terminate(self, *, code: int, reason: str) -> None:
         if self._closed:
             return
         self._closed = True
         self._closed_event.set()
-        current = asyncio.current_task()
-        subscriptions = list(self._subscriptions.values())
-        tasks = list(self._subscription_tasks.values())
-        self._subscriptions.clear()
-        self._subscription_tasks.clear()
-        for subscription in subscriptions:
-            await subscription.close()
-        for task in tasks:
-            if task is not current and not task.done():
-                task.cancel()
-        wait_tasks = [task for task in tasks if task is not current]
-        if wait_tasks:
-            await asyncio.gather(*wait_tasks, return_exceptions=True)
-        if self._sender_task is not None and self._sender_task is not current:
-            if not self._sender_task.done():
-                self._sender_task.cancel()
-            await asyncio.gather(self._sender_task, return_exceptions=True)
-        if self._session_guard_task is not None and self._session_guard_task is not current:
-            if not self._session_guard_task.done():
-                self._session_guard_task.cancel()
-            await asyncio.gather(self._session_guard_task, return_exceptions=True)
         try:
-            await asyncio.wait_for(
-                self.websocket.close(code=code, reason=reason),
-                timeout=min(1.0, self.send_timeout_s),
-            )
-        except (asyncio.TimeoutError, RuntimeError, OSError):
-            pass
-        self._fail_queued_frames()
+            current = asyncio.current_task()
+            subscriptions = list(self._subscriptions.values())
+            tasks = list(self._subscription_tasks.values())
+            self._subscriptions.clear()
+            self._subscription_tasks.clear()
+            for subscription in subscriptions:
+                await subscription.close()
+            for task in tasks:
+                if task is not current and not task.done():
+                    task.cancel()
+            wait_tasks = [task for task in tasks if task is not current]
+            if wait_tasks:
+                await self._wait_for_tasks(wait_tasks)
+            if self._sender_task is not None and self._sender_task is not current:
+                if not self._sender_task.done():
+                    self._sender_task.cancel()
+                await self._wait_for_tasks([self._sender_task])
+            if self._session_guard_task is not None and self._session_guard_task is not current:
+                if not self._session_guard_task.done():
+                    self._session_guard_task.cancel()
+                await self._wait_for_tasks([self._session_guard_task])
+            try:
+                await asyncio.wait_for(
+                    self.websocket.close(code=code, reason=reason),
+                    timeout=min(1.0, self.send_timeout_s),
+                )
+            except (asyncio.TimeoutError, RuntimeError, OSError):
+                pass
+        finally:
+            self._fail_queued_frames()
 
     async def close(self, *, code: int = 1000, reason: str = "connection closed") -> None:
         await self._terminate(code=code, reason=reason)
@@ -695,7 +708,10 @@ async def websocket_endpoint(
         await _receive_commands(websocket, connection, max_message_bytes)
     finally:
         hub.discard(connection)
-        await connection.close()
+        try:
+            await connection.close()
+        except asyncio.CancelledError:
+            pass
 
 
 async def _receive_commands(
