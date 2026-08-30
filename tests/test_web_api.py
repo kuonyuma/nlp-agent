@@ -460,6 +460,7 @@ def test_learning_catalog_only_exposes_enabled_topics_and_enabled_knowledge_poin
                                 "markdown": "## 注意力\n解释 Q、K、V。",
                                 "status": "enabled",
                                 "sort_order": 1,
+                                "question_types": ["实验题"],
                             },
                             {
                                 "id": "legacy",

@@ -80,8 +80,9 @@ export interface TeachingGoals {
 }
 
 export type AvailabilityStatus = "enabled" | "disabled";
+export const DEFAULT_QUESTION_TYPES = ["简答", "选择题", "判断题", "填空题", "编程题", "代码阅读题", "计算题", "论述题"] as const;
 export type BlueprintStatus = "draft" | AvailabilityStatus;
-export interface KnowledgePoint { id: string; name: string; markdown: string; status: AvailabilityStatus; sort_order: number }
+export interface KnowledgePoint { id: string; name: string; markdown: string; status: AvailabilityStatus; sort_order: number; question_types?: string[] }
 export interface CourseTopic { id: string; name: string; description: string; status: AvailabilityStatus; knowledge_points: KnowledgePoint[] }
 export interface RubricPoint { id?: string; criterion: string; weight: number }
 export interface ExerciseBlueprint { id: string; name: string; topic_id: string; knowledge_point_id: string; instructions: string; question_type: string; status: BlueprintStatus; rubric: RubricPoint[] }
