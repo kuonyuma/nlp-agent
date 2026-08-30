@@ -1,7 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "@/platform/http/api";
-import { ArrowLeft, KeyRound, Settings, ShieldCheck, UserRound } from "lucide-react";
+import { useOptionalAuth } from "@/platform/auth/AuthContext";
+import { Activity, ArrowLeft, CheckCircle2, CircleAlert, Coins, KeyRound, Settings, ShieldCheck, UserRound } from "lucide-react";
 import type { UserProfile } from "@/shared/types";
+import type { QuotaSnapshot, QuotaUsageSnapshot } from "@/shared/types";
+
+const quotaOwnerLabel = (ownerType: string) => ownerType === "workspace" ? "工作空间" : ownerType === "classroom" ? "课堂" : "用户";
 
 /**
  * 个人设置页面 — 毛玻璃全屏 + 居中卡片，风格与 AccountDialog 一致。
@@ -24,8 +28,18 @@ export function ProfilePage() {
   const [pwdErr, setPwdErr] = useState("");
   const [pwdSaving, setPwdSaving] = useState(false);
 
+  // ---------- 额度 ----------
+  const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
+  const [quotaUsage, setQuotaUsage] = useState<QuotaUsageSnapshot | null>(null);
+  const [quotaLoading, setQuotaLoading] = useState(false);
+  const [quotaError, setQuotaError] = useState("");
+  const auth = useOptionalAuth();
+  const workspaceIds = useMemo(() => auth?.user?.workspace_ids.filter((item) => item !== "*") ?? [], [auth?.user]);
+  const [workspaceId, setWorkspaceId] = useState<string | undefined>();
+  const selectedWorkspaceId = workspaceId && workspaceIds.includes(workspaceId) ? workspaceId : workspaceIds[0];
+
   // ---------- active section ----------
-  const [activeSection, setActiveSection] = useState<"info" | "name" | "password">("info");
+  const [activeSection, setActiveSection] = useState<"info" | "quota" | "name" | "password">("info");
 
   useEffect(() => {
     (async () => {
@@ -40,6 +54,28 @@ export function ProfilePage() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (activeSection !== "quota" || !user) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setQuotaLoading(true);
+        setQuotaError("");
+      }
+    });
+    Promise.all([api.getQuota(selectedWorkspaceId), api.getUsage(30, selectedWorkspaceId)])
+      .then(([quotaResult, usageResult]) => {
+        if (cancelled) return;
+        setQuota(quotaResult.quota);
+        setQuotaUsage(usageResult);
+      })
+      .catch((reason) => {
+        if (!cancelled) setQuotaError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => { if (!cancelled) setQuotaLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeSection, selectedWorkspaceId, user]);
 
   const handleNameSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -95,6 +131,7 @@ export function ProfilePage() {
 
   const sections: { id: typeof activeSection; label: string; icon: typeof UserRound }[] = [
     { id: "info", label: "基本信息", icon: UserRound },
+    { id: "quota", label: "额度与用量", icon: Coins },
     { id: "name", label: "修改昵称", icon: Settings },
     { id: "password", label: "修改密码", icon: KeyRound },
   ];
@@ -140,6 +177,21 @@ export function ProfilePage() {
               <div><dt>注册时间</dt><dd>{new Date(user.created_at).toLocaleString("zh-CN")}</dd></div>
               <div><dt>上次更新</dt><dd>{new Date(user.updated_at).toLocaleString("zh-CN")}</dd></div>
             </dl>
+          )}
+
+          {activeSection === "quota" && (
+            <section className="profile-quota-section" aria-label="额度与用量概览">
+              <div className="profile-quota-heading"><div><span className="profile-quota-kicker">ACCOUNT RESOURCE</span><h2>额度与用量概览</h2><p>开发者统一分配，实际可用额度取所有生效限制（含课堂）的最小值。</p></div><Coins size={23} /></div>
+              {workspaceIds.length > 0 && <label className="profile-quota-scope"><span>工作空间</span><select value={selectedWorkspaceId ?? ""} onChange={(event) => setWorkspaceId(event.target.value || undefined)}>{workspaceIds.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>}
+              {quotaLoading && <p className="profile-quota-state">正在读取额度快照…</p>}
+              {quotaError && <p className="profile-msg-err"><CircleAlert size={14} />{quotaError}</p>}
+              {!quotaLoading && !quotaError && <>
+                <div className="profile-quota-kpis"><div><span>当前可用</span><strong>{quota?.buckets.length ? `${Math.min(...quota.buckets.map((item) => item.remaining_micro)).toLocaleString("zh-CN")} μcredits` : "暂无额度"}</strong></div><div><span>30 天已计费</span><strong>{(quotaUsage?.priced_credits_micro ?? 0).toLocaleString("zh-CN")} μcredits</strong></div></div>
+                <div className="profile-quota-status"><CheckCircle2 size={15} /><span>{quotaUsage?.credits_complete ? "账务数据完整" : "仍有用量待对账"}</span><small>{quotaUsage?.events ?? 0} 条调用事件</small></div>
+                <div className="profile-quota-buckets">{(quota?.buckets ?? []).slice(0, 4).map((bucket) => <div key={`${bucket.owner_type}-${bucket.owner_id}-${bucket.bucket_type}`}><span>{quotaOwnerLabel(bucket.owner_type)} · {bucket.bucket_type === "daily" ? "今日" : "本月"}</span><strong>{bucket.remaining_micro.toLocaleString("zh-CN")} μcredits</strong><small>已消耗 {bucket.consumed_micro.toLocaleString("zh-CN")} · 预占 {bucket.reserved_micro.toLocaleString("zh-CN")} · 重置 {new Date(bucket.reset_at).toLocaleDateString("zh-CN")}</small></div>)}</div>
+                <a className="profile-quota-link" href="/usage"><Activity size={15} />查看完整额度明细</a>
+              </>}
+            </section>
           )}
 
           {/* 修改昵称 */}

@@ -405,6 +405,36 @@ export interface QuotaSnapshot {
   workspace_id: string | null;
   buckets: QuotaBucketSnapshot[];
 }
+export interface QuotaUsageBreakdown {
+  day: string;
+  purpose: string;
+  provider: string;
+  provider_model: string;
+  events: number;
+  priced_events: number;
+  unpriced_events: number;
+  priced_credits_micro: number;
+  total_tokens: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  reasoning_output_tokens?: number;
+}
+export interface QuotaUsageSnapshot {
+  user_id: string;
+  workspace_id: string | null;
+  period_days: number;
+  from: string;
+  to: string;
+  events: number;
+  priced_events: number;
+  unpriced_events: number;
+  credits_complete: boolean;
+  credit_status: string;
+  credits_micro: number | null;
+  priced_credits_micro: number;
+  tokens: Record<string, number>;
+  breakdown: QuotaUsageBreakdown[];
+}
 export interface QuotaPolicy {
   policy_id: string;
   code: string;
@@ -469,6 +499,97 @@ export interface QuotaAdjustment {
   reason: string;
   idempotency_key: string;
   created_at: string;
+}
+export interface QuotaDailyRollup {
+  rollup_date: string;
+  user_id: string;
+  workspace_id: string | null;
+  provider: string;
+  provider_model: string;
+  purpose: string;
+  events: number;
+  exact_events: number;
+  estimated_events: number;
+  pending_events: number;
+  unavailable_events: number;
+  priced_credits_micro: number;
+  tokens: Record<string, number>;
+}
+export interface QuotaBillingRecord {
+  billing_id: string;
+  provider: string;
+  statement_id: string;
+  operation_id: string;
+  billed_at: string;
+  billed_credits_micro: number | null;
+  billed_tokens: Record<string, number>;
+  matched_usage_event_id: string | null;
+  local_credits_micro: number | null;
+  difference_micro: number | null;
+  status: string;
+  idempotency_key: string;
+  reconciled_at: string | null;
+}
+export interface QuotaBillingStatementInput {
+  provider: string;
+  statement_id: string;
+  operation_id: string;
+  billed_at: string;
+  billed_credits_micro: number | null;
+  billed_tokens: Record<string, number>;
+  idempotency_key: string;
+}
+export interface QuotaCreditOperation {
+  operation_id: string;
+  operation_type: "gift" | "reset";
+  owner_type: string;
+  owner_id: string;
+  bucket_type: string;
+  period_start: string;
+  period_end: string;
+  amount_micro: number;
+  effective_from: string;
+  expires_at: string | null;
+  reason: string;
+  idempotency_key: string;
+  status: string;
+}
+export interface QuotaCreditOperationInput {
+  owner_type: "user" | "workspace" | "classroom";
+  owner_id: string;
+  bucket_type: "daily" | "monthly";
+  period_start: string;
+  period_end: string;
+  amount_micro: number;
+  reason: string;
+  idempotency_key: string;
+  effective_from: string;
+  expires_at: string | null;
+}
+export interface QuotaAlert {
+  alert_id: string;
+  alert_type: string;
+  severity: string;
+  owner_type: string;
+  owner_id: string;
+  window_start: string;
+  window_end: string;
+  baseline_micro: number;
+  actual_micro: number;
+  threshold_multiplier: number;
+  status: string;
+  metadata: Record<string, unknown>;
+  resolved_at: string | null;
+}
+export interface QuotaBucketReplay {
+  bucket_id: string;
+  stored_consumed_micro: number;
+  stored_reserved_micro: number;
+  expected_consumed_micro: number;
+  expected_reserved_micro: number;
+  expected_over_limit: boolean;
+  ledger_entries: number;
+  needs_repair: boolean;
 }
 export interface QuotaPolicyExplanation {
   user_id: string;

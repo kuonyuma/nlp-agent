@@ -226,6 +226,28 @@ def test_usage_me_requires_authentication_and_reports_persistence_unavailable_wi
     assert response.json()["code"] == "usage_unavailable"
 
 
+def test_usage_me_forwards_workspace_scope_to_usage_reader(web_app):
+    app, _engine = web_app
+
+    class Reader:
+        def __init__(self):
+            self.kwargs = None
+
+        def user_snapshot(self, user_id, **kwargs):
+            self.kwargs = (user_id, kwargs)
+            return {"user_id": user_id, "workspace_id": kwargs["workspace_id"]}
+
+    reader = Reader()
+    app.state.quota_usage_reader = reader
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/usage/me?workspace_id=default&days=7")
+
+    assert response.status_code == 200
+    assert response.json() == {"user_id": "nova", "workspace_id": "default"}
+    assert reader.kwargs == ("nova", {"workspace_id": "default", "days": 7})
+
+
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):
     app, _engine = student_web_app
     with TestClient(app) as client:

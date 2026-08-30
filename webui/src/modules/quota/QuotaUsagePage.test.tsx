@@ -44,7 +44,13 @@ describe("QuotaUsagePage", () => {
       },
       policy: null,
     });
-    getUsage.mockResolvedValue({ events: 0, priced_credits_micro: 0 });
+    getUsage.mockResolvedValue({
+      events: 0,
+      priced_credits_micro: 0,
+      breakdown: [
+        { day: "2026-08-30", purpose: "coordinator", provider: "openai", provider_model: "gpt-5", events: 2, priced_events: 2, unpriced_events: 0, priced_credits_micro: 42, total_tokens: 120 },
+      ],
+    });
   });
 
   it("shows the minimum effective remaining balance instead of summing buckets", async () => {
@@ -59,8 +65,18 @@ describe("QuotaUsagePage", () => {
 
     const selector = await screen.findByLabelText("工作空间");
     expect(getQuota).toHaveBeenCalledWith("workspace-a");
+    expect(getUsage).toHaveBeenCalledWith(30, "workspace-a");
     fireEvent.change(selector, { target: { value: "workspace-b" } });
 
     await waitFor(() => expect(getQuota).toHaveBeenCalledWith("workspace-b"));
+    expect(getUsage).toHaveBeenCalledWith(30, "workspace-b");
+  });
+
+  it("shows a workspace-scoped usage breakdown with its accounting status", async () => {
+    render(<QuotaUsagePage />);
+
+    expect(await screen.findByText("调用明细")).toBeInTheDocument();
+    expect(screen.getByText("coordinator · openai / gpt-5")).toBeInTheDocument();
+    expect(screen.getByText("42 μcredits")).toBeInTheDocument();
   });
 });

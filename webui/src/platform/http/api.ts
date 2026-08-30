@@ -1,5 +1,4 @@
-import type { AgentSessionStats, AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaBinding, QuotaClassroomUsage, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
-import type { FeedbackThread, FeedbackThreadList } from "@/shared/types";
+import type { AgentSessionStats, AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperSnapshot, FeedbackThread, FeedbackThreadList, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaAlert, QuotaBillingRecord, QuotaBillingStatementInput, QuotaBinding, QuotaBucketReplay, QuotaClassroomUsage, QuotaCreditOperation, QuotaCreditOperationInput, QuotaDailyRollup, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaSnapshot, QuotaUsageSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
 
@@ -121,7 +120,7 @@ export const api = {
     return request<SessionListResponse>(`/sessions${suffix}`);
   },
   getSessionStats: () => request<AgentSessionStats>("/sessions/stats"),
-  getUsage: (days = 30) => request<Record<string, unknown>>(`/usage/me?days=${encodeURIComponent(String(days))}`),
+  getUsage: (days = 30, workspaceId?: string) => request<QuotaUsageSnapshot>(`/usage/me?days=${encodeURIComponent(String(days))}${workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
   getQuota: (workspaceId?: string) => request<{ quota: QuotaSnapshot; policy: QuotaPolicyExplanation | null }>(`/quota/me${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
   createSession: (workspaceId = "default") =>
     request<SessionSummary>("/sessions", {
@@ -161,6 +160,22 @@ export const api = {
   createQuotaGrant: (input: Omit<QuotaGrant, "grant_id" | "created_by" | "created_at" | "revoked_at" | "revoked_by" | "revocation_idempotency_key" | "status">) => request<QuotaGrant>("/developer/quota/grants", { method: "POST", body: JSON.stringify(input) }),
   revokeQuotaGrant: (grantId: string, idempotency_key: string) => request<QuotaGrant>(`/developer/quota/grants/${encodeURIComponent(grantId)}/revoke`, { method: "POST", body: JSON.stringify({ idempotency_key }) }),
   listQuotaAdjustments: (ownerType?: string, ownerId?: string) => request<{ items: QuotaAdjustment[] }>(`/developer/quota/adjustments${ownerType || ownerId ? `?${new URLSearchParams({ ...(ownerType ? { owner_type: ownerType } : {}), ...(ownerId ? { owner_id: ownerId } : {}) })}` : ""}`),
+  listQuotaDailyRollups: (start: string, end: string, filters: { userId?: string; workspaceId?: string } = {}) => {
+    const query = new URLSearchParams({ start, end });
+    if (filters.userId) query.set("user_id", filters.userId);
+    if (filters.workspaceId) query.set("workspace_id", filters.workspaceId);
+    return request<{ items: QuotaDailyRollup[] }>(`/developer/quota/daily-rollups?${query.toString()}`);
+  },
+  listQuotaBilling: (status?: string, limit = 100) => request<{ items: QuotaBillingRecord[] }>(`/developer/quota/billing?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`),
+  reconcileQuotaBilling: (statement: QuotaBillingStatementInput) => request<{ total: number; matched: number; discrepancies: number; unmatched: number; items: QuotaBillingRecord[] }>("/developer/quota/billing/reconcile", { method: "POST", body: JSON.stringify({ statements: [statement] }) }),
+  repairQuotaBilling: (billingId: string, reason: string, idempotencyKey: string) => request<QuotaBillingRecord>(`/developer/quota/billing/${encodeURIComponent(billingId)}/repair`, { method: "POST", body: JSON.stringify({ reason, idempotency_key: idempotencyKey }) }),
+  giftQuotaCredits: (input: QuotaCreditOperationInput) => request<QuotaCreditOperation>("/developer/quota/credits/gift", { method: "POST", body: JSON.stringify(input) }),
+  resetQuotaCredits: (input: QuotaCreditOperationInput) => request<QuotaCreditOperation>("/developer/quota/credits/reset", { method: "POST", body: JSON.stringify(input) }),
+  listQuotaAlerts: (status?: string, limit = 100) => request<{ items: QuotaAlert[] }>(`/developer/quota/alerts?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`),
+  updateQuotaAlert: (alertId: string, status: "acknowledged" | "resolved", reason: string) => request<QuotaAlert>(`/developer/quota/alerts/${encodeURIComponent(alertId)}`, { method: "PATCH", body: JSON.stringify({ status, reason }) }),
+  archiveQuotaUsage: (before: string, batchSize = 10_000) => request<{ batch_id: string; archived_events: number; cutoff_at: string; deleted_events: number }>("/developer/quota/archive", { method: "POST", body: JSON.stringify({ before, batch_size: batchSize }) }),
+  replayQuotaBucket: (bucketId: string) => request<QuotaBucketReplay>(`/developer/quota/buckets/${encodeURIComponent(bucketId)}/replay`),
+  repairQuotaBucket: (bucketId: string, reason: string, idempotencyKey: string) => request<QuotaBucketReplay>(`/developer/quota/buckets/${encodeURIComponent(bucketId)}/repair`, { method: "POST", body: JSON.stringify({ reason, idempotency_key: idempotencyKey }) }),
   createQuotaAdjustment: (input: Omit<QuotaAdjustment, "adjustment_id" | "actor_user_id" | "created_at">) => request<QuotaAdjustment>("/developer/quota/adjustments", { method: "POST", body: JSON.stringify(input) }),
   updateToolPolicies: (policies: Record<string, unknown>) =>
     request<Record<string, unknown>>("/developer/tools/policies", { method: "PUT", body: JSON.stringify({ policies }) }),

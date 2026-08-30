@@ -438,6 +438,33 @@ async def test_user_usage_snapshot_exposes_unpriced_events_without_zeroing_them(
 
 
 @pytest.mark.asyncio
+async def test_user_usage_snapshot_can_be_scoped_to_one_workspace(quota_engine):
+    _insert_pricing_rule(quota_engine)
+    reporter = DurableModelUsageReporter(quota_engine)
+    base = _invocation()
+    other_workspace = base.model_copy(
+        update={
+            "operation_id": str(uuid4()),
+            "attribution": base.attribution.model_copy(update={"workspace_id": "workspace-2"}),
+        }
+    )
+    usage = CanonicalTokenUsage(input_tokens=20, output_tokens=5, total_tokens=25, source="provider")
+    await reporter.report(base, usage, _outcome())
+    await reporter.report(other_workspace, usage, _outcome())
+
+    snapshot = UsageReadService(quota_engine).user_snapshot(
+        "user-1",
+        workspace_id="workspace-1",
+        days=2,
+        now=datetime(2026, 8, 30, tzinfo=timezone.utc),
+    )
+
+    assert snapshot["workspace_id"] == "workspace-1"
+    assert snapshot["events"] == 1
+    assert snapshot["tokens"]["total_tokens"] == 25
+
+
+@pytest.mark.asyncio
 async def test_shadow_comparison_matches_model_span_by_operation_id(quota_engine):
     _insert_pricing_rule(quota_engine)
     with quota_engine.begin() as connection:

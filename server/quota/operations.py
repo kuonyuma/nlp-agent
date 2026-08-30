@@ -450,6 +450,7 @@ class QuotaOperationsService:
                 existing["provider"] != provider
                 or existing["statement_id"] != statement_id
                 or existing["operation_id"] != operation_id
+                or existing["billed_at"] != _db_time(billed_at)
                 or existing["billed_credits_micro"] != billed_credits
                 or existing["billed_tokens_json"] != billed_tokens
             ):
@@ -466,6 +467,7 @@ class QuotaOperationsService:
         if statement_existing is not None:
             if (
                 statement_existing["operation_id"] != operation_id
+                or statement_existing["billed_at"] != _db_time(billed_at)
                 or statement_existing["billed_credits_micro"] != billed_credits
                 or statement_existing["billed_tokens_json"] != billed_tokens
             ):
@@ -516,6 +518,7 @@ class QuotaOperationsService:
                 raise
             if (
                 winner["operation_id"] != operation_id
+                or winner["billed_at"] != _db_time(billed_at)
                 or winner["billed_credits_micro"] != billed_credits
                 or winner["billed_tokens_json"] != billed_tokens
             ):
@@ -737,7 +740,7 @@ class QuotaOperationsService:
             ).mappings().first()
             if existing is not None:
                 self._assert_credit_operation_matches(existing, operation_type, kwargs)
-                return self._credit_payload(existing)
+                return self._credit_payload(connection, existing)
             grant = management.create_grant_in_transaction(
                 connection,
                 owner_type=kwargs["owner_type"],
@@ -832,12 +835,12 @@ class QuotaOperationsService:
                 if winner is None:
                     raise
                 self._assert_credit_operation_matches(winner, operation_type, kwargs)
-                return self._credit_payload(winner)
+                return self._credit_payload(connection, winner)
             row = connection.execute(
                 select(QuotaCreditOperationModel)
                 .where(QuotaCreditOperationModel.id == values["id"])
             ).mappings().one()
-        return self._credit_payload(row)
+            return self._credit_payload(connection, row)
 
     @staticmethod
     def _assert_credit_operation_matches(row: Mapping[str, Any], operation_type: str, kwargs: Mapping[str, Any]) -> None:
@@ -863,7 +866,10 @@ class QuotaOperationsService:
             raise ValueError("credit operation idempotency key conflicts with existing operation")
 
     @staticmethod
-    def _credit_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    def _credit_payload(connection: Connection, row: Mapping[str, Any]) -> dict[str, Any]:
+        grant_status = connection.execute(
+            select(QuotaGrantModel.status).where(QuotaGrantModel.id == row["grant_id"])
+        ).scalar_one_or_none()
         return {
             "operation_id": row["id"],
             "operation_type": row["operation_type"],
@@ -872,9 +878,11 @@ class QuotaOperationsService:
             "bucket_type": row["bucket_type"],
             "amount_micro": row["amount_micro"],
             "grant_id": row["grant_id"],
+            "reason": row["reason"],
             "idempotency_key": row["idempotency_key"],
             "effective_from": _payload_value(row["effective_from"]),
             "expires_at": _payload_value(row["expires_at"]),
+            "status": grant_status or "unknown",
             "created_at": _payload_value(row["created_at"]),
         }
 
@@ -1188,7 +1196,14 @@ class QuotaOperationsService:
 
     # ---- Teacher classroom aggregate ----------------------------------
 
-    def classroom_usage(self, classroom_id: str, *, start: datetime, end: datetime) -> dict[str, Any]:
+    def classroom_usage(
+        self,
+        classroom_id: str,
+        *,
+        workspace_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
         start = _utc(start)
         end = _utc(end)
         if end <= start:
@@ -1205,6 +1220,7 @@ class QuotaOperationsService:
             rows = connection.execute(
                 select(UsageEventModel).where(
                     UsageEventModel.user_id.in_(members or ["__none__"]),
+                    UsageEventModel.workspace_id == workspace_id,
                     UsageEventModel.occurred_at >= _db_time(start),
                     UsageEventModel.occurred_at < _db_time(end),
                 )

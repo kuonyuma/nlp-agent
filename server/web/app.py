@@ -2558,6 +2558,7 @@ def create_app(
         return await asyncio.to_thread(
             operations.classroom_usage,
             classroom_id,
+            workspace_id=workspace_id,
             start=end - timedelta(days=days),
             end=end,
         )
@@ -2611,9 +2612,12 @@ def create_app(
     async def usage_me(
         request: Request,
         principal: Principal,
+        workspace_id: str | None = Query(default=None, max_length=128),
         days: int = Query(30, ge=1, le=365),
     ):
         authorization_service.require(principal, Permission.QUOTA_USAGE_READ_SELF)
+        if workspace_id is not None:
+            principal.require_workspace(workspace_id)
         reader = getattr(request.app.state, "quota_usage_reader", None)
         if reader is None:
             return _problem(
@@ -2625,6 +2629,7 @@ def create_app(
         return await asyncio.to_thread(
             reader.user_snapshot,
             principal.user_id,
+            workspace_id=workspace_id,
             days=days,
         )
 
@@ -2647,11 +2652,31 @@ def create_app(
                 code="quota_unavailable",
                 title="Quota persistence is unavailable",
             )
+        classroom_ids = tuple(principal.classroom_ids)
+        if workspace_id is not None and classroom_ids:
+            factory = getattr(request.app.state.gateway, "authorization_session_factory", None)
+            if factory is None:
+                # A workspace-scoped snapshot must not trust an unscoped
+                # classroom id list when the authorization store is absent.
+                classroom_ids = ()
+            else:
+                async with factory() as session:
+                    classroom_ids = tuple(
+                        (
+                            await session.scalars(
+                                select(ClassroomModel.id).where(
+                                    ClassroomModel.id.in_(classroom_ids),
+                                    ClassroomModel.workspace_id == workspace_id,
+                                    ClassroomModel.status == "active",
+                                )
+                            )
+                        ).all()
+                    )
         snapshot = await asyncio.to_thread(
             quota_service.snapshot,
             user_id=principal.user_id,
             workspace_id=workspace_id,
-            classroom_ids=tuple(principal.classroom_ids),
+            classroom_ids=classroom_ids,
         )
         explanation = None
         management = getattr(request.app.state, "quota_management", None)
@@ -2662,7 +2687,7 @@ def create_app(
                     user_id=principal.user_id,
                     workspace_id=workspace_id,
                     role_codes=tuple(principal.roles),
-                    classroom_ids=tuple(principal.classroom_ids),
+                    classroom_ids=classroom_ids,
                     at=datetime.now(timezone.utc),
                 )
             except QuotaDomainError:

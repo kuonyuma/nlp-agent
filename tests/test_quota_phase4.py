@@ -354,6 +354,10 @@ def test_provider_reconciliation_refreshes_an_unmatched_line_after_late_usage_ar
     assert operations.reconcile_provider_billing(
         [{**statement, "idempotency_key": "statement-late-retry"}]
     )["items"][0]["status"] == "matched"
+    with pytest.raises(ValueError, match="idempotency key conflicts"):
+        operations.reconcile_provider_billing(
+            [{**statement, "billed_at": NOW + timedelta(minutes=1)}]
+        )
 
 
 def test_billing_repair_appends_a_correction_ledger_entry():
@@ -522,6 +526,8 @@ def test_gift_and_reset_credits_are_idempotent_and_append_only():
         effective_from=NOW,
     )
     assert reset_replay["operation_id"] == reset["operation_id"]
+    assert gift["reason"] == "welcome"
+    assert gift["status"] == "active"
     with engine.connect() as connection:
         assert connection.execute(select(QuotaGrantModel)).fetchall().__len__() == 2
         assert connection.execute(select(QuotaCreditOperationModel)).fetchall().__len__() == 2
@@ -621,9 +627,36 @@ def test_classroom_aggregate_sums_members_and_returns_usage_status_counts():
         connection.execute(insert(UsageEventModel).values(_usage_event(operation_id="op-class-2", user_id="user-2", credits_micro=None, usage_status="pending")))
 
     aggregate = QuotaOperationsService(engine).classroom_usage(
-        "classroom-1", start=NOW - timedelta(days=1), end=NOW + timedelta(days=1)
+        "classroom-1", workspace_id="workspace-1", start=NOW - timedelta(days=1), end=NOW + timedelta(days=1)
     )
     assert aggregate["students"] == 2
     assert aggregate["events"] == 2
     assert aggregate["priced_credits_micro"] == 11
     assert aggregate["pending_events"] == 1
+
+
+def test_classroom_aggregate_does_not_mix_events_from_other_workspaces():
+    engine = _engine()
+    with engine.begin() as connection:
+        connection.execute(
+            insert(_CLASSROOM_MEMBER_TABLE).values(
+                classroom_id="classroom-1", user_id="user-1", member_role="student", status="active"
+            )
+        )
+        connection.execute(
+            insert(UsageEventModel).values(
+                _usage_event(operation_id="op-class-workspace-1", workspace_id="workspace-1", credits_micro=11)
+            )
+        )
+        connection.execute(
+            insert(UsageEventModel).values(
+                _usage_event(operation_id="op-class-workspace-2", workspace_id="workspace-2", credits_micro=99)
+            )
+        )
+
+    aggregate = QuotaOperationsService(engine).classroom_usage(
+        "classroom-1", workspace_id="workspace-1", start=NOW - timedelta(days=1), end=NOW + timedelta(days=1)
+    )
+
+    assert aggregate["events"] == 1
+    assert aggregate["priced_credits_micro"] == 11

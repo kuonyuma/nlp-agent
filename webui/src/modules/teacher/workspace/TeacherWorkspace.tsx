@@ -59,8 +59,12 @@ export function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     let active = true;
-    setClassroomsLoading(true);
-    setError("");
+    queueMicrotask(() => {
+      if (active) {
+        setClassroomsLoading(true);
+        setError("");
+      }
+    });
     void api.listClassrooms().then((result) => {
       if (!active) return;
       const next = result.items.filter((classroom) => classroom.workspace_id === workspaceId);
@@ -76,12 +80,16 @@ export function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     if (!selectedClassroom) {
-      setUsage(null);
+      queueMicrotask(() => setUsage(null));
       return;
     }
     let active = true;
-    setUsageLoading(true);
-    setError("");
+    queueMicrotask(() => {
+      if (active) {
+        setUsageLoading(true);
+        setError("");
+      }
+    });
     void api.getTeacherClassroomUsage(selectedClassroom.id, selectedClassroom.workspace_id, 30).then((result) => {
       if (active) setUsage(result);
     }).catch((reason) => {
