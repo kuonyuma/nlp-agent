@@ -114,6 +114,16 @@ describe("FilesPanel", () => {
     expect(localStorage.getItem("nlp-agent.imported-files.v1:alice:workspace-1")).toBeNull();
   });
 
+  it("loads a supported file through the actual drop event", async () => {
+    render(<FilesPanel userId="alice" workspaceId="workspace-1" />);
+    const panel = screen.getByLabelText("文件工具");
+    const dropped = new File(["# 拖入文件"], "dropped.md", { type: "text/markdown" });
+    fireEvent.drop(panel, { dataTransfer: { files: [dropped] } });
+
+    expect(await screen.findByRole("button", { name: "预览 dropped.md" })).toBeInTheDocument();
+    expect(screen.getByTestId("markdown-preview")).toHaveTextContent("# 拖入文件");
+  });
+
   it("tracks nested drag-enter/leave events instead of flickering while crossing child elements", () => {
     render(<FilesPanel userId="alice" workspaceId="workspace-1" />);
     const panel = screen.getByLabelText("文件工具");

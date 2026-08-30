@@ -5,24 +5,12 @@ import type { DragEvent, ChangeEvent } from "react";
 import { createUuid } from "@/shared/utils/uuid";
 import { DocumentCodeView } from "./DocumentCodeView";
 import { MarkdownContent } from "./MarkdownContent";
-
-const STORAGE_NAMESPACE = "nlp-agent.imported-files.v1";
+import { importedFilesStorageKey, loadImportedFiles, type ImportedFile } from "./importedFiles";
 // 800k UTF-16 characters is a generous but bounded preview. The byte slice
 // below must stay a little larger than the worst case (4 bytes per character)
 // so a CJK-only 800k-character document does not get cut short accidentally.
 const MAX_PREVIEW_CHARS = 800_000;
 const MAX_PREVIEW_BYTES = 4 * 1024 * 1024;
-
-interface ImportedFile {
-  id: string;
-  name: string;
-  content: string;
-  language: "markdown" | "text" | "code";
-  codeLanguage: string;
-  bytes: number;
-  truncated: boolean;
-  importedAt: number;
-}
 
 const CODE_EXTENSIONS: Record<string, string> = {
   js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "jsx", ts: "typescript", tsx: "tsx",
@@ -58,12 +46,6 @@ function baseNameOf(name: string) {
   return name.toLowerCase().replace(/\.[^.]*$/, "");
 }
 
-function storageKey(userId: string | null, workspaceId: string) {
-  const user = encodeURIComponent(userId?.trim() || "guest");
-  const workspace = encodeURIComponent(workspaceId.trim() || "default");
-  return STORAGE_NAMESPACE + ":" + user + ":" + workspace;
-}
-
 function isSupportedFile(file: File) {
   const extension = extensionOf(file.name);
   if (extension) return SUPPORTED_EXTENSIONS.has(extension);
@@ -95,15 +77,6 @@ function formatBytes(bytes: number) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-function loadImportedFiles(key: string): ImportedFile[] {
-  try {
-    const raw = JSON.parse(localStorage.getItem(key) ?? "[]") as ImportedFile[];
-    return Array.isArray(raw) ? raw.filter((item) => item && typeof item.name === "string" && typeof item.content === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
 function previewFile(file: File, text: string): ImportedFile {
   const meta = describeFile(file);
   return {
@@ -117,7 +90,7 @@ export function FilesPanel({ userId, workspaceId }: {
   userId: string | null;
   workspaceId: string;
 }) {
-  const key = storageKey(userId, workspaceId);
+  const key = importedFilesStorageKey(userId, workspaceId);
   const [files, setFiles] = useState<ImportedFile[]>(() => loadImportedFiles(key));
   const [selectedId, setSelectedId] = useState<string | null>(files[files.length - 1]?.id ?? null);
   const [dragging, setDragging] = useState(false);
@@ -142,7 +115,7 @@ export function FilesPanel({ userId, workspaceId }: {
 
   const importFiles = async (incoming: FileList | File[]) => {
     setError("");
-    const list = Array.from(incoming).filter((item) => item && item.size >= 0);
+    const list = Array.from(incoming).filter((item) => item && item.size > 0);
     if (!list.length) return;
     const importedFiles: ImportedFile[] = [];
     const problems: string[] = [];
