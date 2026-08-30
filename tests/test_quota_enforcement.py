@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, insert, select
+from sqlalchemy.dialects.mysql import dialect as mysql_dialect
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
-from server.quota.contracts import AdmitTurn, FinishTurn
+from server.quota.contracts import AdmitTurn, FinishTurn, TurnAdmissionResult
 from server.quota.errors import QuotaErrorCode, QuotaRejectedError
 from server.quota.models import (
     PolicyBindingModel,
@@ -151,6 +154,114 @@ def _admit(service: QuotaService, command: AdmitTurn):
         return service.admit_turn(command, role_codes=("student",), now=NOW)
     except QuotaRejectedError as error:
         return error
+
+
+@pytest.mark.parametrize("error_code", [1205, 1213])
+def test_admission_retries_the_complete_mysql_transaction_after_lock_error(
+    monkeypatch, error_code
+):
+    class Transaction:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class Engine:
+        def __init__(self):
+            self.begin_count = 0
+
+        def begin(self):
+            self.begin_count += 1
+            return Transaction()
+
+    engine = Engine()
+    service = QuotaService(engine)
+    attempts = 0
+
+    def admit_in_transaction(connection, command, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError(
+                "admit",
+                {},
+                RuntimeError(error_code, "MySQL transaction lock error"),
+            )
+        return TurnAdmissionResult(
+            allowed=True,
+            reservation_id="reservation-after-retry",
+            duplicate=True,
+        )
+
+    monkeypatch.setattr(service, "admit_in_transaction", admit_in_transaction)
+    result = service.admit_turn(
+        AdmitTurn(
+            request_id="request-after-retry",
+            user_id="user-after-retry",
+            turn_id="turn-after-retry",
+            model_profile="economy",
+            model_role="coordinator",
+            estimated_output_tokens=1,
+            idempotency_key="idempotency-after-retry",
+        )
+    )
+
+    assert result.allowed is True
+    assert attempts == 2
+    assert engine.begin_count == 2
+
+
+def test_mysql_bucket_initialization_uses_atomic_upsert():
+    statements = []
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def first(self):
+            return None
+
+        def one(self):
+            return {
+                "id": "bucket-after-upsert",
+                "limit_micro": 100,
+                "policy_version": "1",
+            }
+
+    class NestedTransaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class Connection:
+        dialect = SimpleNamespace(name="mysql")
+
+        def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+        def begin_nested(self):
+            return NestedTransaction()
+
+    bucket = QuotaService._get_or_create_bucket(
+        Connection(),
+        owner_type="user",
+        owner_id="user-upsert",
+        bucket_type="daily",
+        period_start=NOW.replace(hour=0),
+        period_end=NOW.replace(hour=0) + timedelta(days=1),
+        policy=SimpleNamespace(policy_id="policy-1", version="1"),
+        limit=100,
+        now=NOW,
+    )
+
+    assert bucket["id"] == "bucket-after-upsert"
+    assert "ON DUPLICATE KEY UPDATE" in str(
+        statements[0].compile(dialect=mysql_dialect())
+    )
 
 
 def test_turn_idempotency_replays_one_reservation_and_one_reserve_ledger(quota_engine):

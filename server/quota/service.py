@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 import logging
 from calendar import monthrange
@@ -12,7 +13,7 @@ from typing import Any, Callable, Sequence
 from sqlalchemy import Engine, and_, create_engine, func, insert, or_, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from server.quota.contracts import (
     AdmitTurn,
@@ -50,6 +51,9 @@ UTC = timezone.utc
 logger = logging.getLogger(__name__)
 _GLOBAL_QUOTA_LOCK = threading.RLock()
 _ACTIVE_RESERVATION_STATUSES = ("reserved", "running", "settling")
+_RETRYABLE_MYSQL_TRANSACTION_ERRORS = frozenset({1205, 1213})
+_MYSQL_TRANSACTION_ATTEMPTS = 3
+_MYSQL_TRANSACTION_RETRY_BASE_S = 0.02
 
 
 def _utc(value: datetime | None) -> datetime:
@@ -73,6 +77,23 @@ def _aware(value: datetime | None) -> datetime | None:
 
 def _now_factory() -> datetime:
     return datetime.now(UTC)
+
+
+def _mysql_error_code(error: DBAPIError) -> int | None:
+    args = getattr(getattr(error, "orig", None), "args", ())
+    if not args:
+        return None
+    try:
+        return int(args[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_retryable_mysql_transaction_error(error: DBAPIError) -> bool:
+    return (
+        not error.connection_invalidated
+        and _mysql_error_code(error) in _RETRYABLE_MYSQL_TRANSACTION_ERRORS
+    )
 
 
 class QuotaService:
@@ -157,15 +178,31 @@ class QuotaService:
         classroom_ids: Sequence[str] = (),
         now: datetime | None = None,
     ) -> TurnAdmissionResult:
-        with _GLOBAL_QUOTA_LOCK:
-            with self._engine.begin() as connection:
-                result = self.admit_in_transaction(
-                    connection,
-                    command,
-                    role_codes=role_codes,
-                    classroom_ids=classroom_ids,
-                    now=now,
-                )
+        # MySQL rolls back the whole transaction after 1213/1205.  Retrying
+        # only a nested savepoint is unsafe because that savepoint no longer
+        # exists after a deadlock victim is selected.  Re-run admission from a
+        # fresh engine transaction instead.
+        for attempt in range(_MYSQL_TRANSACTION_ATTEMPTS):
+            try:
+                with _GLOBAL_QUOTA_LOCK:
+                    with self._engine.begin() as connection:
+                        result = self.admit_in_transaction(
+                            connection,
+                            command,
+                            role_codes=role_codes,
+                            classroom_ids=classroom_ids,
+                            now=now,
+                        )
+                break
+            except DBAPIError as error:
+                if (
+                    not _is_retryable_mysql_transaction_error(error)
+                    or attempt + 1 >= _MYSQL_TRANSACTION_ATTEMPTS
+                ):
+                    raise
+                time.sleep(_MYSQL_TRANSACTION_RETRY_BASE_S * (2**attempt))
+        else:
+            raise RuntimeError("unreachable MySQL admission retry state")
         if not result.duplicate:
             self.notify_reservation(result.reservation_id)
         return result
@@ -1739,44 +1776,59 @@ class QuotaService:
             QuotaBucketModel.period_start == _db_time(period_start),
             QuotaBucketModel.period_end == _db_time(period_end),
         )
-        row = connection.execute(
-            select(QuotaBucketModel).where(where).with_for_update()
-        ).mappings().first()
-        if row is None:
-            values = {
-                "id": str(uuid.uuid4()),
-                "owner_type": owner_type,
-                "owner_id": owner_id,
-                "policy_id": policy.policy_id,
-                "policy_version": policy.version,
-                "bucket_type": bucket_type,
-                "period_start": _db_time(period_start),
-                "period_end": _db_time(period_end),
-                "limit_micro": limit,
-                "consumed_micro": 0,
-                "reserved_micro": 0,
-                "limit_revision": 1,
-                "effective_policy_version": policy.version,
-                "version": 1,
-                "over_limit": False,
-                "created_at": _db_time(now),
-                "updated_at": _db_time(now),
-            }
-            if connection.dialect.name == "sqlite":
-                # Admission is serialized by _GLOBAL_QUOTA_LOCK for the
-                # embedded/SQLite runtime, so a savepoint is unnecessary and
-                # would make rollback behavior harder to reason about.
-                connection.execute(insert(QuotaBucketModel).values(**values))
-            else:
-                try:
-                    with connection.begin_nested():
-                        connection.execute(insert(QuotaBucketModel).values(**values))
-                except IntegrityError:
-                    pass
+        values = {
+            "id": str(uuid.uuid4()),
+            "owner_type": owner_type,
+            "owner_id": owner_id,
+            "policy_id": policy.policy_id,
+            "policy_version": policy.version,
+            "bucket_type": bucket_type,
+            "period_start": _db_time(period_start),
+            "period_end": _db_time(period_end),
+            "limit_micro": limit,
+            "consumed_micro": 0,
+            "reserved_micro": 0,
+            "limit_revision": 1,
+            "effective_policy_version": policy.version,
+            "version": 1,
+            "over_limit": False,
+            "created_at": _db_time(now),
+            "updated_at": _db_time(now),
+        }
+        if connection.dialect.name == "mysql":
+            # Do not probe a missing unique key with FOR UPDATE first: that
+            # creates an InnoDB gap lock.  Let the unique scope and atomic
+            # upsert arbitrate first creation, then lock the materialized row.
+            connection.execute(
+                mysql_insert(QuotaBucketModel.__table__)
+                .values(**values)
+                .on_duplicate_key_update(
+                    id=QuotaBucketModel.__table__.c.id
+                )
+            )
             row = connection.execute(
                 select(QuotaBucketModel).where(where).with_for_update()
             ).mappings().one()
-        elif row["limit_micro"] != limit or row["policy_version"] != policy.version:
+        else:
+            row = connection.execute(
+                select(QuotaBucketModel).where(where).with_for_update()
+            ).mappings().first()
+            if row is None:
+                if connection.dialect.name == "sqlite":
+                    # Admission is serialized by _GLOBAL_QUOTA_LOCK for the
+                    # embedded/SQLite runtime, so a savepoint is unnecessary
+                    # and would make rollback behavior harder to reason about.
+                    connection.execute(insert(QuotaBucketModel).values(**values))
+                else:
+                    try:
+                        with connection.begin_nested():
+                            connection.execute(insert(QuotaBucketModel).values(**values))
+                    except IntegrityError:
+                        pass
+                row = connection.execute(
+                    select(QuotaBucketModel).where(where).with_for_update()
+                ).mappings().one()
+        if row["limit_micro"] != limit or row["policy_version"] != policy.version:
             connection.execute(
                 update(QuotaBucketModel)
                 .where(QuotaBucketModel.id == row["id"])
