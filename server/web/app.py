@@ -44,6 +44,7 @@ from server.web.auth import (
 )
 from server.web.database_auth import DatabaseSessionAuth, DatabaseSessionClaims
 from server.agent.session_service import DatabaseSessionService, local_session_service
+from server.session.summary import summary_sweep_loop
 from server.web.contracts import (
     CreateSessionBody,
     RenameSessionBody,
@@ -349,9 +350,22 @@ def create_app(
             asyncio.create_task(reconcile_sandbox_leases(), name="sandbox-lease-reconciler")
             if gateway.authorization_session_factory is not None else None
         )
+
+        async def run_summary_sweep() -> None:
+            # Durable backfill for titles lost to a restart; the lease claim in
+            # ``generate_and_store_summary`` deduplicates it against the Worker.
+            await summary_sweep_loop(gateway.authorization_session_factory)
+
+        summary_sweeper = (
+            asyncio.create_task(run_summary_sweep(), name="session-summary-sweep")
+            if gateway.authorization_session_factory is not None else None
+        )
         try:
             yield
         finally:
+            if summary_sweeper is not None:
+                summary_sweeper.cancel()
+                await asyncio.gather(summary_sweeper, return_exceptions=True)
             if sandbox_reconciler is not None:
                 sandbox_reconciler.cancel()
                 await asyncio.gather(sandbox_reconciler, return_exceptions=True)

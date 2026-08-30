@@ -8,10 +8,15 @@ import type { LearningPreferences, SessionLearningMeta, SessionSummary } from "@
 
 const DEFAULT_SESSION_TITLE = "新的学习对话";
 
-function displayTitle(session: SessionSummary): string {
-  // The backend conversation row is the single source of truth for the title
-  // (manual rename, LLM summary, and first-question fallback all land there).
-  return session.title || DEFAULT_SESSION_TITLE;
+function displayTitle(session: SessionSummary, meta?: SessionLearningMeta): string {
+  // A fresh manual rename lives on the backend row (``title_is_manual``).  A
+  // legacy manual rename (pre-upgrade) still lives only in ``meta.title``; it
+  // takes priority over an LLM-generated title so "manual rename wins".
+  const backendTitle = session.title?.trim();
+  const legacyTitle = meta?.title?.trim();
+  if (backendTitle && session.title_is_manual) return backendTitle;
+  if (legacyTitle) return legacyTitle;
+  return backendTitle || DEFAULT_SESSION_TITLE;
 }
 
 export function Sidebar({ sessions, preferences, activeId, open, collapsed, connected, onClose, onCollapse, onExpand, onSelect, onCreate, onRename, onMeta, onAddCategory, onRenameCategory, onDeleteCategory, onDelete, onAccount, onSettings }: {
@@ -46,7 +51,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
   const visible = useMemo(() => sessions.filter((session) => {
     const meta = preferences.sessions[session.session_id];
     if (!!meta?.archived !== showArchived) return false;
-    const title = displayTitle(session);
+    const title = displayTitle(session, meta);
     return title.toLowerCase().includes(query.toLowerCase());
   }), [preferences.sessions, query, sessions, showArchived]);
   const grouped = useMemo(() => {
@@ -136,7 +141,7 @@ export function Sidebar({ sessions, preferences, activeId, open, collapsed, conn
           </h3>
           {group.items.map((session) => {
             const meta = preferences.sessions[session.session_id] ?? {};
-            const title = displayTitle(session);
+            const title = displayTitle(session, meta);
             const isRenaming = renamingSessionId === session.session_id;
             return <div className={`session-item ${activeId === session.session_id ? "active" : ""}`} key={session.session_id}>
               {isRenaming ? (

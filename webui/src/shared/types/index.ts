@@ -221,6 +221,7 @@ export interface SessionSummary {
   created_at?: string | number;
   last_active?: string | number;
   title?: string;
+  title_is_manual?: boolean;
 }
 
 export interface SessionListResponse {

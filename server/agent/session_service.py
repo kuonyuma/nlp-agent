@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
@@ -24,6 +23,7 @@ from server.agent.session_storage import (
     get_session_transcript_path,
 )
 from server.agent.node.session_storage import DATA_DIR
+from server.session.title_text import clean_title
 from server.infrastructure.mysql.models import (
     AgentCheckpointModel,
     ConversationMessageModel,
@@ -48,41 +48,38 @@ from server.infrastructure.mysql.models import (
 # until that lands (or when it fails), the sidebar shows the original question
 # instead of the generic "new conversation" label.  This is derived from the
 # turn text already stored on the session, so nothing is persisted separately.
-_SIDEBAR_TITLE_MAX = 15
-_LEARNING_CONTEXT_RE = re.compile(r"^<!-- nlp-learning-context:.*? -->\s*", re.S)
-_LEARNING_SETTING_RE = re.compile(r"^\[学习设置：.*?\]\s*", re.S)
-_ATTACHMENT_BLOCK_RE = re.compile(r"\s*---附件---.*$", re.S)
-
-
 def _first_question_title(input_text: str | None) -> str:
     if not input_text:
         return ""
-    text = _LEARNING_CONTEXT_RE.sub("", input_text)
-    text = _LEARNING_SETTING_RE.sub("", text)
-    text = _ATTACHMENT_BLOCK_RE.sub("", text)
-    text = re.sub(r"\s+", " ", text).strip().strip("\"'“”‘’「」")
-    if not text:
-        return ""
-    return f"{text[:_SIDEBAR_TITLE_MAX]}…" if len(text) > _SIDEBAR_TITLE_MAX else text
+    return clean_title(input_text, ellipsis=True)
 
 
 async def _first_question_titles(
     session: AsyncSession, conversation_ids: list[str]
 ) -> dict[str, str]:
-    """Map conversation id -> derived first-question title (earliest turn)."""
+    """Map conversation id -> derived first-question title (earliest turn).
+
+    Only the earliest turn per conversation is fetched (a window function),
+    rather than streaming every turn for every untitled session into Python.
+    """
+    row_number = func.row_number().over(
+        partition_by=TurnModel.conversation_id,
+        order_by=(TurnModel.created_at, TurnModel.id),
+    ).label("rn")
+    earliest = (
+        select(TurnModel.conversation_id, TurnModel.input_text, row_number)
+        .where(TurnModel.conversation_id.in_(conversation_ids))
+        .subquery()
+    )
     rows = (
         await session.execute(
-            select(TurnModel.conversation_id, TurnModel.input_text)
-            .where(TurnModel.conversation_id.in_(conversation_ids))
-            .order_by(TurnModel.created_at, TurnModel.id)
+            select(earliest.c.conversation_id, earliest.c.input_text).where(
+                earliest.c.rn == 1
+            )
         )
     ).all()
-    seen: set[str] = set()
     titles: dict[str, str] = {}
     for conversation_id, input_text in rows:
-        if conversation_id in seen:
-            continue
-        seen.add(conversation_id)
         title = _first_question_title(input_text)
         if title:
             titles[conversation_id] = title
@@ -118,6 +115,7 @@ class DatabaseSessionService:
             "user_id": row.owner_user_id,
             "workspace_id": row.workspace_id,
             "channel": row.channel,
+            "title_is_manual": bool(row.title_is_manual),
         }
 
     @staticmethod
@@ -348,7 +346,7 @@ class DatabaseSessionService:
                     ConversationModel.id == session_id,
                     ConversationModel.owner_user_id == principal.user_id,
                 )
-                .values(title=title[:255])
+                .values(title=title[:255], title_is_manual=True)
             )
         return {"session_id": session_id, "title": title[:255]}
 

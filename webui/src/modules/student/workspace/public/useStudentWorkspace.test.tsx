@@ -245,6 +245,19 @@ describe("useStudentWorkspace settings", () => {
     expect(stored.title).toBeUndefined();
   });
 
+  it("surfaces a rename failure instead of silently dropping it", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue({ items: [{ session_id: "session-new", user_id: "user", workspace_id: "default", channel: "web", title: "原标题" }] });
+    renameSessionMock.mockRejectedValue(new Error("network down"));
+    const { result } = renderHook(() => useStudentWorkspace());
+    await waitFor(() => expect(result.current.bootStatus).toBe("ready"));
+
+    await act(async () => { await result.current.renameSessionTitle("session-new", "新标题"); });
+
+    expect(renameSessionMock).toHaveBeenCalledWith("session-new", "新标题");
+    expect(result.current.requestError).toContain("重命名失败");
+    expect(result.current.sessions[0].title).toBe("原标题");
+  });
+
   it("starts a new chat without creating a backend session until a message is sent", async () => {
     const { result } = renderHook(() => useStudentWorkspace());
     await waitFor(() => expect(result.current.bootStatus).toBe("ready"));

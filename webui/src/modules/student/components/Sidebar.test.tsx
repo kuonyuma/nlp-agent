@@ -92,6 +92,29 @@ describe("Sidebar delete requests", () => {
     expect(screen.getByText("Transformer 模型讲解")).toBeInTheDocument();
   });
 
+  it("shows a legacy local rename when the backend has no title", () => {
+    const sessions = [{ session_id: "session_3", user_id: "student", workspace_id: "default", channel: "web" }];
+    render(<Sidebar {...props} sessions={sessions} preferences={{ ...props.preferences, sessions: { session_3: { title: "升级前改的标题" } } }} />);
+
+    expect(screen.getByText("升级前改的标题")).toBeInTheDocument();
+  });
+
+  it("prefers a legacy manual title over a non-manual backend title", () => {
+    const sessions = [{ session_id: "session_4", user_id: "student", workspace_id: "default", channel: "web", title: "LLM 生成的标题" }];
+    render(<Sidebar {...props} sessions={sessions} preferences={{ ...props.preferences, sessions: { session_4: { title: "我手动改的标题" } } }} />);
+
+    expect(screen.getByText("我手动改的标题")).toBeInTheDocument();
+    expect(screen.queryByText("LLM 生成的标题")).not.toBeInTheDocument();
+  });
+
+  it("prefers a fresh manual backend title over a legacy local one", () => {
+    const sessions = [{ session_id: "session_5", user_id: "student", workspace_id: "default", channel: "web", title: "后端手动标题", title_is_manual: true }];
+    render(<Sidebar {...props} sessions={sessions} preferences={{ ...props.preferences, sessions: { session_5: { title: "旧本地标题" } } }} />);
+
+    expect(screen.getByText("后端手动标题")).toBeInTheDocument();
+    expect(screen.queryByText("旧本地标题")).not.toBeInTheDocument();
+  });
+
   it("renames a session through the backend callback", () => {
     const onRename = vi.fn();
     const { container } = render(<Sidebar {...props} onRename={onRename} />);

@@ -18,7 +18,7 @@ from gateway.state_factory import build_turn_execution_state
 from gateway.turn_execution import InProcessTurnExecutor
 from server.application.turn_reliability import OutboxRelay, TurnReliabilityService
 from server.infrastructure.mysql import MySQLRuntime
-from server.session.summary import schedule_summary
+from server.session.summary import schedule_summary, summary_sweep_loop
 from server.worker.fencing import FencedTurnExecutor
 from server.sandbox.manager_rpc import create_sandbox_manager_rpc_client
 from server.sandbox.model_tools import configure_model_sandbox_service
@@ -184,11 +184,16 @@ async def run_worker() -> None:
             await asyncio.sleep(0.5)
 
     relay_task = asyncio.create_task(relay_forever(), name="mysql-outbox-relay")
+    summary_sweep_task = asyncio.create_task(
+        summary_sweep_loop(database_runtime.session_factory),
+        name="session-summary-sweep",
+    )
     try:
         await worker.run_forever()
     finally:
         relay_task.cancel()
-        await asyncio.gather(relay_task, return_exceptions=True)
+        summary_sweep_task.cancel()
+        await asyncio.gather(relay_task, summary_sweep_task, return_exceptions=True)
         await worker.close()
         await engine.close()
         await sandbox_model_service.close()

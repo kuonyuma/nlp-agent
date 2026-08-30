@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Computed,
     ForeignKey,
@@ -464,9 +465,15 @@ class ConversationModel(TimestampedModel, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
     last_message_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
     # Basis of the last LLM-generated title: the newest completed turn's
-    # ``completed_at``.  NULL until the first summary is written.  Used by the
-    # conditional UPDATE to reject out-of-order overwrites.
+    # ``completed_at``.  NULL until the first summary is written.  The
+    # conditional UPDATE keys on this to reject out-of-order overwrites.
     title_updated_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+    # True once the user manually renames the session; the summarizer never
+    # overwrites a manual title.
+    title_is_manual: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
+    # Short-lived lease taken by the background summarizer before it pays for an
+    # LLM call; prevents two workers from generating the same title concurrently.
+    summary_lease_expires_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
 
 
 class TurnModel(TimestampedModel, Base):
