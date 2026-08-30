@@ -151,6 +151,11 @@ class BackendGateway:
                 event_channel=str(gateway_config.get("redis_event_channel", "nlp-agent:events")),
                 control_channel=str(gateway_config.get("redis_control_channel", "nlp-agent:control")),
                 reclaim_idle_ms=int(gateway_config.get("redis_reclaim_idle_ms", 60_000)),
+                quota_snapshot_channel=str(
+                    gateway_config.get(
+                        "redis_quota_snapshot_channel", "nlp-agent:quota-snapshot"
+                    )
+                ),
                 cancel_key_prefix=str(
                     gateway_config.get("redis_cancel_key_prefix", "nlp-agent:cancel:")
                 ),

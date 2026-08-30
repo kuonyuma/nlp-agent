@@ -61,6 +61,10 @@ class DurableModelUsageReporter(ModelUsageReporter):
             self._owns_engine = False
         self._quota_service = quota_service
 
+    def set_snapshot_notifier(self, notifier: Any | None) -> None:
+        if self._quota_service is not None:
+            self._quota_service.set_snapshot_notifier(notifier)
+
     async def report(
         self,
         invocation: ModelInvocation,
@@ -81,10 +85,14 @@ class DurableModelUsageReporter(ModelUsageReporter):
             "outcome": outcome.model_dump(mode="json"),
         }
         usage_values = self._values(invocation, usage, outcome, payload)
+        reservation_id_to_notify = invocation.attribution.reservation_id
         try:
             with self._engine.begin() as connection:
                 existing = self._existing_event(connection, invocation.operation_id)
                 if existing is not None:
+                    reservation_id_to_notify = (
+                        existing["reservation_id"] or reservation_id_to_notify
+                    )
                     existing_payload = existing["raw_usage_json"]
                     current_status = existing["usage_status"]
                     next_status = usage_values["usage_status"]
@@ -164,6 +172,8 @@ class DurableModelUsageReporter(ModelUsageReporter):
             if existing is None:
                 raise
             return self._report_sync(invocation, usage, outcome)
+        if self._quota_service is not None and reservation_id_to_notify:
+            self._quota_service.notify_reservation(reservation_id_to_notify)
 
     def _settle_in_transaction(
         self,

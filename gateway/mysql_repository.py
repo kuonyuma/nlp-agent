@@ -155,7 +155,12 @@ class MySQLGatewayRepository:
             c.execute(text("INSERT INTO nlp_turns(id,conversation_id,workspace_id,user_id,status,input_text,learning_state_json,idempotency_key) VALUES(:id,:s,:w,:u,'accepted',:input,:state,:key)"), {"id": turn_id, "s": session_id, "w": workspace_id, "u": user_id, "input": input_text, "state": json.dumps(state), "key": idempotency_key})
             if dispatch_payload is not None:
                 c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
-        return self._record(self._row(turn_id) or {}), False
+        record = self._record(self._row(turn_id) or {})
+        if self.quota_service is not None and quota_admission is not None:
+            self.quota_service.notify_reservation(
+                self.quota_service.reservation_id_for_turn(turn_id)
+            )
+        return record, False
 
     def update_turn(self, turn_id: str, status: TurnStatus, *, final_text=None, error_kind=None, error_message=None, exercise_state=None, dispatch_payload: str | None = None) -> TurnRecord:
         terminal = status in {TurnStatus.COMPLETED, TurnStatus.FAILED, TurnStatus.CANCELLED, TurnStatus.INTERRUPTED}

@@ -18,6 +18,7 @@ from gateway.turn_execution import InProcessTurnExecutor
 from server.application.turn_reliability import OutboxRelay, TurnReliabilityService
 from server.infrastructure.mysql import MySQLRuntime
 from server.worker.fencing import FencedTurnExecutor
+from server.quota.notifications import QuotaSnapshotRedisPublisher
 from server.quota.reaper import QuotaReservationReaper
 from server.sandbox.manager_rpc import create_sandbox_manager_rpc_client
 from server.sandbox.model_tools import configure_model_sandbox_service
@@ -44,6 +45,9 @@ def redis_config() -> RedisTransportConfig:
         event_channel=str(config.get("redis_event_channel", "nlp-agent:events")),
         control_channel=str(config.get("redis_control_channel", "nlp-agent:control")),
         authorization_channel=str(config.get("redis_authorization_channel", "nlp-agent:authorization")),
+        quota_snapshot_channel=str(
+            config.get("redis_quota_snapshot_channel", "nlp-agent:quota-snapshot")
+        ),
         reclaim_idle_ms=int(config.get("redis_reclaim_idle_ms", 60_000)),
         cancel_key_prefix=str(
             config.get("redis_cancel_key_prefix", "nlp-agent:cancel:")
@@ -74,9 +78,14 @@ async def run_worker() -> None:
     )
     config = redis_config()
     redis = Redis.from_url(config.url, decode_responses=True)
+    quota_snapshot_publisher = QuotaSnapshotRedisPublisher(
+        config.url, channel=config.quota_snapshot_channel
+    )
+    usage_reporter.set_snapshot_notifier(quota_snapshot_publisher)
     gateway_config = settings.gateway_runtime
     repository = build_turn_execution_state(gateway_config)
     if getattr(repository, "quota_service", None) is not None:
+        repository.quota_service.set_snapshot_notifier(quota_snapshot_publisher)
         await asyncio.to_thread(repository.quota_service.verify_schema)
     engine = LangGraphAgentEngine()
     publisher = RedisEventPublisher(redis, config)
@@ -213,6 +222,7 @@ async def run_worker() -> None:
         if sandbox_manager is not None:
             await sandbox_manager.close()
         repository.close()
+        quota_snapshot_publisher.close()
         await redis.aclose()
         shutdown_usage_reporter(usage_reporter)
         await database_runtime.close()

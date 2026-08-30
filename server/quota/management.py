@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Sequence
 
 from sqlalchemy import Engine, and_, create_engine, func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from server.quota.contracts import AdmitTurn, PolicyBinding, QuotaPolicy
 from server.quota.errors import QuotaDomainError, QuotaErrorCode
@@ -361,25 +362,54 @@ class QuotaManagementService:
                     raise QuotaDomainError(QuotaErrorCode.GRANT_CONFLICT, "Grant idempotency key conflicts with existing allocation")
                 return self._grant_payload(existing)
             grant_id = str(uuid.uuid4())
-            connection.execute(
-                insert(QuotaGrantModel).values(
-                    id=grant_id,
-                    owner_type=owner_type,
-                    owner_id=owner_id,
-                    bucket_type=bucket_type,
-                    period_start=_db_time(start),
-                    period_end=_db_time(end),
-                    source_type=source_type,
-                    source_id=source_id,
-                    allocated_micro=allocated_micro,
-                    effective_from=_db_time(effective),
-                    expires_at=_db_time(expires) if expires else None,
-                    status="active",
-                    reason=reason,
-                    created_by=created_by,
-                    idempotency_key=idempotency_key,
-                )
-            )
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(QuotaGrantModel).values(
+                            id=grant_id,
+                            owner_type=owner_type,
+                            owner_id=owner_id,
+                            bucket_type=bucket_type,
+                            period_start=_db_time(start),
+                            period_end=_db_time(end),
+                            source_type=source_type,
+                            source_id=source_id,
+                            allocated_micro=allocated_micro,
+                            effective_from=_db_time(effective),
+                            expires_at=_db_time(expires) if expires else None,
+                            status="active",
+                            reason=reason,
+                            created_by=created_by,
+                            idempotency_key=idempotency_key,
+                        )
+                    )
+            except IntegrityError:
+                winner = connection.execute(
+                    select(QuotaGrantModel)
+                    .where(
+                        QuotaGrantModel.owner_type == owner_type,
+                        QuotaGrantModel.owner_id == owner_id,
+                        QuotaGrantModel.idempotency_key == idempotency_key,
+                    )
+                    .with_for_update()
+                ).mappings().first()
+                if winner is None:
+                    raise
+                if not self._grant_request_matches(
+                    winner,
+                    owner_type,
+                    owner_id,
+                    bucket_type,
+                    start,
+                    end,
+                    allocated_micro,
+                    source_type,
+                ):
+                    raise QuotaDomainError(
+                        QuotaErrorCode.GRANT_CONFLICT,
+                        "Grant idempotency key conflicts with existing allocation",
+                    )
+                return self._grant_payload(winner)
             self._management_ledger(
                 connection,
                 grant_id=grant_id,
@@ -530,20 +560,48 @@ class QuotaManagementService:
                     raise QuotaDomainError(QuotaErrorCode.ADJUSTMENT_CONFLICT, "Adjustment idempotency key conflicts with existing entry")
                 return self._adjustment_payload(existing)
             adjustment_id = str(uuid.uuid4())
-            connection.execute(
-                insert(QuotaAdjustmentModel).values(
-                    id=adjustment_id,
-                    owner_type=owner_type,
-                    owner_id=owner_id,
-                    bucket_type=bucket_type,
-                    period_start=_db_time(start),
-                    period_end=_db_time(end),
-                    amount_micro=amount_micro,
-                    actor_user_id=actor_user_id,
-                    reason=reason,
-                    idempotency_key=idempotency_key,
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(QuotaAdjustmentModel).values(
+                            id=adjustment_id,
+                            owner_type=owner_type,
+                            owner_id=owner_id,
+                            bucket_type=bucket_type,
+                            period_start=_db_time(start),
+                            period_end=_db_time(end),
+                            amount_micro=amount_micro,
+                            actor_user_id=actor_user_id,
+                            reason=reason,
+                            idempotency_key=idempotency_key,
+                        )
+                    )
+            except IntegrityError:
+                winner = connection.execute(
+                    select(QuotaAdjustmentModel)
+                    .where(QuotaAdjustmentModel.idempotency_key == idempotency_key)
+                    .with_for_update()
+                ).mappings().first()
+                if winner is None:
+                    raise
+                same = all(
+                    (
+                        winner["owner_type"] == owner_type,
+                        winner["owner_id"] == owner_id,
+                        winner["bucket_type"] == bucket_type,
+                        winner["period_start"] == _db_time(start),
+                        winner["period_end"] == _db_time(end),
+                        int(winner["amount_micro"]) == amount_micro,
+                        winner["actor_user_id"] == actor_user_id,
+                        winner["reason"] == reason,
+                    )
                 )
-            )
+                if not same:
+                    raise QuotaDomainError(
+                        QuotaErrorCode.ADJUSTMENT_CONFLICT,
+                        "Adjustment idempotency key conflicts with existing entry",
+                    )
+                return self._adjustment_payload(winner)
             self._management_ledger(
                 connection,
                 grant_id=None,

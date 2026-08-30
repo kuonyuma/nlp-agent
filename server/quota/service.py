@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import threading
 import uuid
+import logging
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from sqlalchemy import Engine, and_, create_engine, func, insert, or_, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -40,6 +41,7 @@ from server.quota.policy import resolve_effective_policy
 
 
 UTC = timezone.utc
+logger = logging.getLogger(__name__)
 _GLOBAL_QUOTA_LOCK = threading.RLock()
 _ACTIVE_RESERVATION_STATUSES = ("reserved", "running", "settling")
 
@@ -81,6 +83,7 @@ class QuotaService:
         database: str | Engine,
         *,
         lease_seconds: int = 300,
+        snapshot_notifier: Callable[..., Any] | Any | None = None,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
@@ -93,10 +96,48 @@ class QuotaService:
             self._engine = database
             self._owns_engine = False
         self.lease_seconds = lease_seconds
+        self._snapshot_notifier = snapshot_notifier
 
     @property
     def engine(self) -> Engine:
         return self._engine
+
+    def set_snapshot_notifier(
+        self, notifier: Callable[..., Any] | Any | None
+    ) -> None:
+        """Attach the process-wide publisher used after committed mutations."""
+        self._snapshot_notifier = notifier
+
+    def notify_reservation(self, reservation_id: str) -> None:
+        """Notify both user and workspace subscribers for a reservation."""
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(
+                    QuotaReservationModel.user_id,
+                    QuotaReservationModel.workspace_id,
+                ).where(QuotaReservationModel.id == reservation_id)
+            ).mappings().first()
+        if row is None:
+            return
+        self._notify_snapshot(owner_type="user", owner_id=row["user_id"])
+        if row["workspace_id"]:
+            self._notify_snapshot(
+                owner_type="workspace", owner_id=row["workspace_id"]
+            )
+
+    def _notify_snapshot(
+        self, *, owner_type: str | None = None, owner_id: str | None = None
+    ) -> None:
+        notifier = self._snapshot_notifier
+        if notifier is None:
+            return
+        try:
+            publish = getattr(notifier, "publish", notifier)
+            publish(owner_type=owner_type, owner_id=owner_id)
+        except Exception:
+            # Accounting is durable and must not be rolled back because a
+            # best-effort UI notification backend is unavailable.
+            logger.exception("quota snapshot notification failed")
 
     @staticmethod
     def reservation_id_for_turn(turn_id: str) -> str:
@@ -112,13 +153,16 @@ class QuotaService:
     ) -> TurnAdmissionResult:
         with _GLOBAL_QUOTA_LOCK:
             with self._engine.begin() as connection:
-                return self.admit_in_transaction(
+                result = self.admit_in_transaction(
                     connection,
                     command,
                     role_codes=role_codes,
                     classroom_ids=classroom_ids,
                     now=now,
                 )
+        if not result.duplicate:
+            self.notify_reservation(result.reservation_id)
+        return result
 
     def admit_in_transaction(
         self,
@@ -179,7 +223,32 @@ class QuotaService:
             optional=True,
         )
         workspace_policy = workspace_binding.policy if workspace_binding is not None else None
-        policies = [policy, *([workspace_policy] if workspace_policy is not None else [])]
+        classroom_policies: list[tuple[str, PolicyBinding]] = []
+        for classroom_id in sorted(set(classroom_ids)):
+            classroom_binding = self._effective_binding(
+                connection,
+                command,
+                role_codes=(),
+                classroom_ids=(classroom_id,),
+                at=at,
+                subject_types={"classroom"},
+                optional=True,
+            )
+            if classroom_binding is None:
+                if self._has_active_classroom_capacity(
+                    connection, classroom_id=classroom_id, at=at
+                ):
+                    raise self._rejection(
+                        QuotaErrorCode.ADMISSION_DENIED,
+                        f"Classroom {classroom_id!r} has capacity but no active classroom policy",
+                    )
+                continue
+            classroom_policies.append((classroom_id, classroom_binding))
+        policies = [
+            policy,
+            *([workspace_policy] if workspace_policy is not None else []),
+            *(binding.policy for _, binding in classroom_policies),
+        ]
         for candidate in policies:
             if candidate.allowed_model_profiles and command.model_profile not in candidate.allowed_model_profiles:
                 raise self._rejection(
@@ -209,6 +278,10 @@ class QuotaService:
         subjects = [("user", command.user_id, policy)]
         if workspace_policy is not None and command.workspace_id is not None:
             subjects.append(("workspace", command.workspace_id, workspace_policy))
+        subjects.extend(
+            ("classroom", classroom_id, classroom_binding.policy)
+            for classroom_id, classroom_binding in classroom_policies
+        )
         for owner_type, owner_id, subject_policy in subjects:
             for bucket_type, start, end, limit in self._periods(subject_policy, at):
                 bucket = self._get_or_create_bucket(
@@ -277,6 +350,10 @@ class QuotaService:
                     if workspace_policy is not None
                     else {}
                 ),
+                **{
+                    f"classroom:{classroom_id}": classroom_binding.policy.max_overdraft_micro
+                    for classroom_id, classroom_binding in classroom_policies
+                },
             },
             "allowed_model_profiles": list(policy.allowed_model_profiles),
             "unlimited": policy.unlimited,
@@ -297,6 +374,15 @@ class QuotaService:
                     if workspace_binding is not None and workspace_policy is not None
                     else None
                 ),
+                "classrooms": [
+                    {
+                        "subject_type": "classroom",
+                        "subject_id": classroom_id,
+                        "policy_id": classroom_binding.policy.policy_id,
+                        "version": classroom_binding.policy.version,
+                    }
+                    for classroom_id, classroom_binding in classroom_policies
+                ],
             },
         }
         if rearm_existing:
@@ -411,7 +497,7 @@ class QuotaService:
     ) -> UsageRecordResult:
         with _GLOBAL_QUOTA_LOCK:
             with self._engine.begin() as connection:
-                return self.settle_usage_in_transaction(
+                result = self.settle_usage_in_transaction(
                     connection,
                     reservation_id=reservation_id,
                     operation_id=operation_id,
@@ -422,6 +508,8 @@ class QuotaService:
                     pricing_version=pricing_version,
                     now=now,
                 )
+        self.notify_reservation(reservation_id)
+        return result
 
     def settle_usage_in_transaction(
         self,
@@ -577,7 +665,9 @@ class QuotaService:
                 and new_consumed
                 > int(limit)
                 + extra_capacity
-                + self._reservation_overdraft(reservation, bucket["owner_type"])
+                + self._reservation_overdraft(
+                    reservation, bucket["owner_type"], bucket["owner_id"]
+                )
             )
             over_limit = over_limit or bucket_over_limit
             self._insert_ledger(
@@ -646,7 +736,7 @@ class QuotaService:
         """
         with _GLOBAL_QUOTA_LOCK:
             with self._engine.begin() as connection:
-                return self.reconcile_usage_in_transaction(
+                result = self.reconcile_usage_in_transaction(
                     connection,
                     reservation_id=reservation_id,
                     operation_id=operation_id,
@@ -657,6 +747,8 @@ class QuotaService:
                     pricing_version=pricing_version,
                     now=now,
                 )
+        self.notify_reservation(reservation_id)
+        return result
 
     def reconcile_usage_in_transaction(
         self,
@@ -778,7 +870,9 @@ class QuotaService:
                 and new_consumed
                 > int(limit)
                 + extra_capacity
-                + self._reservation_overdraft(reservation, bucket["owner_type"])
+                + self._reservation_overdraft(
+                    reservation, bucket["owner_type"], bucket["owner_id"]
+                )
             )
             over_limit = over_limit or bucket_over_limit
             self._insert_ledger(
@@ -880,7 +974,9 @@ class QuotaService:
     ) -> TurnFinishResult:
         with _GLOBAL_QUOTA_LOCK:
             with self._engine.begin() as connection:
-                return self.finish_in_transaction(connection, command, now=now)
+                result = self.finish_in_transaction(connection, command, now=now)
+        self.notify_reservation(command.reservation_id)
+        return result
 
     def finish_in_transaction(
         self,
@@ -1035,15 +1131,20 @@ class QuotaService:
                         terminal_status="expired",
                     )
                     count += 1
+        if count:
+            self._notify_snapshot()
         return count
 
     def expire_grants(self, *, now: datetime | None = None) -> int:
         """Close expired developer grants from the same production reaper."""
         from server.quota.management import QuotaManagementService
 
-        return QuotaManagementService(self._engine).expire_grants(
+        count = QuotaManagementService(self._engine).expire_grants(
             now=_utc(now)
         )
+        if count:
+            self._notify_snapshot()
+        return count
 
     def heartbeat(
         self,
@@ -1089,6 +1190,7 @@ class QuotaService:
         *,
         user_id: str,
         workspace_id: str | None = None,
+        classroom_ids: Sequence[str] = (),
         now: datetime | None = None,
     ) -> dict[str, Any]:
         at = _utc(now)
@@ -1096,6 +1198,10 @@ class QuotaService:
             owners = [("user", user_id)]
             if workspace_id is not None:
                 owners.append(("workspace", workspace_id))
+            owners.extend(
+                ("classroom", classroom_id)
+                for classroom_id in sorted(set(classroom_ids))
+            )
             owner_filter = or_(
                 *(
                     and_(
@@ -1282,11 +1388,51 @@ class QuotaService:
 
     @staticmethod
     def _reservation_overdraft(
-        reservation: dict[str, Any], owner_type: str
+        reservation: dict[str, Any], owner_type: str, owner_id: str | None = None
     ) -> int:
         snapshot = reservation.get("policy_snapshot_json") or {}
         overdrafts = snapshot.get("overdrafts") or {}
+        if owner_type == "classroom" and owner_id is not None:
+            return int(
+                overdrafts.get(
+                    f"classroom:{owner_id}",
+                    reservation["max_overdraft_micro"],
+                )
+            )
         return int(overdrafts.get(owner_type, reservation["max_overdraft_micro"]))
+
+    @staticmethod
+    def _has_active_classroom_capacity(
+        connection: Connection, *, classroom_id: str, at: datetime
+    ) -> bool:
+        timestamp = _db_time(at)
+        grant_exists = connection.execute(
+            select(QuotaGrantModel.id)
+            .where(
+                QuotaGrantModel.owner_type == "classroom",
+                QuotaGrantModel.owner_id == classroom_id,
+                QuotaGrantModel.status == "active",
+                QuotaGrantModel.effective_from <= timestamp,
+                (QuotaGrantModel.expires_at.is_(None))
+                | (QuotaGrantModel.expires_at > timestamp),
+                QuotaGrantModel.period_start <= timestamp,
+                QuotaGrantModel.period_end > timestamp,
+            )
+            .limit(1)
+        ).first()
+        if grant_exists is not None:
+            return True
+        adjustment_exists = connection.execute(
+            select(QuotaAdjustmentModel.id)
+            .where(
+                QuotaAdjustmentModel.owner_type == "classroom",
+                QuotaAdjustmentModel.owner_id == classroom_id,
+                QuotaAdjustmentModel.period_start <= timestamp,
+                QuotaAdjustmentModel.period_end > timestamp,
+            )
+            .limit(1)
+        ).first()
+        return adjustment_exists is not None
 
     def _effective_binding(
         self,

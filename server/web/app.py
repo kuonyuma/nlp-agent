@@ -46,6 +46,10 @@ from server.web.database_auth import DatabaseSessionAuth, DatabaseSessionClaims
 from server.agent.session_service import DatabaseSessionService, local_session_service
 from server.quota.errors import QuotaDomainError, QuotaRejectedError
 from server.quota.management import QuotaManagementService
+from server.quota.notifications import (
+    DEFAULT_QUOTA_SNAPSHOT_CHANNEL,
+    QuotaSnapshotRedisPublisher,
+)
 from server.quota.service import QuotaService
 from server.web.contracts import (
     CreateSessionBody,
@@ -323,6 +327,31 @@ def create_app(
         app.state.quota_management = quota_management
         redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
         authorization_channel = str(settings.gateway_runtime.get("redis_authorization_channel", "nlp-agent:authorization"))
+        quota_snapshot_channel = str(
+            settings.gateway_runtime.get(
+                "redis_quota_snapshot_channel", DEFAULT_QUOTA_SNAPSHOT_CHANNEL
+            )
+        )
+        app.state.quota_snapshot_channel = quota_snapshot_channel
+        app.state.quota_snapshot_redis = redis_client
+        dispatcher_config = getattr(getattr(gateway, "dispatcher", None), "config", None)
+        redis_url = str(
+            settings.gateway_runtime.get("redis_url")
+            or getattr(dispatcher_config, "url", "")
+        )
+        quota_snapshot_publisher = (
+            QuotaSnapshotRedisPublisher(
+                redis_url,
+                channel=quota_snapshot_channel,
+            )
+            if redis_client is not None
+            else None
+        )
+        if quota_snapshot_publisher is not None:
+            if quota_read_service is not None:
+                quota_read_service.set_snapshot_notifier(quota_snapshot_publisher)
+            if usage_reporter is not None:
+                usage_reporter.set_snapshot_notifier(quota_snapshot_publisher)
 
         async def consume_authorization_changes() -> None:
             if redis_client is None:
@@ -348,6 +377,54 @@ def create_app(
         authorization_listener = (
             asyncio.create_task(consume_authorization_changes(), name="authorization-invalidation-listener")
             if redis_client is not None else None
+        )
+
+        async def consume_quota_snapshot_changes() -> None:
+            if redis_client is None:
+                return
+            pubsub = redis_client.pubsub()
+            try:
+                await pubsub.subscribe(quota_snapshot_channel)
+                async for message in pubsub.listen():
+                    if message.get("type") != "message":
+                        continue
+                    try:
+                        payload = json.loads(message.get("data") or "{}")
+                        owner_type = payload.get("owner_type")
+                        owner_id = payload.get("owner_id")
+                        if owner_type not in {None, "user", "workspace"}:
+                            continue
+                        if owner_type is not None and not isinstance(owner_id, str):
+                            continue
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    event = control_event(
+                        "usage.snapshot",
+                        payload={
+                            "owner_type": owner_type,
+                            "owner_id": owner_id,
+                            "refresh_required": True,
+                        },
+                    )
+                    if owner_type == "user" and owner_id:
+                        await hub.broadcast(event, user_id=owner_id)
+                    elif owner_type == "workspace" and owner_id:
+                        await hub.broadcast(event, workspace_id=owner_id)
+                    else:
+                        await hub.broadcast(event)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                await pubsub.unsubscribe(quota_snapshot_channel)
+                await pubsub.aclose()
+
+        quota_snapshot_listener = (
+            asyncio.create_task(
+                consume_quota_snapshot_changes(),
+                name="quota-snapshot-listener",
+            )
+            if redis_client is not None
+            else None
         )
         sandbox_reconcile_interval_s = max(
             10, int(web_config.get("sandbox_lease_reconcile_interval_s", 60))
@@ -386,6 +463,11 @@ def create_app(
             if authorization_listener is not None:
                 authorization_listener.cancel()
                 await asyncio.gather(authorization_listener, return_exceptions=True)
+            if quota_snapshot_listener is not None:
+                quota_snapshot_listener.cancel()
+                await asyncio.gather(quota_snapshot_listener, return_exceptions=True)
+            if quota_snapshot_publisher is not None:
+                quota_snapshot_publisher.close()
             if sandbox_manager is not None:
                 await sandbox_manager.close()
             await sandbox_model_service.close()
@@ -965,6 +1047,27 @@ def create_app(
                 "refresh_required": True,
             },
         )
+        redis_client = getattr(app.state, "quota_snapshot_redis", None)
+        if redis_client is not None:
+            try:
+                await redis_client.publish(
+                    getattr(
+                        app.state,
+                        "quota_snapshot_channel",
+                        DEFAULT_QUOTA_SNAPSHOT_CHANNEL,
+                    ),
+                    json.dumps(
+                        {
+                            "owner_type": owner_type,
+                            "owner_id": owner_id,
+                            "refresh_required": True,
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+                return
+            except Exception:
+                logger.exception("quota snapshot broadcast publish failed")
         if owner_type == "user" and owner_id:
             await hub.broadcast(event, user_id=owner_id)
         elif owner_type == "workspace" and owner_id:
@@ -2218,6 +2321,7 @@ def create_app(
             quota_service.snapshot,
             user_id=principal.user_id,
             workspace_id=workspace_id,
+            classroom_ids=tuple(principal.classroom_ids),
         )
         explanation = None
         management = getattr(request.app.state, "quota_management", None)

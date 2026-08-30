@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import create_engine, func, insert, select
 from sqlalchemy.pool import StaticPool
 
 from server.quota.contracts import AdmitTurn, FinishTurn
@@ -121,6 +123,23 @@ def _command(turn_id: str, *, estimated_micro: int = 20) -> AdmitTurn:
         estimated_micro=estimated_micro,
         idempotency_key=f"idempotency-{turn_id}",
     )
+
+
+def _management_grant_input(*, idempotency_key: str) -> dict:
+    period_start = NOW.replace(hour=0)
+    return {
+        "owner_type": "user",
+        "owner_id": "user-1",
+        "bucket_type": "daily",
+        "period_start": period_start,
+        "period_end": period_start + timedelta(days=1),
+        "allocated_micro": 10,
+        "source_type": "grant",
+        "created_by": "developer-1",
+        "reason": "concurrent grant",
+        "idempotency_key": idempotency_key,
+        "effective_from": NOW,
+    }
 
 
 def test_policy_resolution_returns_one_explainable_base_and_separate_workspace_policy(quota_engine):
@@ -420,3 +439,157 @@ def test_settlement_uses_workspace_policy_overdraft_for_workspace_bucket(quota_e
     assert rows[0]["over_limit"] is True
     assert rows[1]["owner_type"] == "workspace"
     assert rows[1]["over_limit"] is False
+
+
+def test_classroom_grant_is_reserved_in_a_shared_classroom_bucket(quota_engine):
+    user_policy = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
+    classroom_policy = _policy(quota_engine, code="classroom", version="1", daily=100, monthly=None)
+    _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
+    _bind(quota_engine, subject_type="classroom", subject_id="classroom-1", policy_id=classroom_policy)
+    QuotaManagementService(quota_engine).create_grant(
+        owner_type="classroom",
+        owner_id="classroom-1",
+        bucket_type="daily",
+        period_start=NOW.replace(hour=0),
+        period_end=NOW.replace(hour=0) + timedelta(days=1),
+        allocated_micro=50,
+        source_type="grant",
+        created_by="developer-1",
+        reason="classroom allocation",
+        idempotency_key="classroom-grant-1",
+        effective_from=NOW,
+    )
+
+    service = QuotaService(quota_engine)
+    admitted = service.admit_turn(
+        _command("classroom-turn", estimated_micro=40),
+        role_codes=("student",),
+        classroom_ids=("classroom-1",),
+        now=NOW,
+    )
+
+    with quota_engine.connect() as connection:
+        buckets = connection.execute(select(QuotaBucketModel.__table__)).mappings().all()
+    assert {row["owner_type"] for row in buckets} == {"user", "classroom"}
+    classroom = service.snapshot(
+        user_id="user-1",
+        workspace_id="workspace-1",
+        classroom_ids=("classroom-1",),
+        now=NOW,
+    )
+    classroom_bucket = next(item for item in classroom["buckets"] if item["owner_type"] == "classroom")
+    assert classroom_bucket["grant_micro"] == 50
+    assert classroom_bucket["reserved_micro"] == 40
+    assert admitted.allowed is True
+
+
+def test_classroom_capacity_without_policy_fails_closed(quota_engine):
+    user_policy = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
+    _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
+    QuotaManagementService(quota_engine).create_grant(
+        owner_type="classroom",
+        owner_id="classroom-without-policy",
+        bucket_type="daily",
+        period_start=NOW.replace(hour=0),
+        period_end=NOW.replace(hour=0) + timedelta(days=1),
+        allocated_micro=50,
+        source_type="grant",
+        created_by="developer-1",
+        reason="must be bound before use",
+        idempotency_key="classroom-grant-without-policy",
+        effective_from=NOW,
+    )
+
+    with pytest.raises(QuotaRejectedError) as error:
+        QuotaService(quota_engine).admit_turn(
+            _command("classroom-without-policy-turn", estimated_micro=1),
+            role_codes=("student",),
+            classroom_ids=("classroom-without-policy",),
+            now=NOW,
+        )
+    assert error.value.problem.code is QuotaErrorCode.ADMISSION_DENIED
+
+
+def test_concurrent_same_grant_idempotency_returns_one_committed_result(quota_engine):
+    # A file-backed SQLite database gives each worker a separate connection,
+    # matching the cross-process race that MySQL row/unique constraints must handle.
+    del quota_engine
+    from sqlalchemy import create_engine
+
+    database_path = Path(__file__).with_name("quota-concurrent-review.db")
+    engine = create_engine(
+        f"sqlite:///{database_path}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    for model in (
+        PricingRuleModel,
+        UsageEventModel,
+        QuotaPolicyModel,
+        PolicyBindingModel,
+        QuotaBucketModel,
+        QuotaConcurrencyLockModel,
+        QuotaReservationModel,
+        QuotaLedgerEntryModel,
+        QuotaGrantModel,
+        QuotaAdjustmentModel,
+    ):
+        model.__table__.create(engine)
+    try:
+        service = QuotaManagementService(engine)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda _: service.create_grant(**_management_grant_input(idempotency_key="race-grant")),
+                    range(2),
+                )
+            )
+        assert results[0]["grant_id"] == results[1]["grant_id"]
+        adjustment_input = {
+            "owner_type": "user",
+            "owner_id": "user-1",
+            "bucket_type": "daily",
+            "period_start": NOW.replace(hour=0),
+            "period_end": NOW.replace(hour=0) + timedelta(days=1),
+            "amount_micro": 5,
+            "actor_user_id": "developer-1",
+            "reason": "concurrent adjustment",
+            "idempotency_key": "race-adjustment",
+        }
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            adjustment_results = list(
+                pool.map(
+                    lambda _: service.create_adjustment(**adjustment_input),
+                    range(2),
+                )
+            )
+        assert adjustment_results[0]["adjustment_id"] == adjustment_results[1]["adjustment_id"]
+        with engine.connect() as connection:
+            assert connection.execute(select(func.count()).select_from(QuotaGrantModel)).scalar_one() == 1
+            assert connection.execute(select(func.count()).select_from(QuotaAdjustmentModel)).scalar_one() == 1
+    finally:
+        engine.dispose()
+        database_path.unlink(missing_ok=True)
+
+
+def test_quota_mutations_publish_snapshot_notifications(quota_engine):
+    policy_id = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
+    _bind(quota_engine, subject_type="role", subject_id="student", policy_id=policy_id)
+    notifications: list[tuple[str | None, str | None]] = []
+    service = QuotaService(
+        quota_engine,
+        snapshot_notifier=lambda *, owner_type=None, owner_id=None: notifications.append((owner_type, owner_id)),
+    )
+    admitted = service.admit_turn(_command("notified-turn", estimated_micro=10), role_codes=("student",), now=NOW)
+    service.settle_usage(
+        reservation_id=admitted.reservation_id,
+        operation_id="notified-operation",
+        credits_micro=10,
+        usage_status="exact",
+        now=NOW + timedelta(seconds=1),
+    )
+    service.finish_turn(
+        FinishTurn(reservation_id=admitted.reservation_id, turn_id="notified-turn", idempotency_key="notified-finish"),
+        now=NOW + timedelta(seconds=2),
+    )
+
+    assert ("user", "user-1") in notifications

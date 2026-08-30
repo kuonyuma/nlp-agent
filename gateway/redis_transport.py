@@ -27,6 +27,7 @@ class RedisTransportConfig:
     event_channel: str = "nlp-agent:events"
     control_channel: str = "nlp-agent:control"
     authorization_channel: str = "nlp-agent:authorization"
+    quota_snapshot_channel: str = "nlp-agent:quota-snapshot"
     reclaim_idle_ms: int = 60_000
     cancel_key_prefix: str = "nlp-agent:cancel:"
     cancel_ttl_s: int = 604_800
