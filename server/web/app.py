@@ -411,6 +411,29 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Cache-Control"] = "no-store"
+
+        # Sliding session cookie: keep the browser cookie's Max-Age in step with
+        # the server-side sliding expiry so a TTL increase also extends cookies
+        # issued under the previous TTL.  Skip when the endpoint already touched
+        # the cookie (login/guest set it, logout deletes it).
+        active_auth = auth if request.app.state.auth_injected else database_auth
+        claims = getattr(request.state, "auth_claims", None)
+        cookie_already_set = any(
+            header.split("=", 1)[0].strip().lower() == active_auth.cookie_name.lower()
+            for header in response.headers.getlist("set-cookie")
+        )
+        if claims is not None and not cookie_already_set:
+            token = request.cookies.get(active_auth.cookie_name)
+            if token:
+                response.set_cookie(
+                    active_auth.cookie_name,
+                    token,
+                    max_age=active_auth.ttl_s,
+                    httponly=True,
+                    secure=cookie_secure,
+                    samesite="lax",
+                    path="/",
+                )
         return response
 
     async def current_claims(

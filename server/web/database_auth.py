@@ -296,6 +296,11 @@ class DatabaseSessionAuth:
                 failure = "authentication cookie has expired"
             elif touch:
                 row.last_seen_at = now
+                # Sliding TTL: extend the absolute expiry to ``now + ttl_s`` on
+                # every authenticated request so a TTL change takes effect for
+                # sessions issued under the previous value instead of stranding
+                # them on the expiry captured at login.
+                row.expires_at = now + timedelta(seconds=self.ttl_s)
             if failure is not None:
                 await sandbox_lifecycle_service.release_auth_session_in_transaction(
                     session,

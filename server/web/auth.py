@@ -265,6 +265,12 @@ class SameOriginSessionAuth:
                     raise AuthenticationError("authentication cookie has expired")
                 if touch:
                     session.last_seen_at = now
+                    # Sliding TTL mirrors DatabaseSessionAuth: refresh the
+                    # absolute expiry so a TTL change also extends sessions that
+                    # were issued before the environment variable changed.
+                    session.claims = session.claims.model_copy(
+                        update={"expires_at": int(time.time()) + self.ttl_s}
+                    )
                 return session.claims
         try:
             payload, supplied_signature = token.split(".", 1)

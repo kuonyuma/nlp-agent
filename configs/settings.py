@@ -313,8 +313,21 @@ def auth_env_int(name: str, default: int) -> int:
     return int(raw) if raw not in (None, "") else default
 
 
+_BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE = frozenset({"0", "false", "no", "off"})
+
+
 def auth_env_bool(name: str, default: bool) -> bool:
     raw = auth_env_value(name)
     if raw is None or raw == "":
         return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    value = str(raw).strip().lower()
+    if value in _BOOL_TRUE:
+        return True
+    if value in _BOOL_FALSE:
+        return False
+    # An unrecognized value (e.g. a typo like ``ture``) is a misconfiguration,
+    # not "false".  Fail loudly instead of silently disabling cookie security.
+    raise ValueError(
+        f"{name} must be a boolean (true/false, 1/0, yes/no, on/off), got {raw!r}"
+    )
