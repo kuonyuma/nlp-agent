@@ -23,3 +23,31 @@ async def test_reaper_runs_expiry_and_stops_cleanly():
 
     assert service.calls >= 1
     assert reaper.task is None
+
+
+@pytest.mark.asyncio
+async def test_reaper_runs_phase4_rollup_and_alert_maintenance():
+    class Service:
+        def expire_reservations(self) -> int:
+            return 0
+
+    class Operations:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_maintenance(self, **_: object) -> dict[str, int]:
+            self.calls += 1
+            return {"rollup_rows": 1, "alerts_created": 0}
+
+    operations = Operations()
+    reaper = QuotaReservationReaper(
+        Service(),
+        interval_seconds=0.01,
+        operations_service=operations,
+        operations_interval_seconds=0.01,
+    )
+    reaper.start()
+    await asyncio.sleep(0.06)
+    await reaper.stop()
+
+    assert operations.calls >= 1

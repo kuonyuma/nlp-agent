@@ -205,6 +205,43 @@ class QuotaGrantRevokeBody(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=255)
 
 
+class QuotaBillingStatementBody(StrictModel):
+    provider: str = Field(min_length=1, max_length=128)
+    statement_id: str = Field(min_length=1, max_length=255)
+    operation_id: str = Field(min_length=1, max_length=128)
+    billed_at: datetime
+    billed_credits_micro: StrictInt | None = Field(default=None, ge=0)
+    billed_tokens: dict[str, StrictInt] = Field(default_factory=dict)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class QuotaBillingReconcileBody(StrictModel):
+    statements: list[QuotaBillingStatementBody] = Field(min_length=1, max_length=10_000)
+
+
+class QuotaCreditOperationBody(StrictModel):
+    owner_type: Literal["user", "workspace", "classroom"]
+    owner_id: str = Field(min_length=1, max_length=128)
+    bucket_type: Literal["daily", "monthly"]
+    period_start: datetime
+    period_end: datetime
+    amount_micro: StrictInt = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    effective_from: datetime
+    expires_at: datetime | None = None
+
+
+class QuotaBillingRepairBody(StrictModel):
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+
+
+class QuotaUsageArchiveBody(StrictModel):
+    before: datetime
+    batch_size: StrictInt = Field(default=10_000, ge=1, le=100_000)
+
+
 class CommandEnvelope(StrictModel):
     v: Literal["1"] = API_VERSION
     type: str = Field(min_length=1, max_length=100)

@@ -1,4 +1,4 @@
-import { AlertCircle, AlertTriangle, BarChart3, BookOpen, CheckCircle2, ChevronLeft, FileQuestion, GraduationCap, LayoutDashboard, MessageCircleQuestion, RefreshCw, Sparkles, Target, TrendingUp, Users } from "lucide-react";
+import { AlertCircle, AlertTriangle, BarChart3, BookOpen, CheckCircle2, ChevronLeft, Clock3, Coins, FileQuestion, GraduationCap, LayoutDashboard, MessageCircleQuestion, RefreshCw, Sparkles, Target, TrendingUp, Users } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { BlueprintCatalogEditor, GuidedBlueprintCatalogEditor, TopicCatalogEditor } from "@/modules/teacher/workspace/TeacherCatalogEditor";
@@ -6,18 +6,18 @@ import { TeacherBookEditor } from "@/modules/teacher/workspace/TeacherBookEditor
 import { SchoolLogo } from "@/shared/ui/SchoolLogo";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { api, ensureAuth } from "@/platform/http/api";
-import type { TeacherCatalog, TeacherOverview } from "@/shared/types";
+import type { ClassroomSummary, QuotaClassroomUsage, TeacherCatalog, TeacherOverview } from "@/shared/types";
 import { resolveWorkspaceId } from "@/shared/utils/workspace";
 
-export type TeacherPage = "overview" | "topics" | "book" | "exercises" | "reviews" | "guided" | "questions" | "reports";
+export type TeacherPage = "overview" | "topics" | "book" | "exercises" | "reviews" | "guided" | "questions" | "reports" | "quota";
 const NAV: Array<{ page: TeacherPage; label: string; icon: typeof LayoutDashboard }> = [
   { page: "overview", label: "教师首页", icon: LayoutDashboard }, { page: "book", label: "教材内容", icon: BookOpen }, { page: "topics", label: "主题与知识点", icon: BookOpen },
   { page: "exercises", label: "出题蓝图", icon: Sparkles }, { page: "reviews", label: "复习蓝图", icon: Target }, { page: "guided", label: "引导模式", icon: MessageCircleQuestion },
-  { page: "questions", label: "学生问题", icon: FileQuestion }, { page: "reports", label: "学习分析", icon: BarChart3 },
+  { page: "questions", label: "学生问题", icon: FileQuestion }, { page: "reports", label: "学习分析", icon: BarChart3 }, { page: "quota", label: "班级用量", icon: Users },
 ];
 const PAGE_LABELS: Record<TeacherPage, string> = {
   overview: "教师首页", topics: "主题与知识点", book: "教材内容", exercises: "出题蓝图",
-  reviews: "复习蓝图", guided: "引导模式", questions: "学生问题", reports: "学习分析",
+  reviews: "复习蓝图", guided: "引导模式", questions: "学生问题", reports: "学习分析", quota: "班级用量",
 };
 const pageFromPath = (): TeacherPage => {
   const candidate = location.pathname.split("/")[2] as TeacherPage;
@@ -44,6 +44,63 @@ function Distribution({ title, items, tone = "purple" }: { title: string; items:
 function DailyTrend({ items }: { items: Array<{ date: string; count: number }> }) {
   const max = Math.max(1, ...items.map((item) => item.count));
   return <section className="teacher-panel"><header><div><h2>每日问题量</h2><p>近 {items.length} 天提问趋势</p></div></header>{items.length ? <div className="teacher-daily-trend">{items.map((item) => <div className="teacher-daily-bar" key={item.date} title={`${item.date}：${item.count} 次`}><small>{item.count}</small><span style={{ height: `${Math.max(4, Math.round(item.count / max * 100))}%` }} /></div>)}</div> : <p className="teacher-empty-inline">暂无趋势数据</p>}</section>;
+}
+
+const formatQuotaCredits = (micro: number) => `${Number((micro / 1_000_000).toFixed(2))} credits`;
+
+export function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
+  const [classrooms, setClassrooms] = useState<ClassroomSummary[]>([]);
+  const [selectedClassroomId, setSelectedClassroomId] = useState("");
+  const [usage, setUsage] = useState<QuotaClassroomUsage | null>(null);
+  const [classroomsLoading, setClassroomsLoading] = useState(true);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [error, setError] = useState("");
+  const selectedClassroom = classrooms.find((classroom) => classroom.id === selectedClassroomId) ?? null;
+
+  useEffect(() => {
+    let active = true;
+    setClassroomsLoading(true);
+    setError("");
+    void api.listClassrooms().then((result) => {
+      if (!active) return;
+      const next = result.items.filter((classroom) => classroom.workspace_id === workspaceId);
+      setClassrooms(next);
+      setSelectedClassroomId((current) => next.some((classroom) => classroom.id === current) ? current : next[0]?.id ?? "");
+    }).catch((reason) => {
+      if (active) setError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => {
+      if (active) setClassroomsLoading(false);
+    });
+    return () => { active = false; };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!selectedClassroom) {
+      setUsage(null);
+      return;
+    }
+    let active = true;
+    setUsageLoading(true);
+    setError("");
+    void api.getTeacherClassroomUsage(selectedClassroom.id, selectedClassroom.workspace_id, 30).then((result) => {
+      if (active) setUsage(result);
+    }).catch((reason) => {
+      if (active) setError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => {
+      if (active) setUsageLoading(false);
+    });
+    return () => { active = false; };
+  }, [selectedClassroom]);
+
+  const statusMessage = usage?.pending_events ? `有 ${usage.pending_events} 条用量待对账` : "当前用量已完成对账";
+  return <div className="teacher-stack teacher-quota-page">
+    <div className="teacher-page-summary quota"><div><span className="teacher-eyebrow">CLASSROOM USAGE</span><h2>班级额度用量</h2><p>按课堂聚合学生模型调用，帮助教师观察用量趋势和待对账数据。</p></div><Coins size={46} /></div>
+    <section className="teacher-panel teacher-quota-toolbar"><label htmlFor="teacher-classroom-select">选择班级<select id="teacher-classroom-select" aria-label="选择班级" value={selectedClassroomId} onChange={(event) => setSelectedClassroomId(event.target.value)} disabled={classroomsLoading || classrooms.length === 0}>{classrooms.length ? classrooms.map((classroom) => <option key={classroom.id} value={classroom.id}>{classroom.name}</option>) : <option value="">暂无可查看班级</option>}</select></label><span>统计范围：近 30 天</span></section>
+    {error ? <div className="teacher-state error"><AlertCircle /><p>{error}</p></div> : classroomsLoading || usageLoading ? <div className="teacher-state"><RefreshCw className="spin" />正在加载班级用量…</div> : !usage ? <div className="teacher-state"><Users /><p>当前工作空间暂无可查看班级。</p></div> : <>
+      <div className="teacher-insight-kpis teacher-quota-kpis"><article><Users /><span>活跃学生</span><strong>{usage.students}</strong><small>{usage.active_student_ids.length} 个有效成员</small></article><article><TrendingUp /><span>用量事件</span><strong>{usage.events}</strong><small>{usage.priced_events} 条已计价</small></article><article><Coins /><span>已计价额度</span><strong>{formatQuotaCredits(usage.priced_credits_micro)}</strong><small>{statusMessage}</small></article><article className={usage.pending_events || usage.unavailable_events ? "warning" : ""}><Clock3 /><span>待处理事件</span><strong>{usage.pending_events + usage.unavailable_events}</strong><small>{usage.unavailable_events ? `${usage.unavailable_events} 条无法计价` : "没有无法计价事件"}</small></article></div>
+      <section className="teacher-panel"><header><div><h2>{selectedClassroom?.name ?? "班级"} · 学生用量</h2><p>原始 UsageEvent 聚合结果，不修改个人和班级 Ledger</p></div></header>{usage.by_user.length ? <div className="teacher-table"><table><thead><tr><th>用户</th><th>事件</th><th>Token</th><th>Credits</th><th>状态</th></tr></thead><tbody>{usage.by_user.map((student) => <tr key={student.user_id}><td>{student.user_id}</td><td>{student.events}</td><td>{student.total_tokens.toLocaleString()}</td><td>{formatQuotaCredits(student.priced_credits_micro)}</td><td>{student.pending_events ? <span className="teacher-quota-status pending">待对账 {student.pending_events}</span> : student.unavailable_events ? <span className="teacher-quota-status unavailable">无法计价 {student.unavailable_events}</span> : <span className="teacher-quota-status settled">已完成</span>}</td></tr>)}</tbody></table></div> : <p className="teacher-empty-state">近 30 天暂无模型调用记录。</p>}</section>
+    </>}
+  </div>;
 }
 
 function KnowledgePointStats({ items }: { items: TeacherOverview["knowledge_point_stats"] }) {
@@ -168,7 +225,8 @@ export function TeacherWorkspace({ page: routedPage, onNavigate }: { page?: Teac
   const content = page === "book"
     ? <TeacherBookEditor key={bookEditorGeneration} workspaceId={workspaceId} catalog={catalog ?? undefined} onCatalogChange={(nextCatalog) => { setCatalog(nextCatalog); setSavedCatalogSnapshot(JSON.stringify(nextCatalog)); }} onDirtyChange={setBookDirty} />
     : !catalog || (needsOverview && !data) ? null
-      : page === "topics" ? <TopicCatalogEditor topics={catalog.topics} onChange={(topics) => updateDraft({ ...catalog, topics })} saveProps={saveProps} />
+      : page === "quota" ? <ClassroomQuotaPage workspaceId={workspaceId} />
+        : page === "topics" ? <TopicCatalogEditor topics={catalog.topics} onChange={(topics) => updateDraft({ ...catalog, topics })} saveProps={saveProps} />
         : page === "exercises" ? <BlueprintCatalogEditor kind="exercise" topics={catalog.topics} blueprints={catalog.exercise_blueprints} onChange={(exercise_blueprints) => updateDraft({ ...catalog, exercise_blueprints: exercise_blueprints as TeacherCatalog["exercise_blueprints"] })} saveProps={saveProps} />
           : page === "reviews" ? <BlueprintCatalogEditor kind="review" topics={catalog.topics} blueprints={catalog.review_blueprints} onChange={(review_blueprints) => updateDraft({ ...catalog, review_blueprints: review_blueprints as TeacherCatalog["review_blueprints"] })} saveProps={saveProps} />
             : page === "guided" ? <GuidedBlueprintCatalogEditor topics={catalog.topics} blueprints={catalog.guided_blueprints} onChange={(guided_blueprints) => updateDraft({ ...catalog, guided_blueprints })} saveProps={saveProps} />

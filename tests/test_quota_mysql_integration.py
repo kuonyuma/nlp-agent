@@ -25,11 +25,17 @@ from server.quota.models import (
     PricingRuleModel,
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
+    QuotaCreditOperationModel,
+    QuotaDailyRollupModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
+    QuotaProviderBillingModel,
     QuotaReservationModel,
+    QuotaUsageArchiveBatchModel,
+    QuotaAlertModel,
     UsageEventModel,
 )
+from server.quota.operations import QuotaOperationsService
 from server.quota.reporting import DurableModelUsageReporter
 from server.quota.service import QuotaService
 
@@ -86,6 +92,59 @@ def test_mysql_phase2_schema_contains_counter_and_accounting_constraints():
             }
         assert {"user_id", "active_units", "version"} <= columns
         assert "uq_nlp_quota_ledger_entries_idempotency_key" in unique_constraints
+    finally:
+        engine.dispose()
+
+
+def test_mysql_phase4_schema_contains_operations_tables_and_archive_columns():
+    dsn = _mysql_dsn()
+    engine = create_engine(dsn.replace("mysql+aiomysql://", "mysql+pymysql://"))
+    try:
+        QuotaService(engine).verify_schema()
+        operations_tables = {
+            QuotaCreditOperationModel.__tablename__,
+            QuotaDailyRollupModel.__tablename__,
+            QuotaProviderBillingModel.__tablename__,
+            QuotaUsageArchiveBatchModel.__tablename__,
+            QuotaAlertModel.__tablename__,
+        }
+        with engine.connect() as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = DATABASE()"
+                    )
+                )
+            }
+            usage_columns = {
+                row[0]
+                for row in connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = DATABASE() "
+                        "AND table_name = 'nlp_usage_events'"
+                    )
+                )
+            }
+            entry_type_length = connection.execute(
+                text(
+                    "SELECT character_maximum_length FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() "
+                    "AND table_name = 'nlp_quota_ledger_entries' "
+                    "AND column_name = 'entry_type'"
+                )
+            ).scalar_one()
+        assert operations_tables <= tables
+        assert {"archived_at", "archive_batch_id"} <= usage_columns
+        assert entry_type_length >= 32
+        assert QuotaOperationsService(engine).partition_strategy(
+            start_year=2026, start_month=8, months=2
+        )["partitions"] == [
+            {"name": "p202608", "from": "2026-08-01", "to": "2026-09-01"},
+            {"name": "p202609", "from": "2026-09-01", "to": "2026-10-01"},
+        ]
     finally:
         engine.dispose()
 

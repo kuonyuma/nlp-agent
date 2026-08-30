@@ -54,6 +54,7 @@ from server.application.turn_reliability import TurnReliabilityService
 from server.infrastructure.mysql import MySQLRuntime
 from server.quota.contracts import AdmitTurn, QuotaProblem
 from server.quota.errors import QuotaErrorCode, QuotaRejectedError
+from server.quota.operations import QuotaOperationsService
 from server.quota.reaper import QuotaReservationReaper
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -221,6 +222,10 @@ class BackendGateway:
             1.0,
             float(gateway_config.get("quota_reap_interval_s", 30)),
         )
+        self.quota_operations_interval_s = max(
+            1.0,
+            float(gateway_config.get("quota_operations_interval_s", 3_600)),
+        )
         self._maintenance_stop = asyncio.Event()
         self._maintenance_task: asyncio.Task[None] | None = None
         self._quota_reaper: QuotaReservationReaper | None = None
@@ -263,6 +268,8 @@ class BackendGateway:
                 self._quota_reaper = QuotaReservationReaper(
                     self.quota_service,
                     interval_seconds=self.quota_reap_interval_s,
+                    operations_service=QuotaOperationsService(self.quota_service.engine),
+                    operations_interval_seconds=self.quota_operations_interval_s,
                 )
                 self._quota_reaper.start()
             self._started = True

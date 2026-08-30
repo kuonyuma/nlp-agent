@@ -30,12 +30,17 @@ from server.quota.models import (
     PolicyBindingModel,
     PricingRuleModel,
     QuotaAdjustmentModel,
+    QuotaAlertModel,
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
+    QuotaCreditOperationModel,
+    QuotaDailyRollupModel,
     QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
+    QuotaProviderBillingModel,
     QuotaReservationModel,
+    QuotaUsageArchiveBatchModel,
 )
 from server.quota.policy import resolve_effective_policy
 
@@ -1353,6 +1358,11 @@ class QuotaService:
                 QuotaLedgerEntryModel,
                 QuotaGrantModel,
                 QuotaAdjustmentModel,
+                QuotaCreditOperationModel,
+                QuotaDailyRollupModel,
+                QuotaProviderBillingModel,
+                QuotaUsageArchiveBatchModel,
+                QuotaAlertModel,
             ):
                 primary_key = next(iter(model.__table__.primary_key.columns))
                 connection.execute(select(primary_key).limit(1)).first()

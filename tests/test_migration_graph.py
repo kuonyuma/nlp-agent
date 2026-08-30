@@ -11,7 +11,10 @@ from alembic.script import ScriptDirectory
 def test_migration_graph_has_one_head_after_knowledge_book_is_added() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert scripts.get_heads() == ["20260830_41_quota_menu"]
+    assert scripts.get_heads() == ["20260830_42_quota_phase4"]
+    assert scripts.get_revision("20260830_42_quota_phase4").down_revision == (
+        "20260830_41_quota_menu"
+    )
     assert scripts.get_revision("20260830_41_quota_menu").down_revision == (
         "20260830_40_quota_phase3"
     )

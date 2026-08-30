@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     ForeignKey,
     Index,
     JSON,
@@ -101,6 +102,11 @@ class UsageEventModel(Base):
             "provider_model",
             "occurred_at",
         ),
+        Index(
+            "ix_nlp_usage_events_archive_occurred",
+            "archived_at",
+            "occurred_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
@@ -153,6 +159,12 @@ class UsageEventModel(Base):
     started_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
+    archive_batch_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
 
 
 PricingRuleModel.__table__.comment = TABLE_COMMENTS["nlp_pricing_rules"]
@@ -419,7 +431,7 @@ class QuotaLedgerEntryModel(Base):
         ForeignKey("nlp_quota_buckets.id"), nullable=True
     )
     grant_id: Mapped[str | None] = mapped_column(UUID, nullable=True)
-    entry_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
     amount_micro: Mapped[int] = mapped_column(BIGINT, nullable=False, default=0)
     reserved_delta_micro: Mapped[int] = mapped_column(BIGINT, nullable=False, default=0)
     consumed_delta_micro: Mapped[int] = mapped_column(BIGINT, nullable=False, default=0)
@@ -521,6 +533,215 @@ class QuotaAdjustmentModel(Base):
     )
 
 
+class QuotaCreditOperationModel(Base):
+    """Idempotent operator intent for gifts and credit resets."""
+
+    __tablename__ = "nlp_quota_credit_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_nlp_quota_credit_operations_idempotency_key",
+        ),
+        Index(
+            "ix_nlp_quota_credit_operations_owner_created",
+            "owner_type",
+            "owner_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    operation_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    bucket_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    amount_micro: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    grant_id: Mapped[str] = mapped_column(UUID, nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+
+
+class QuotaDailyRollupModel(Base):
+    """Read-side daily aggregate built outside the Turn transaction."""
+
+    __tablename__ = "nlp_quota_daily_rollups"
+    __table_args__ = (
+        UniqueConstraint(
+            "rollup_date",
+            "user_id",
+            "workspace_id",
+            "provider",
+            "provider_model",
+            "purpose",
+            name="uq_nlp_quota_daily_rollups_dimension",
+        ),
+        Index(
+            "ix_nlp_quota_daily_rollups_workspace_date",
+            "workspace_id",
+            "rollup_date",
+        ),
+        Index(
+            "ix_nlp_quota_daily_rollups_user_date",
+            "user_id",
+            "rollup_date",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    rollup_date: Mapped[date] = mapped_column(Date, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_count: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    exact_events: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    estimated_events: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    pending_events: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    unavailable_events: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    priced_credits_micro: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False
+    )
+    input_tokens: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False
+    )
+    cache_write_input_tokens: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False
+    )
+    output_tokens: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    reasoning_output_tokens: Mapped[int] = mapped_column(
+        BIGINT(unsigned=True), nullable=False
+    )
+    total_tokens: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+
+
+class QuotaProviderBillingModel(Base):
+    """Immutable provider billing line with a mutable reconciliation result."""
+
+    __tablename__ = "nlp_quota_provider_billing"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "statement_id",
+            name="uq_nlp_quota_provider_billing_statement",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_nlp_quota_provider_billing_idempotency_key",
+        ),
+        Index(
+            "ix_nlp_quota_provider_billing_operation",
+            "operation_id",
+        ),
+        Index(
+            "ix_nlp_quota_provider_billing_status_date",
+            "status",
+            "billed_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    statement_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    billed_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    billed_credits_micro: Mapped[int | None] = mapped_column(
+        BIGINT(unsigned=True), nullable=True
+    )
+    billed_tokens_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    matched_usage_event_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
+    local_credits_micro: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    difference_micro: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+    reconciled_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
+
+
+class QuotaUsageArchiveBatchModel(Base):
+    """Manifest for a non-destructive UsageEvent archive pass."""
+
+    __tablename__ = "nlp_quota_usage_archive_batches"
+    __table_args__ = (
+        Index(
+            "ix_nlp_quota_usage_archive_batches_cutoff",
+            "cutoff_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    cutoff_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    event_count: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    actor_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
+
+
+class QuotaAlertModel(Base):
+    """Deduplicated operational alert generated from read-side rollups."""
+
+    __tablename__ = "nlp_quota_alerts"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_nlp_quota_alerts_dedupe_key"),
+        Index(
+            "ix_nlp_quota_alerts_status_created",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_nlp_quota_alerts_owner_window",
+            "owner_type",
+            "owner_id",
+            "window_start",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    alert_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    baseline_micro: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    actual_micro: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    threshold_multiplier: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
+
+
 QuotaPolicyModel.__table__.comment = TABLE_COMMENTS["nlp_quota_policies"]
 PolicyBindingModel.__table__.comment = TABLE_COMMENTS["nlp_quota_policy_bindings"]
 QuotaBucketModel.__table__.comment = TABLE_COMMENTS["nlp_quota_buckets"]
@@ -529,3 +750,8 @@ QuotaReservationModel.__table__.comment = TABLE_COMMENTS["nlp_quota_reservations
 QuotaLedgerEntryModel.__table__.comment = TABLE_COMMENTS["nlp_quota_ledger_entries"]
 QuotaGrantModel.__table__.comment = TABLE_COMMENTS["nlp_quota_grants"]
 QuotaAdjustmentModel.__table__.comment = TABLE_COMMENTS["nlp_quota_adjustments"]
+QuotaCreditOperationModel.__table__.comment = TABLE_COMMENTS["nlp_quota_credit_operations"]
+QuotaDailyRollupModel.__table__.comment = TABLE_COMMENTS["nlp_quota_daily_rollups"]
+QuotaProviderBillingModel.__table__.comment = TABLE_COMMENTS["nlp_quota_provider_billing"]
+QuotaUsageArchiveBatchModel.__table__.comment = TABLE_COMMENTS["nlp_quota_usage_archive_batches"]
+QuotaAlertModel.__table__.comment = TABLE_COMMENTS["nlp_quota_alerts"]

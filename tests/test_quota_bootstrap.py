@@ -5,12 +5,17 @@ from server.infrastructure.mysql.base import Base
 from server.quota.models import (
     PolicyBindingModel,
     QuotaAdjustmentModel,
+    QuotaAlertModel,
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
+    QuotaCreditOperationModel,
+    QuotaDailyRollupModel,
     QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
+    QuotaProviderBillingModel,
     QuotaReservationModel,
+    QuotaUsageArchiveBatchModel,
 )
 from server.quota.service import QuotaService
 
@@ -54,6 +59,11 @@ def test_quota_schema_verification_probes_counter_primary_key():
             QuotaLedgerEntryModel.__table__,
             QuotaGrantModel.__table__,
             QuotaAdjustmentModel.__table__,
+            QuotaCreditOperationModel.__table__,
+            QuotaDailyRollupModel.__table__,
+            QuotaProviderBillingModel.__table__,
+            QuotaUsageArchiveBatchModel.__table__,
+            QuotaAlertModel.__table__,
         ],
     )
 
