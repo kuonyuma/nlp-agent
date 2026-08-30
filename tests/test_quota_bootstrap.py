@@ -4,8 +4,10 @@ import pytest
 from server.infrastructure.mysql.base import Base
 from server.quota.models import (
     PolicyBindingModel,
+    QuotaAdjustmentModel,
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
+    QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaReservationModel,
@@ -50,6 +52,8 @@ def test_quota_schema_verification_probes_counter_primary_key():
             QuotaConcurrencyLockModel.__table__,
             QuotaReservationModel.__table__,
             QuotaLedgerEntryModel.__table__,
+            QuotaGrantModel.__table__,
+            QuotaAdjustmentModel.__table__,
         ],
     )
 

@@ -167,7 +167,7 @@ export function StudentWorkspace({ onNavigateTo, onOpenInSandbox }: { onNavigate
     label: title,
     onDeleted,
   })
-} onAccount={() => setAccountOpen(true)} onSettings={() => setSettingsOpen(true)} />
+} onAccount={() => setAccountOpen(true)} onQuota={() => onNavigateTo ? onNavigateTo("/usage") : (location.href = "/usage")} onSettings={() => setSettingsOpen(true)} />
     <main className="thread-shell">
       <header className="thread-header">
         <SidebarToggle onClick={() => { setCollapsed(false); setSidebarOpen(true); }} />

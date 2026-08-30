@@ -32,6 +32,8 @@ TABLE_COMMENTS: dict[str, str] = {
     "nlp_quota_concurrency_locks": "按用户维护的并发租约原子计数器，跨进程保护额度并发限制。",
     "nlp_quota_reservations": "Turn 级额度预占、结算状态及并发租约。",
     "nlp_quota_ledger_entries": "额度预占、释放和实际结算的追加式会计流水。",
+    "nlp_quota_grants": "用户、工作区或课堂的可追溯额度分配及撤销状态。",
+    "nlp_quota_adjustments": "带操作人、原因和幂等键的手工额度调整流水。",
     "nlp_ws_tickets": "绑定登录会话的一次性 WebSocket 连接票据。",
     "nlp_teaching_goals": "工作区教学目标及其版本号。",
     "nlp_course_catalogs": "工作区课程目录的当前版本指针。",

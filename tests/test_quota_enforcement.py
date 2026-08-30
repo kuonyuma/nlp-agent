@@ -13,8 +13,10 @@ from server.quota.errors import QuotaErrorCode, QuotaRejectedError
 from server.quota.models import (
     PolicyBindingModel,
     PricingRuleModel,
+    QuotaAdjustmentModel,
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
+    QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaReservationModel,
@@ -43,6 +45,8 @@ def quota_engine():
         QuotaConcurrencyLockModel,
         QuotaReservationModel,
         QuotaLedgerEntryModel,
+        QuotaGrantModel,
+        QuotaAdjustmentModel,
     ):
         model.__table__.create(engine)
     try:

@@ -16,8 +16,10 @@ from server.quota.contracts import AdmitTurn, FinishTurn
 from server.quota.models import (
     PolicyBindingModel,
     PricingRuleModel,
+    QuotaAdjustmentModel,
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
+    QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaReservationModel,
@@ -85,6 +87,8 @@ def quota_engine():
         QuotaConcurrencyLockModel,
         QuotaReservationModel,
         QuotaLedgerEntryModel,
+        QuotaGrantModel,
+        QuotaAdjustmentModel,
     ):
         model.__table__.create(engine)
     try:

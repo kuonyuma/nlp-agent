@@ -432,9 +432,100 @@ class QuotaLedgerEntryModel(Base):
     )
 
 
+class QuotaGrantModel(Base):
+    """Append-only allocation granted to a user, workspace, or classroom."""
+
+    __tablename__ = "nlp_quota_grants"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_type",
+            "owner_id",
+            "idempotency_key",
+            name="uq_nlp_quota_grants_owner_idempotency",
+        ),
+        UniqueConstraint(
+            "revocation_idempotency_key",
+            name="uq_nlp_quota_grants_revocation_idempotency",
+        ),
+        Index(
+            "ix_nlp_quota_grants_owner_period_status",
+            "owner_type",
+            "owner_id",
+            "bucket_type",
+            "period_start",
+            "period_end",
+            "status",
+        ),
+        Index("ix_nlp_quota_grants_expiry", "status", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    owner_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    bucket_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    allocated_micro: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    revocation_idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+
+
+class QuotaAdjustmentModel(Base):
+    """Immutable manual credit/debit with operator, reason, and replay key."""
+
+    __tablename__ = "nlp_quota_adjustments"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_nlp_quota_adjustments_idempotency_key",
+        ),
+        Index(
+            "ix_nlp_quota_adjustments_owner_period",
+            "owner_type",
+            "owner_id",
+            "bucket_type",
+            "period_start",
+            "period_end",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    owner_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    bucket_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    amount_micro: Mapped[int] = mapped_column(BIGINT, nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+
+
 QuotaPolicyModel.__table__.comment = TABLE_COMMENTS["nlp_quota_policies"]
 PolicyBindingModel.__table__.comment = TABLE_COMMENTS["nlp_quota_policy_bindings"]
 QuotaBucketModel.__table__.comment = TABLE_COMMENTS["nlp_quota_buckets"]
 QuotaConcurrencyLockModel.__table__.comment = TABLE_COMMENTS["nlp_quota_concurrency_locks"]
 QuotaReservationModel.__table__.comment = TABLE_COMMENTS["nlp_quota_reservations"]
 QuotaLedgerEntryModel.__table__.comment = TABLE_COMMENTS["nlp_quota_ledger_entries"]
+QuotaGrantModel.__table__.comment = TABLE_COMMENTS["nlp_quota_grants"]
+QuotaAdjustmentModel.__table__.comment = TABLE_COMMENTS["nlp_quota_adjustments"]

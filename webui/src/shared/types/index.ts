@@ -386,6 +386,98 @@ export interface AuthorizationAuditRecord { id: string; actor_user_id: string | 
 export interface AuthorizationAuditListResponse { items: AuthorizationAuditRecord[]; total: number; offset: number; limit: number; has_more: boolean }
 export interface AuthorizationAuditSummary { period_days: number; since: string; total: number; by_decision: Record<string, number>; top_reasons: Array<{ reason_code: string; count: number }> }
 
+export interface QuotaBucketSnapshot {
+  owner_type: "user" | "workspace" | "classroom";
+  owner_id: string;
+  bucket_type: "daily" | "monthly";
+  limit_micro: number | null;
+  grant_micro: number;
+  adjustment_micro: number;
+  consumed_micro: number;
+  reserved_micro: number;
+  remaining_micro: number;
+  reset_at: string;
+  over_limit: boolean;
+}
+export interface QuotaSnapshot {
+  user_id: string;
+  workspace_id: string | null;
+  buckets: QuotaBucketSnapshot[];
+}
+export interface QuotaPolicy {
+  policy_id: string;
+  code: string;
+  version: string;
+  name: string;
+  status: string;
+  request_limit_micro: number | null;
+  daily_limit_micro: number | null;
+  monthly_limit_micro: number | null;
+  concurrency_limit: number | null;
+  max_overdraft_micro: number;
+  allowed_model_profiles: string[];
+  unlimited: boolean;
+  effective_from: string;
+  effective_until: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface QuotaBinding {
+  binding_id: string;
+  subject_type: string;
+  subject_id: string;
+  policy_id: string;
+  policy_code: string;
+  policy_version: string;
+  priority: number;
+  status: string;
+  effective_from: string;
+  effective_until: string | null;
+}
+export interface QuotaGrant {
+  grant_id: string;
+  owner_type: string;
+  owner_id: string;
+  bucket_type: string;
+  period_start: string;
+  period_end: string;
+  source_type: string;
+  source_id: string | null;
+  allocated_micro: number;
+  effective_from: string;
+  expires_at: string | null;
+  status: string;
+  reason: string;
+  created_by: string;
+  idempotency_key: string;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  revocation_idempotency_key: string | null;
+  created_at: string;
+}
+export interface QuotaAdjustment {
+  adjustment_id: string;
+  owner_type: string;
+  owner_id: string;
+  bucket_type: string;
+  period_start: string;
+  period_end: string;
+  amount_micro: number;
+  actor_user_id: string;
+  reason: string;
+  idempotency_key: string;
+  created_at: string;
+}
+export interface QuotaPolicyExplanation {
+  user_id: string;
+  workspace_id: string | null;
+  evaluated_at: string;
+  base: { policy_id: string; code: string; version: string; reason: { subject_type: string; subject_id: string; priority: number }; limits: Record<string, number | null> };
+  workspace: { policy_id: string; code: string; version: string; reason: { subject_type: string; subject_id: string; priority: number }; limits: Record<string, number | null> } | null;
+  candidates: Record<string, number>;
+}
+
 export interface UserListResponse {
   users: UserProfile[];
   total: number;

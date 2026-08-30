@@ -89,11 +89,19 @@ class WebSocketHub:
         event: ServerEventEnvelope,
         *,
         user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> None:
         targets = [
             connection
             for connection in tuple(self._connections)
-            if user_id is None or connection.principal.user_id == user_id
+            if (
+                (user_id is None or connection.principal.user_id == user_id)
+                and (
+                    workspace_id is None
+                    or "*" in connection.principal.workspace_ids
+                    or workspace_id in connection.principal.workspace_ids
+                )
+            )
         ]
         if targets:
             await asyncio.gather(

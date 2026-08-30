@@ -25,6 +25,10 @@ class QuotaErrorCode(StrEnum):
     ADMISSION_DENIED = "admission_denied"
     UPSTREAM_PROVIDER_QUOTA_EXHAUSTED = "upstream_provider_quota_exhausted"
     OVER_LIMIT = "quota_over_limit"
+    POLICY_VERSION_CONFLICT = "quota_policy_version_conflict"
+    GRANT_CONFLICT = "quota_grant_conflict"
+    ADJUSTMENT_CONFLICT = "quota_adjustment_conflict"
+    INVALID_GRANT = "quota_invalid_grant"
 
 
 class QuotaDomainError(RuntimeError):

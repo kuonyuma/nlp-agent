@@ -1,0 +1,771 @@
+"""Developer-owned quota policy, grant, and adjustment management."""
+
+from __future__ import annotations
+
+import uuid
+from collections import Counter
+from datetime import datetime, timezone
+from typing import Any, Sequence
+
+from sqlalchemy import Engine, and_, create_engine, func, insert, select, update
+
+from server.quota.contracts import AdmitTurn, PolicyBinding, QuotaPolicy
+from server.quota.errors import QuotaDomainError, QuotaErrorCode
+from server.quota.models import (
+    PolicyBindingModel,
+    QuotaAdjustmentModel,
+    QuotaGrantModel,
+    QuotaLedgerEntryModel,
+    QuotaPolicyModel,
+)
+from server.quota.policy import resolve_effective_policy
+
+
+UTC = timezone.utc
+_OWNER_TYPES = {"user", "workspace", "classroom"}
+_BUCKET_TYPES = {"daily", "monthly"}
+_SOURCE_TYPES = {"role", "purchase", "grant", "adjustment", "reset"}
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("quota timestamps must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _db_time(value: datetime) -> datetime:
+    return _utc(value).replace(tzinfo=None)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.replace(tzinfo=UTC).isoformat() if value is not None else None
+
+
+def _validate_period(
+    *, owner_type: str, bucket_type: str, period_start: datetime, period_end: datetime
+) -> tuple[datetime, datetime]:
+    if owner_type not in _OWNER_TYPES:
+        raise ValueError(f"unsupported quota owner_type: {owner_type}")
+    if bucket_type not in _BUCKET_TYPES:
+        raise ValueError(f"unsupported quota bucket_type: {bucket_type}")
+    start = _utc(period_start)
+    end = _utc(period_end)
+    if end <= start:
+        raise ValueError("period_end must be after period_start")
+    return start, end
+
+
+class QuotaManagementService:
+    """The only write service for developer-managed quota configuration.
+
+    Policy and allocation records are append-oriented.  A later version or
+    adjustment never edits a historical reservation or ledger snapshot; it
+    only changes the effective read-side policy/capacity for future requests.
+    """
+
+    def __init__(self, database: str | Engine) -> None:
+        if isinstance(database, str):
+            if database.startswith("mysql+aiomysql://"):
+                database = database.replace("mysql+aiomysql://", "mysql+pymysql://", 1)
+            self._engine = create_engine(database, pool_pre_ping=True)
+            self._owns_engine = True
+        else:
+            self._engine = database
+            self._owns_engine = False
+
+    @property
+    def engine(self) -> Engine:
+        return self._engine
+
+    def close(self) -> None:
+        if self._owns_engine:
+            self._engine.dispose()
+
+    def create_policy(
+        self,
+        *,
+        code: str,
+        version: str,
+        name: str,
+        request_limit_micro: int | None = None,
+        daily_limit_micro: int | None = None,
+        monthly_limit_micro: int | None = None,
+        concurrency_limit: int | None = None,
+        max_overdraft_micro: int = 0,
+        allowed_model_profiles: Sequence[str] = (),
+        unlimited: bool = False,
+        effective_from: datetime,
+        effective_until: datetime | None = None,
+        created_by: str,
+        status: str = "draft",
+    ) -> dict[str, Any]:
+        effective_from = _utc(effective_from)
+        if effective_until is not None:
+            effective_until = _utc(effective_until)
+            if effective_until <= effective_from:
+                raise ValueError("effective_until must be after effective_from")
+        for field_name, value in (
+            ("request_limit_micro", request_limit_micro),
+            ("daily_limit_micro", daily_limit_micro),
+            ("monthly_limit_micro", monthly_limit_micro),
+            ("concurrency_limit", concurrency_limit),
+            ("max_overdraft_micro", max_overdraft_micro),
+        ):
+            if value is not None and (isinstance(value, bool) or value < 0):
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        if status not in {"draft", "active"}:
+            raise ValueError("policy status must be draft or active")
+        with self._engine.begin() as connection:
+            existing = connection.execute(
+                select(QuotaPolicyModel).where(
+                    QuotaPolicyModel.code == code,
+                    QuotaPolicyModel.version == version,
+                )
+            ).mappings().first()
+            if existing is not None:
+                raise QuotaDomainError(
+                    QuotaErrorCode.POLICY_VERSION_CONFLICT,
+                    f"Policy {code!r} version {version!r} already exists",
+                )
+            policy_id = str(uuid.uuid4())
+            connection.execute(
+                insert(QuotaPolicyModel).values(
+                    id=policy_id,
+                    code=code,
+                    version=version,
+                    name=name,
+                    status=status,
+                    request_limit_micro=request_limit_micro,
+                    daily_limit_micro=daily_limit_micro,
+                    monthly_limit_micro=monthly_limit_micro,
+                    concurrency_limit=concurrency_limit,
+                    max_overdraft_micro=max_overdraft_micro,
+                    allowed_model_profiles=list(allowed_model_profiles),
+                    unlimited=unlimited,
+                    effective_from=_db_time(effective_from),
+                    effective_until=_db_time(effective_until) if effective_until else None,
+                    created_by=created_by,
+                )
+            )
+            row = connection.execute(
+                select(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id)
+            ).mappings().one()
+        return self._policy_payload(row)
+
+    def publish_policy(self, policy_id: str, *, actor_user_id: str) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            policy = connection.execute(
+                select(QuotaPolicyModel)
+                .where(QuotaPolicyModel.id == policy_id)
+                .with_for_update()
+            ).mappings().first()
+            if policy is None:
+                raise QuotaDomainError(QuotaErrorCode.POLICY_NOT_FOUND, "Policy does not exist")
+            # Publishing makes this immutable version eligible for a new
+            # binding. Existing bindings continue to point at their prior
+            # version until the developer explicitly publishes a replacement
+            # binding, so a policy publish cannot cause an admission outage.
+            connection.execute(
+                update(QuotaPolicyModel)
+                .where(QuotaPolicyModel.id == policy_id)
+                .values(status="active")
+            )
+            row = connection.execute(
+                select(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id)
+            ).mappings().one()
+        return {**self._policy_payload(row), "published_by": actor_user_id}
+
+    def list_policies(self, *, code: str | None = None) -> list[dict[str, Any]]:
+        with self._engine.connect() as connection:
+            statement = select(QuotaPolicyModel).order_by(
+                QuotaPolicyModel.code, QuotaPolicyModel.effective_from.desc(), QuotaPolicyModel.version
+            )
+            if code:
+                statement = statement.where(QuotaPolicyModel.code == code)
+            return [self._policy_payload(row) for row in connection.execute(statement).mappings()]
+
+    def bind_policy(
+        self,
+        *,
+        subject_type: str,
+        subject_id: str,
+        policy_id: str,
+        priority: int = 0,
+        effective_from: datetime,
+        effective_until: datetime | None = None,
+    ) -> dict[str, Any]:
+        if subject_type not in {"default", "role", "user", "workspace", "classroom"}:
+            raise ValueError(f"unsupported policy subject_type: {subject_type}")
+        if subject_type == "default" and subject_id != "*":
+            raise ValueError("default policy bindings must use subject_id='*'")
+        start = _utc(effective_from)
+        end = _utc(effective_until) if effective_until else None
+        if end is not None and end <= start:
+            raise ValueError("effective_until must be after effective_from")
+        with self._engine.begin() as connection:
+            policy = connection.execute(
+                select(QuotaPolicyModel).where(
+                    QuotaPolicyModel.id == policy_id,
+                    QuotaPolicyModel.status == "active",
+                )
+            ).mappings().first()
+            if policy is None:
+                raise QuotaDomainError(QuotaErrorCode.POLICY_NOT_FOUND, "Active policy does not exist")
+            current = connection.execute(
+                select(PolicyBindingModel)
+                .where(
+                    PolicyBindingModel.subject_type == subject_type,
+                    PolicyBindingModel.subject_id == subject_id,
+                    PolicyBindingModel.status == "active",
+                    PolicyBindingModel.effective_from <= _db_time(start),
+                    (PolicyBindingModel.effective_until.is_(None))
+                    | (PolicyBindingModel.effective_until > _db_time(start)),
+                )
+                .with_for_update()
+            ).mappings().all()
+            for row in current:
+                connection.execute(
+                    update(PolicyBindingModel)
+                    .where(PolicyBindingModel.id == row["id"])
+                    .values(effective_until=_db_time(start), updated_at=_db_time(start))
+                )
+            binding_id = str(uuid.uuid4())
+            connection.execute(
+                insert(PolicyBindingModel).values(
+                    id=binding_id,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    policy_id=policy_id,
+                    priority=priority,
+                    status="active",
+                    effective_from=_db_time(start),
+                    effective_until=_db_time(end) if end else None,
+                )
+            )
+            row = connection.execute(
+                select(PolicyBindingModel).where(PolicyBindingModel.id == binding_id)
+            ).mappings().one()
+        return self._binding_payload(row, policy)
+
+    def list_bindings(self, *, subject_type: str | None = None, subject_id: str | None = None) -> list[dict[str, Any]]:
+        with self._engine.connect() as connection:
+            statement = (
+                select(
+                    *PolicyBindingModel.__table__.c,
+                    QuotaPolicyModel.code.label("policy_code"),
+                    QuotaPolicyModel.version.label("policy_version"),
+                )
+                .join(QuotaPolicyModel, QuotaPolicyModel.id == PolicyBindingModel.policy_id)
+                .order_by(PolicyBindingModel.subject_type, PolicyBindingModel.subject_id, PolicyBindingModel.effective_from.desc())
+            )
+            if subject_type:
+                statement = statement.where(PolicyBindingModel.subject_type == subject_type)
+            if subject_id:
+                statement = statement.where(PolicyBindingModel.subject_id == subject_id)
+            result = []
+            for row in connection.execute(statement).mappings():
+                result.append(
+                    self._binding_payload(
+                        row,
+                        {"code": row["policy_code"], "version": row["policy_version"]},
+                    )
+                )
+            return result
+
+    def explain_policy(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None,
+        role_codes: Sequence[str],
+        classroom_ids: Sequence[str] = (),
+        at: datetime,
+    ) -> dict[str, Any]:
+        at = _utc(at)
+        with self._engine.connect() as connection:
+            bindings = self._load_bindings(connection, at)
+        base_bindings = [item for item in bindings if item.subject_type != "workspace"]
+        base = self._resolve_or_raise(
+            base_bindings,
+            user_id=user_id,
+            workspace_id=None,
+            role_codes=role_codes,
+            classroom_ids=classroom_ids,
+            at=at,
+        )
+        workspace = None
+        if workspace_id is not None:
+            workspace_bindings = [item for item in bindings if item.subject_type == "workspace"]
+            if workspace_bindings:
+                workspace = self._resolve_or_none(
+                    workspace_bindings,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    role_codes=(),
+                    classroom_ids=(),
+                    at=at,
+                )
+        counts = Counter(item.subject_type for item in base_bindings if self._eligible(item, user_id, role_codes, classroom_ids))
+        return {
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "evaluated_at": at.isoformat(),
+            "base": self._explanation_payload(base),
+            "workspace": self._explanation_payload(workspace) if workspace else None,
+            "candidates": dict(counts),
+        }
+
+    def create_grant(
+        self,
+        *,
+        owner_type: str,
+        owner_id: str,
+        bucket_type: str,
+        period_start: datetime,
+        period_end: datetime,
+        allocated_micro: int,
+        source_type: str,
+        created_by: str,
+        reason: str,
+        idempotency_key: str,
+        effective_from: datetime,
+        expires_at: datetime | None = None,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
+        start, end = _validate_period(
+            owner_type=owner_type,
+            bucket_type=bucket_type,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        if source_type not in _SOURCE_TYPES:
+            raise ValueError(f"unsupported grant source_type: {source_type}")
+        if isinstance(allocated_micro, bool) or allocated_micro < 0:
+            raise ValueError("allocated_micro must be a non-negative integer")
+        effective = _utc(effective_from)
+        expires = _utc(expires_at) if expires_at else None
+        if expires is not None and expires <= effective:
+            raise ValueError("expires_at must be after effective_from")
+        with self._engine.begin() as connection:
+            existing = connection.execute(
+                select(QuotaGrantModel)
+                .where(
+                    QuotaGrantModel.owner_type == owner_type,
+                    QuotaGrantModel.owner_id == owner_id,
+                    QuotaGrantModel.idempotency_key == idempotency_key,
+                )
+                .with_for_update()
+            ).mappings().first()
+            if existing is not None:
+                if not self._grant_request_matches(existing, owner_type, owner_id, bucket_type, start, end, allocated_micro, source_type):
+                    raise QuotaDomainError(QuotaErrorCode.GRANT_CONFLICT, "Grant idempotency key conflicts with existing allocation")
+                return self._grant_payload(existing)
+            grant_id = str(uuid.uuid4())
+            connection.execute(
+                insert(QuotaGrantModel).values(
+                    id=grant_id,
+                    owner_type=owner_type,
+                    owner_id=owner_id,
+                    bucket_type=bucket_type,
+                    period_start=_db_time(start),
+                    period_end=_db_time(end),
+                    source_type=source_type,
+                    source_id=source_id,
+                    allocated_micro=allocated_micro,
+                    effective_from=_db_time(effective),
+                    expires_at=_db_time(expires) if expires else None,
+                    status="active",
+                    reason=reason,
+                    created_by=created_by,
+                    idempotency_key=idempotency_key,
+                )
+            )
+            self._management_ledger(
+                connection,
+                grant_id=grant_id,
+                entry_type="grant",
+                amount_micro=allocated_micro,
+                # The management idempotency key is scoped by owner.  The
+                # ledger key is global, so use the generated grant identity
+                # to allow the same request key for different owners.
+                idempotency_key=f"grant:{grant_id}",
+                actor_user_id=created_by,
+                reason=reason,
+                metadata={"owner_type": owner_type, "owner_id": owner_id, "bucket_type": bucket_type},
+            )
+            row = connection.execute(
+                select(QuotaGrantModel).where(QuotaGrantModel.id == grant_id)
+            ).mappings().one()
+        return self._grant_payload(row)
+
+    def get_grant(self, grant_id: str) -> dict[str, Any]:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(QuotaGrantModel).where(QuotaGrantModel.id == grant_id)
+            ).mappings().first()
+        if row is None:
+            raise QuotaDomainError(QuotaErrorCode.GRANT_CONFLICT, "Grant does not exist")
+        return self._grant_payload(row)
+
+    def list_grants(self, *, owner_type: str | None = None, owner_id: str | None = None) -> list[dict[str, Any]]:
+        with self._engine.connect() as connection:
+            statement = select(QuotaGrantModel).order_by(QuotaGrantModel.created_at.desc())
+            if owner_type:
+                statement = statement.where(QuotaGrantModel.owner_type == owner_type)
+            if owner_id:
+                statement = statement.where(QuotaGrantModel.owner_id == owner_id)
+            return [self._grant_payload(row) for row in connection.execute(statement).mappings()]
+
+    def revoke_grant(self, grant_id: str, *, actor_user_id: str, idempotency_key: str) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(QuotaGrantModel)
+                .where(QuotaGrantModel.id == grant_id)
+                .with_for_update()
+            ).mappings().first()
+            if row is None:
+                raise QuotaDomainError(QuotaErrorCode.GRANT_CONFLICT, "Grant does not exist")
+            if row["status"] != "active":
+                if row["revocation_idempotency_key"] != idempotency_key:
+                    raise QuotaDomainError(QuotaErrorCode.GRANT_CONFLICT, "Grant is already closed")
+                return self._grant_payload(row)
+            now = datetime.now(UTC)
+            connection.execute(
+                update(QuotaGrantModel)
+                .where(QuotaGrantModel.id == grant_id)
+                .values(
+                    status="revoked",
+                    revoked_at=_db_time(now),
+                    revoked_by=actor_user_id,
+                    revocation_idempotency_key=idempotency_key,
+                    updated_at=_db_time(now),
+                )
+            )
+            self._management_ledger(
+                connection,
+                grant_id=grant_id,
+                entry_type="grant_revoke",
+                amount_micro=-int(row["allocated_micro"]),
+                idempotency_key=f"grant-revoke:{idempotency_key}",
+                actor_user_id=actor_user_id,
+                reason="grant_revoked",
+                metadata={"grant_id": grant_id},
+            )
+            updated = connection.execute(
+                select(QuotaGrantModel).where(QuotaGrantModel.id == grant_id)
+            ).mappings().one()
+        return self._grant_payload(updated)
+
+    def expire_grants(self, *, now: datetime) -> int:
+        now = _utc(now)
+        with self._engine.begin() as connection:
+            rows = connection.execute(
+                select(QuotaGrantModel)
+                .where(
+                    QuotaGrantModel.status == "active",
+                    QuotaGrantModel.expires_at.is_not(None),
+                    QuotaGrantModel.expires_at <= _db_time(now),
+                )
+                .with_for_update()
+            ).mappings().all()
+            for row in rows:
+                connection.execute(
+                    update(QuotaGrantModel)
+                    .where(QuotaGrantModel.id == row["id"])
+                    .values(status="expired", updated_at=_db_time(now))
+                )
+                self._management_ledger(
+                    connection,
+                    grant_id=row["id"],
+                    entry_type="grant_expire",
+                    amount_micro=-int(row["allocated_micro"]),
+                    idempotency_key=f"grant-expire:{row['id']}",
+                    actor_user_id=None,
+                    reason="grant_expired",
+                    metadata={"grant_id": row["id"]},
+                )
+            return len(rows)
+
+    def create_adjustment(
+        self,
+        *,
+        owner_type: str,
+        owner_id: str,
+        bucket_type: str,
+        period_start: datetime,
+        period_end: datetime,
+        amount_micro: int,
+        actor_user_id: str,
+        reason: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        start, end = _validate_period(
+            owner_type=owner_type,
+            bucket_type=bucket_type,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        if isinstance(amount_micro, bool) or not isinstance(amount_micro, int):
+            raise ValueError("amount_micro must be an integer")
+        with self._engine.begin() as connection:
+            existing = connection.execute(
+                select(QuotaAdjustmentModel)
+                .where(QuotaAdjustmentModel.idempotency_key == idempotency_key)
+                .with_for_update()
+            ).mappings().first()
+            if existing is not None:
+                same = all(
+                    (
+                        existing["owner_type"] == owner_type,
+                        existing["owner_id"] == owner_id,
+                        existing["bucket_type"] == bucket_type,
+                        existing["period_start"] == _db_time(start),
+                        existing["period_end"] == _db_time(end),
+                        int(existing["amount_micro"]) == amount_micro,
+                        existing["actor_user_id"] == actor_user_id,
+                        existing["reason"] == reason,
+                    )
+                )
+                if not same:
+                    raise QuotaDomainError(QuotaErrorCode.ADJUSTMENT_CONFLICT, "Adjustment idempotency key conflicts with existing entry")
+                return self._adjustment_payload(existing)
+            adjustment_id = str(uuid.uuid4())
+            connection.execute(
+                insert(QuotaAdjustmentModel).values(
+                    id=adjustment_id,
+                    owner_type=owner_type,
+                    owner_id=owner_id,
+                    bucket_type=bucket_type,
+                    period_start=_db_time(start),
+                    period_end=_db_time(end),
+                    amount_micro=amount_micro,
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                    idempotency_key=idempotency_key,
+                )
+            )
+            self._management_ledger(
+                connection,
+                grant_id=None,
+                entry_type="adjustment",
+                amount_micro=amount_micro,
+                idempotency_key=f"adjustment:{idempotency_key}",
+                actor_user_id=actor_user_id,
+                reason=reason,
+                metadata={"owner_type": owner_type, "owner_id": owner_id, "bucket_type": bucket_type},
+            )
+            row = connection.execute(
+                select(QuotaAdjustmentModel).where(QuotaAdjustmentModel.id == adjustment_id)
+            ).mappings().one()
+        return self._adjustment_payload(row)
+
+    def list_adjustments(self, *, owner_type: str | None = None, owner_id: str | None = None) -> list[dict[str, Any]]:
+        with self._engine.connect() as connection:
+            statement = select(QuotaAdjustmentModel).order_by(QuotaAdjustmentModel.created_at.desc())
+            if owner_type:
+                statement = statement.where(QuotaAdjustmentModel.owner_type == owner_type)
+            if owner_id:
+                statement = statement.where(QuotaAdjustmentModel.owner_id == owner_id)
+            return [self._adjustment_payload(row) for row in connection.execute(statement).mappings()]
+
+    @staticmethod
+    def _policy_payload(row: Any) -> dict[str, Any]:
+        return {
+            "policy_id": row["id"],
+            "code": row["code"],
+            "version": row["version"],
+            "name": row["name"],
+            "status": row["status"],
+            "request_limit_micro": row["request_limit_micro"],
+            "daily_limit_micro": row["daily_limit_micro"],
+            "monthly_limit_micro": row["monthly_limit_micro"],
+            "concurrency_limit": row["concurrency_limit"],
+            "max_overdraft_micro": row["max_overdraft_micro"],
+            "allowed_model_profiles": list(row["allowed_model_profiles"] or []),
+            "unlimited": bool(row["unlimited"]),
+            "effective_from": _iso(row["effective_from"]),
+            "effective_until": _iso(row["effective_until"]),
+            "created_by": row["created_by"],
+            "created_at": _iso(row["created_at"]),
+            "updated_at": _iso(row["updated_at"]),
+        }
+
+    @staticmethod
+    def _binding_payload(row: Any, policy_row: Any) -> dict[str, Any]:
+        return {
+            "binding_id": row["id"],
+            "subject_type": row["subject_type"],
+            "subject_id": row["subject_id"],
+            "policy_id": row["policy_id"],
+            "policy_code": policy_row["code"],
+            "policy_version": policy_row["version"],
+            "priority": row["priority"],
+            "status": row["status"],
+            "effective_from": _iso(row["effective_from"]),
+            "effective_until": _iso(row["effective_until"]),
+        }
+
+    @staticmethod
+    def _grant_payload(row: Any) -> dict[str, Any]:
+        return {
+            "grant_id": row["id"],
+            "owner_type": row["owner_type"],
+            "owner_id": row["owner_id"],
+            "bucket_type": row["bucket_type"],
+            "period_start": _iso(row["period_start"]),
+            "period_end": _iso(row["period_end"]),
+            "source_type": row["source_type"],
+            "source_id": row["source_id"],
+            "allocated_micro": int(row["allocated_micro"]),
+            "effective_from": _iso(row["effective_from"]),
+            "expires_at": _iso(row["expires_at"]),
+            "status": row["status"],
+            "reason": row["reason"],
+            "created_by": row["created_by"],
+            "idempotency_key": row["idempotency_key"],
+            "revoked_at": _iso(row["revoked_at"]),
+            "revoked_by": row["revoked_by"],
+            "revocation_idempotency_key": row["revocation_idempotency_key"],
+            "created_at": _iso(row["created_at"]),
+        }
+
+    @staticmethod
+    def _adjustment_payload(row: Any) -> dict[str, Any]:
+        return {
+            "adjustment_id": row["id"],
+            "owner_type": row["owner_type"],
+            "owner_id": row["owner_id"],
+            "bucket_type": row["bucket_type"],
+            "period_start": _iso(row["period_start"]),
+            "period_end": _iso(row["period_end"]),
+            "amount_micro": int(row["amount_micro"]),
+            "actor_user_id": row["actor_user_id"],
+            "reason": row["reason"],
+            "idempotency_key": row["idempotency_key"],
+            "created_at": _iso(row["created_at"]),
+        }
+
+    @staticmethod
+    def _explanation_payload(binding: PolicyBinding | None) -> dict[str, Any] | None:
+        if binding is None:
+            return None
+        policy = binding.policy
+        return {
+            "policy_id": policy.policy_id,
+            "code": policy.code,
+            "version": policy.version,
+            "reason": {
+                "subject_type": binding.subject_type,
+                "subject_id": binding.subject_id,
+                "priority": binding.priority,
+            },
+            "limits": {
+                "request_limit_micro": policy.request_limit_micro,
+                "daily_limit_micro": policy.daily_limit_micro,
+                "monthly_limit_micro": policy.monthly_limit_micro,
+                "concurrency_limit": policy.concurrency_limit,
+            },
+        }
+
+    @staticmethod
+    def _grant_request_matches(row: Any, owner_type: str, owner_id: str, bucket_type: str, start: datetime, end: datetime, allocated_micro: int, source_type: str) -> bool:
+        return all(
+            (
+                row["owner_type"] == owner_type,
+                row["owner_id"] == owner_id,
+                row["bucket_type"] == bucket_type,
+                row["period_start"] == _db_time(start),
+                row["period_end"] == _db_time(end),
+                int(row["allocated_micro"]) == allocated_micro,
+                row["source_type"] == source_type,
+            )
+        )
+
+    @staticmethod
+    def _management_ledger(connection: Any, *, grant_id: str | None, entry_type: str, amount_micro: int, idempotency_key: str, actor_user_id: str | None, reason: str, metadata: dict[str, Any]) -> None:
+        connection.execute(
+            insert(QuotaLedgerEntryModel).values(
+                id=str(uuid.uuid4()),
+                reservation_id=None,
+                bucket_id=None,
+                grant_id=grant_id,
+                entry_type=entry_type,
+                amount_micro=amount_micro,
+                reserved_delta_micro=0,
+                consumed_delta_micro=0,
+                idempotency_key=idempotency_key,
+                actor_user_id=actor_user_id,
+                reason=reason,
+                metadata_json=metadata,
+            )
+        )
+
+    @staticmethod
+    def _eligible(binding: PolicyBinding, user_id: str, role_codes: Sequence[str], classroom_ids: Sequence[str]) -> bool:
+        return (
+            (binding.subject_type == "default" and binding.subject_id == "*")
+            or (binding.subject_type == "user" and binding.subject_id == user_id)
+            or (binding.subject_type == "role" and binding.subject_id in set(role_codes))
+            or (binding.subject_type == "classroom" and binding.subject_id in set(classroom_ids))
+        )
+
+    @staticmethod
+    def _resolve_or_raise(bindings: list[PolicyBinding], **kwargs: Any) -> PolicyBinding:
+        try:
+            return resolve_effective_policy(bindings, **kwargs)
+        except QuotaDomainError as error:
+            raise error
+
+    @staticmethod
+    def _resolve_or_none(bindings: list[PolicyBinding], **kwargs: Any) -> PolicyBinding | None:
+        try:
+            return resolve_effective_policy(bindings, **kwargs)
+        except QuotaDomainError as error:
+            if error.code is QuotaErrorCode.POLICY_NOT_FOUND:
+                return None
+            raise
+
+    @staticmethod
+    def _load_bindings(connection: Any, at: datetime) -> list[PolicyBinding]:
+        policy_rows = {
+            row["id"]: row for row in connection.execute(select(QuotaPolicyModel)).mappings()
+        }
+        result: list[PolicyBinding] = []
+        for row in connection.execute(select(PolicyBindingModel)).mappings():
+            policy = policy_rows.get(row["policy_id"])
+            if policy is None or policy["status"] != "active" or row["status"] != "active":
+                continue
+            binding_start = row["effective_from"]
+            policy_start = policy["effective_from"]
+            binding_start = binding_start.replace(tzinfo=UTC) if binding_start.tzinfo is None else binding_start
+            policy_start = policy_start.replace(tzinfo=UTC) if policy_start.tzinfo is None else policy_start
+            binding_end = row["effective_until"]
+            policy_end = policy["effective_until"]
+            binding_end = binding_end.replace(tzinfo=UTC) if binding_end is not None and binding_end.tzinfo is None else binding_end
+            policy_end = policy_end.replace(tzinfo=UTC) if policy_end is not None and policy_end.tzinfo is None else policy_end
+            if not (binding_start <= at and (binding_end is None or at < binding_end)):
+                continue
+            if not (policy_start <= at and (policy_end is None or at < policy_end)):
+                continue
+            result.append(
+                PolicyBinding(
+                    subject_type=row["subject_type"],
+                    subject_id=row["subject_id"],
+                    policy=QuotaPolicy(
+                        policy_id=policy["id"],
+                        code=policy["code"],
+                        version=policy["version"],
+                        request_limit_micro=policy["request_limit_micro"],
+                        daily_limit_micro=policy["daily_limit_micro"],
+                        monthly_limit_micro=policy["monthly_limit_micro"],
+                        concurrency_limit=policy["concurrency_limit"],
+                        max_overdraft_micro=policy["max_overdraft_micro"],
+                        allowed_model_profiles=tuple(policy["allowed_model_profiles"] or ()),
+                        unlimited=bool(policy["unlimited"]),
+                    ),
+                    priority=row["priority"],
+                    effective_from=binding_start,
+                    effective_until=binding_end,
+                )
+            )
+        return result

@@ -7,6 +7,7 @@ import { AuthGate } from "@/modules/auth/AuthGate";
 import { RouteGuard } from "./RouteGuard";
 import { LoginPage } from "@/modules/auth/LoginPage";
 import { ProfilePage } from "@/modules/profile/ProfilePage";
+import { QuotaUsagePage } from "@/modules/quota/QuotaUsagePage";
 
 const StudentRoutes = lazy(() => import("@/modules/student").then(({ StudentRoutes: route }) => ({ default: route })));
 const TeacherRoutes = lazy(() => import("@/modules/teacher").then(({ TeacherRoutes: route }) => ({ default: route })));
@@ -30,6 +31,7 @@ export function AppRouter() {
           {/* Student routes: accessible to all authenticated users */}
           {/* Profile / self-service settings — all authenticated users */}
           <Route path="profile" element={<ProfilePage />} />
+          <Route path="usage" element={<QuotaUsagePage />} />
 
           {/* Teacher routes: require teacher or developer role */}
           <Route path="teacher/*" element={

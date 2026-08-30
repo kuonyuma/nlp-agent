@@ -977,6 +977,40 @@ def test_websocket_hub_enforces_global_and_per_user_limits():
     assert hub.try_add(connection(AuthenticatedPrincipal(user_id="carol"))) is False
 
 
+@pytest.mark.asyncio
+async def test_websocket_hub_broadcast_targets_workspace_members():
+    hub = WebSocketHub(max_connections=4, max_connections_per_user=1)
+    delivered: dict[str, int] = {}
+
+    def connection(principal):
+        item = WebSocketConnection(
+            SlowWebSocket(),
+            gateway=None,
+            principal=principal,
+            max_queue=10,
+            send_queue_size=1,
+            send_timeout_s=0.1,
+        )
+
+        async def capture(_event, *, wait=False):
+            delivered[principal.user_id] = delivered.get(principal.user_id, 0) + 1
+            return True
+
+        item.send = capture
+        return item
+
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="alice", workspace_ids=frozenset({"workspace-1"})))) is True
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="bob", workspace_ids=frozenset({"workspace-2"})))) is True
+    assert hub.try_add(connection(AuthenticatedPrincipal(user_id="developer", workspace_ids=frozenset({"*"})))) is True
+
+    await hub.broadcast(
+        ServerEventEnvelope(type="usage.snapshot", payload={"refresh_required": True}),
+        workspace_id="workspace-1",
+    )
+
+    assert delivered == {"alice": 1, "developer": 1}
+
+
 def test_session_list_exposes_page_metadata_and_usage_stats(web_app):
     app, _engine = web_app
     with TestClient(app) as client:

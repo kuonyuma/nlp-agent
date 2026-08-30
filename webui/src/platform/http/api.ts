@@ -1,4 +1,4 @@
-import type { AgentSessionStats, AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { AgentSessionStats, AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaBinding, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 import type { FeedbackThread, FeedbackThreadList } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
@@ -122,6 +122,7 @@ export const api = {
   },
   getSessionStats: () => request<AgentSessionStats>("/sessions/stats"),
   getUsage: (days = 30) => request<Record<string, unknown>>(`/usage/me?days=${encodeURIComponent(String(days))}`),
+  getQuota: (workspaceId?: string) => request<{ quota: QuotaSnapshot; policy: QuotaPolicyExplanation | null }>(`/quota/me${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
   createSession: (workspaceId = "default") =>
     request<SessionSummary>("/sessions", {
       method: "POST",
@@ -151,6 +152,16 @@ export const api = {
   getFeedback: (threadId: string) => request<FeedbackThread>(`/developer/feedback/${encodeURIComponent(threadId)}`),
   markFeedbackRead: (threadId: string, messageId: string) => request<{ ok: boolean }>(`/developer/feedback/${encodeURIComponent(threadId)}/read`, { method: "POST", body: JSON.stringify({ read_through_message_id: messageId }) }),
   getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
+  listQuotaPolicies: (code?: string) => request<{ items: QuotaPolicy[] }>(`/developer/quota/policies${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+  createQuotaPolicy: (input: Omit<QuotaPolicy, "policy_id" | "created_by" | "created_at" | "updated_at">) => request<QuotaPolicy>("/developer/quota/policies", { method: "POST", body: JSON.stringify(input) }),
+  publishQuotaPolicy: (policyId: string) => request<QuotaPolicy>(`/developer/quota/policies/${encodeURIComponent(policyId)}/publish`, { method: "POST", body: "{}" }),
+  listQuotaBindings: () => request<{ items: QuotaBinding[] }>("/developer/quota/bindings"),
+  bindQuotaPolicy: (input: Omit<QuotaBinding, "binding_id" | "policy_code" | "policy_version" | "status">) => request<QuotaBinding>("/developer/quota/bindings", { method: "POST", body: JSON.stringify(input) }),
+  listQuotaGrants: (ownerType?: string, ownerId?: string) => request<{ items: QuotaGrant[] }>(`/developer/quota/grants${ownerType || ownerId ? `?${new URLSearchParams({ ...(ownerType ? { owner_type: ownerType } : {}), ...(ownerId ? { owner_id: ownerId } : {}) })}` : ""}`),
+  createQuotaGrant: (input: Omit<QuotaGrant, "grant_id" | "created_by" | "created_at" | "revoked_at" | "revoked_by" | "revocation_idempotency_key" | "status">) => request<QuotaGrant>("/developer/quota/grants", { method: "POST", body: JSON.stringify(input) }),
+  revokeQuotaGrant: (grantId: string, idempotency_key: string) => request<QuotaGrant>(`/developer/quota/grants/${encodeURIComponent(grantId)}/revoke`, { method: "POST", body: JSON.stringify({ idempotency_key }) }),
+  listQuotaAdjustments: (ownerType?: string, ownerId?: string) => request<{ items: QuotaAdjustment[] }>(`/developer/quota/adjustments${ownerType || ownerId ? `?${new URLSearchParams({ ...(ownerType ? { owner_type: ownerType } : {}), ...(ownerId ? { owner_id: ownerId } : {}) })}` : ""}`),
+  createQuotaAdjustment: (input: Omit<QuotaAdjustment, "adjustment_id" | "actor_user_id" | "created_at">) => request<QuotaAdjustment>("/developer/quota/adjustments", { method: "POST", body: JSON.stringify(input) }),
   updateToolPolicies: (policies: Record<string, unknown>) =>
     request<Record<string, unknown>>("/developer/tools/policies", { method: "PUT", body: JSON.stringify({ policies }) }),
   updateCustomTools: (custom: Record<string, unknown>) => request<{ restart_required: boolean; reason: string }>("/developer/tools/custom", { method: "PUT", body: JSON.stringify({ custom }) }),

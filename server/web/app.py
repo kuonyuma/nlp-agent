@@ -44,7 +44,9 @@ from server.web.auth import (
 )
 from server.web.database_auth import DatabaseSessionAuth, DatabaseSessionClaims
 from server.agent.session_service import DatabaseSessionService, local_session_service
-from server.quota.errors import QuotaRejectedError
+from server.quota.errors import QuotaDomainError, QuotaRejectedError
+from server.quota.management import QuotaManagementService
+from server.quota.service import QuotaService
 from server.web.contracts import (
     CreateSessionBody,
     LoginBody,
@@ -67,6 +69,11 @@ from server.web.contracts import (
     SkillBody,
     WorkerProfileBody,
     ReleaseNoteBody,
+    QuotaAdjustmentBody,
+    QuotaBindingBody,
+    QuotaGrantBody,
+    QuotaGrantRevokeBody,
+    QuotaPolicyBody,
 )
 from server.web.protocol import control_event
 from server.web.developer import developer_snapshot
@@ -253,6 +260,9 @@ def create_app(
         gateway = gateway_factory()
         usage_reporter = None
         usage_reader = None
+        quota_read_service = None
+        quota_management = None
+        owns_quota_read_service = False
         if (
             not auth_injected
             and gateway.authorization_session_factory is not None
@@ -295,12 +305,22 @@ def create_app(
                 quota_enforcement=settings.quota_enforcement_enabled,
             )
             if getattr(gateway, "authorization_session_factory", None) is not None:
+                quota_read_service = getattr(gateway, "quota_service", None)
+                if quota_read_service is None:
+                    quota_read_service = QuotaService(database_url)
+                    owns_quota_read_service = True
+                # Phase 3 management and user snapshots must fail startup if
+                # the new management tables were not migrated.
+                quota_read_service.verify_schema()
+                quota_management = QuotaManagementService(quota_read_service.engine)
                 usage_reader = UsageReadService(
                     database_url,
-                    quota_enforcement=settings.quota_enforcement_enabled,
+                    quota_enforcement=True,
                 )
         app.state.quota_usage_reporter = usage_reporter
         app.state.quota_usage_reader = usage_reader
+        app.state.quota_read_service = quota_read_service
+        app.state.quota_management = quota_management
         redis_client = getattr(getattr(gateway, "dispatcher", None), "client", None)
         authorization_channel = str(settings.gateway_runtime.get("redis_authorization_channel", "nlp-agent:authorization"))
 
@@ -375,6 +395,8 @@ def create_app(
             shutdown_usage_reporter(usage_reporter)
             if usage_reader is not None:
                 usage_reader.close()
+            if owns_quota_read_service and quota_read_service is not None:
+                quota_read_service.close()
 
     app = FastAPI(
         title="NLP Agent Web API",
@@ -893,6 +915,282 @@ def create_app(
         if factory is None:
             raise RuntimeError("RBAC administration requires MySQL persistence")
         return factory
+
+    def quota_management_for(request: Request) -> QuotaManagementService:
+        service = getattr(request.app.state, "quota_management", None)
+        if service is not None:
+            return service
+        quota_service = getattr(request.app.state.gateway, "quota_service", None)
+        if quota_service is None:
+            raise RuntimeError("Quota management requires the Phase 3 database schema")
+        return QuotaManagementService(quota_service.engine)
+
+    async def audit_quota_change(
+        request: Request,
+        principal: AuthenticatedPrincipal,
+        *,
+        reason_code: str,
+        resource_type: str,
+        resource_id: str | None,
+        detail: dict[str, Any],
+    ) -> None:
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                await rbac_service.audit(
+                    session,
+                    actor_user_id=principal.user_id,
+                    target_user_id=(
+                        detail.get("owner_id")
+                        if detail.get("owner_type") == "user"
+                        else None
+                    ),
+                    decision="allow",
+                    reason_code=reason_code,
+                    permission_code=Permission.SYSTEM_QUOTA_MANAGE.value,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    detail=detail,
+                )
+
+    async def emit_quota_snapshot(
+        *,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+    ) -> None:
+        event = control_event(
+            "usage.snapshot",
+            payload={
+                "owner_type": owner_type,
+                "owner_id": owner_id,
+                "refresh_required": True,
+            },
+        )
+        if owner_type == "user" and owner_id:
+            await hub.broadcast(event, user_id=owner_id)
+        elif owner_type == "workspace" and owner_id:
+            await hub.broadcast(event, workspace_id=owner_id)
+        else:
+            await hub.broadcast(event)
+
+    def quota_domain_problem(request: Request, error: QuotaDomainError) -> JSONResponse:
+        return _problem(
+            request,
+            status_code=status.HTTP_409_CONFLICT,
+            code=error.code.value,
+            title="Quota management conflict",
+            detail=str(error),
+        )
+
+    @app.get("/api/v1/developer/quota/policies", tags=["quota"])
+    async def list_quota_policies(
+        request: Request,
+        principal: Principal,
+        code: str | None = Query(default=None, max_length=128),
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
+        return {"items": await asyncio.to_thread(quota_management_for(request).list_policies, code=code)}
+
+    @app.post("/api/v1/developer/quota/policies", status_code=status.HTTP_201_CREATED, tags=["quota"])
+    async def create_quota_policy(
+        body: QuotaPolicyBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).create_policy,
+                **body.model_dump(),
+                created_by=principal.user_id,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_policy_created",
+            resource_type="quota_policy",
+            resource_id=row["policy_id"],
+            detail={"code": row["code"], "version": row["version"], "status": row["status"]},
+        )
+        await emit_quota_snapshot()
+        return row
+
+    @app.post("/api/v1/developer/quota/policies/{policy_id}/publish", tags=["quota"])
+    async def publish_quota_policy(
+        policy_id: str,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).publish_policy,
+                policy_id,
+                actor_user_id=principal.user_id,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_policy_published",
+            resource_type="quota_policy",
+            resource_id=policy_id,
+            detail={"code": row["code"], "version": row["version"]},
+        )
+        await emit_quota_snapshot()
+        return row
+
+    @app.get("/api/v1/developer/quota/bindings", tags=["quota"])
+    async def list_quota_bindings(
+        request: Request,
+        principal: Principal,
+        subject_type: str | None = Query(default=None, max_length=16),
+        subject_id: str | None = Query(default=None, max_length=128),
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
+        return {"items": await asyncio.to_thread(
+            quota_management_for(request).list_bindings,
+            subject_type=subject_type,
+            subject_id=subject_id,
+        )}
+
+    @app.post("/api/v1/developer/quota/bindings", status_code=status.HTTP_201_CREATED, tags=["quota"])
+    async def bind_quota_policy(
+        body: QuotaBindingBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(quota_management_for(request).bind_policy, **body.model_dump())
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_policy_bound",
+            resource_type="quota_policy_binding",
+            resource_id=row["binding_id"],
+            detail={"subject_type": row["subject_type"], "subject_id": row["subject_id"], "policy_id": row["policy_id"]},
+        )
+        await emit_quota_snapshot()
+        return row
+
+    @app.get("/api/v1/developer/quota/grants", tags=["quota"])
+    async def list_quota_grants(
+        request: Request,
+        principal: Principal,
+        owner_type: str | None = Query(default=None, max_length=16),
+        owner_id: str | None = Query(default=None, max_length=128),
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
+        return {"items": await asyncio.to_thread(
+            quota_management_for(request).list_grants,
+            owner_type=owner_type,
+            owner_id=owner_id,
+        )}
+
+    @app.post("/api/v1/developer/quota/grants", status_code=status.HTTP_201_CREATED, tags=["quota"])
+    async def create_quota_grant(
+        body: QuotaGrantBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).create_grant,
+                **body.model_dump(),
+                created_by=principal.user_id,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_grant_created",
+            resource_type="quota_grant",
+            resource_id=row["grant_id"],
+            detail={"owner_type": row["owner_type"], "owner_id": row["owner_id"], "allocated_micro": row["allocated_micro"]},
+        )
+        await emit_quota_snapshot(owner_type=row["owner_type"], owner_id=row["owner_id"])
+        return row
+
+    @app.post("/api/v1/developer/quota/grants/{grant_id}/revoke", tags=["quota"])
+    async def revoke_quota_grant(
+        grant_id: str,
+        body: QuotaGrantRevokeBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).revoke_grant,
+                grant_id,
+                actor_user_id=principal.user_id,
+                idempotency_key=body.idempotency_key,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_grant_revoked",
+            resource_type="quota_grant",
+            resource_id=grant_id,
+            detail={"status": row["status"]},
+        )
+        await emit_quota_snapshot(owner_type=row["owner_type"], owner_id=row["owner_id"])
+        return row
+
+    @app.get("/api/v1/developer/quota/adjustments", tags=["quota"])
+    async def list_quota_adjustments(
+        request: Request,
+        principal: Principal,
+        owner_type: str | None = Query(default=None, max_length=16),
+        owner_id: str | None = Query(default=None, max_length=128),
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
+        return {"items": await asyncio.to_thread(
+            quota_management_for(request).list_adjustments,
+            owner_type=owner_type,
+            owner_id=owner_id,
+        )}
+
+    @app.post("/api/v1/developer/quota/adjustments", status_code=status.HTTP_201_CREATED, tags=["quota"])
+    async def create_quota_adjustment(
+        body: QuotaAdjustmentBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).create_adjustment,
+                **body.model_dump(),
+                actor_user_id=principal.user_id,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_adjustment_created",
+            resource_type="quota_adjustment",
+            resource_id=row["adjustment_id"],
+            detail={"owner_type": row["owner_type"], "owner_id": row["owner_id"], "amount_micro": row["amount_micro"], "reason": row["reason"]},
+        )
+        await emit_quota_snapshot(owner_type=row["owner_type"], owner_id=row["owner_id"])
+        return row
 
     @app.get("/api/v1/roles", tags=["rbac"])
     async def list_roles(request: Request, principal: Principal):
@@ -1434,6 +1732,7 @@ def create_app(
                 "session.updated",
                 "session.deleted",
                 "settings.updated",
+                "usage.snapshot",
                 "stream.gap",
                 "pong",
                 "server.shutdown",
@@ -1881,6 +2180,7 @@ def create_app(
         principal: Principal,
         days: int = Query(30, ge=1, le=365),
     ):
+        authorization_service.require(principal, Permission.QUOTA_USAGE_READ_SELF)
         reader = getattr(request.app.state, "quota_usage_reader", None)
         if reader is None:
             return _problem(
@@ -1894,6 +2194,48 @@ def create_app(
             principal.user_id,
             days=days,
         )
+
+    @app.get("/api/v1/quota/me", tags=["quota"])
+    async def quota_me(
+        request: Request,
+        principal: Principal,
+        workspace_id: str | None = Query(default=None, max_length=128),
+    ):
+        authorization_service.require(principal, Permission.QUOTA_USAGE_READ_SELF)
+        if workspace_id is not None:
+            principal.require_workspace(workspace_id)
+        quota_service = getattr(request.app.state, "quota_read_service", None)
+        if quota_service is None:
+            quota_service = getattr(request.app.state.gateway, "quota_service", None)
+        if quota_service is None:
+            return _problem(
+                request,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="quota_unavailable",
+                title="Quota persistence is unavailable",
+            )
+        snapshot = await asyncio.to_thread(
+            quota_service.snapshot,
+            user_id=principal.user_id,
+            workspace_id=workspace_id,
+        )
+        explanation = None
+        management = getattr(request.app.state, "quota_management", None)
+        if management is not None:
+            try:
+                explanation = await asyncio.to_thread(
+                    management.explain_policy,
+                    user_id=principal.user_id,
+                    workspace_id=workspace_id,
+                    role_codes=tuple(principal.roles),
+                    classroom_ids=tuple(principal.classroom_ids),
+                    at=datetime.now(timezone.utc),
+                )
+            except QuotaDomainError:
+                # A new account may not have a policy yet; the balance itself
+                # remains useful and the developer can attach a policy later.
+                explanation = None
+        return {"quota": snapshot, "policy": explanation}
 
     @app.exception_handler(QuotaRejectedError)
     async def quota_rejected_error(request: Request, error: QuotaRejectedError):

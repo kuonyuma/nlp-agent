@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
 from utils.logger import get_logger
@@ -44,6 +45,12 @@ class QuotaReservationReaper:
         while True:
             try:
                 await asyncio.to_thread(self._quota_service.expire_reservations)
+                expire_grants = getattr(self._quota_service, "expire_grants", None)
+                if expire_grants is not None:
+                    await asyncio.to_thread(
+                        expire_grants,
+                        now=datetime.now(timezone.utc),
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:

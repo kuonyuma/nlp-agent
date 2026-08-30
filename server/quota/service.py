@@ -8,7 +8,7 @@ from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from sqlalchemy import Engine, and_, create_engine, insert, select, update
+from sqlalchemy import Engine, and_, create_engine, func, insert, or_, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -28,8 +28,10 @@ from server.quota.errors import QuotaDomainError, QuotaErrorCode, QuotaRejectedE
 from server.quota.models import (
     PolicyBindingModel,
     PricingRuleModel,
+    QuotaAdjustmentModel,
     QuotaBucketModel,
     QuotaConcurrencyLockModel,
+    QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaReservationModel,
@@ -91,6 +93,10 @@ class QuotaService:
             self._engine = database
             self._owns_engine = False
         self.lease_seconds = lease_seconds
+
+    @property
+    def engine(self) -> Engine:
+        return self._engine
 
     @staticmethod
     def reservation_id_for_turn(turn_id: str) -> str:
@@ -160,14 +166,27 @@ class QuotaService:
             role_codes=role_codes,
             classroom_ids=classroom_ids,
             at=at,
+            subject_types={"default", "role", "user", "classroom"},
         )
         policy = binding.policy
-        if policy.allowed_model_profiles and command.model_profile not in policy.allowed_model_profiles:
-            raise self._rejection(
-                QuotaErrorCode.MODEL_NOT_ALLOWED,
-                f"Model profile {command.model_profile!r} is not allowed by policy {policy.code}",
-                allowed_model_profiles=policy.allowed_model_profiles,
-            )
+        workspace_binding = self._effective_binding(
+            connection,
+            command,
+            role_codes=role_codes,
+            classroom_ids=classroom_ids,
+            at=at,
+            subject_types={"workspace"},
+            optional=True,
+        )
+        workspace_policy = workspace_binding.policy if workspace_binding is not None else None
+        policies = [policy, *([workspace_policy] if workspace_policy is not None else [])]
+        for candidate in policies:
+            if candidate.allowed_model_profiles and command.model_profile not in candidate.allowed_model_profiles:
+                raise self._rejection(
+                    QuotaErrorCode.MODEL_NOT_ALLOWED,
+                    f"Model profile {command.model_profile!r} is not allowed by policy {candidate.code}",
+                    allowed_model_profiles=candidate.allowed_model_profiles,
+                )
 
         reservation_micro = int(command.estimated_micro)
         if reservation_micro == 0:
@@ -175,42 +194,61 @@ class QuotaService:
                 reservation_micro = self._estimate_micro(connection, command, at)
             except QuotaDomainError as error:
                 raise self._rejection(error.code, str(error), retryable=True) from error
-        if policy.request_limit_micro is not None and reservation_micro > policy.request_limit_micro:
+        request_limits = [candidate.request_limit_micro for candidate in policies if candidate.request_limit_micro is not None]
+        request_limit = min(request_limits) if request_limits else None
+        if request_limit is not None and reservation_micro > request_limit:
             raise self._rejection(
                 QuotaErrorCode.REQUEST_LIMIT,
                 "The estimated cost exceeds the per-request quota",
-                remaining_micro=policy.request_limit_micro,
+                remaining_micro=request_limit,
             )
 
         self._expire_stale_in_transaction(connection, at)
 
         buckets: list[dict[str, Any]] = []
-        for bucket_type, start, end, limit in self._periods(policy, at):
-            bucket = self._get_or_create_bucket(
-                connection,
-                owner_id=command.user_id,
-                bucket_type=bucket_type,
-                period_start=start,
-                period_end=end,
-                policy=policy,
-                limit=limit,
-                now=at,
-            )
-            available = self._available(bucket, policy.max_overdraft_micro)
-            if reservation_micro > available:
-                code = (
-                    QuotaErrorCode.DAILY_EXHAUSTED
-                    if bucket_type == "daily"
-                    else QuotaErrorCode.MONTHLY_EXHAUSTED
+        subjects = [("user", command.user_id, policy)]
+        if workspace_policy is not None and command.workspace_id is not None:
+            subjects.append(("workspace", command.workspace_id, workspace_policy))
+        for owner_type, owner_id, subject_policy in subjects:
+            for bucket_type, start, end, limit in self._periods(subject_policy, at):
+                bucket = self._get_or_create_bucket(
+                    connection,
+                    owner_type=owner_type,
+                    owner_id=owner_id,
+                    bucket_type=bucket_type,
+                    period_start=start,
+                    period_end=end,
+                    policy=subject_policy,
+                    limit=limit,
+                    now=at,
                 )
-                raise self._rejection(
-                    code,
-                    f"The {bucket_type} quota is exhausted",
-                    remaining_micro=available,
-                    reset_at=end,
-                    retryable=True,
+                extra_capacity = self._additional_capacity(
+                    connection,
+                    owner_type=owner_type,
+                    owner_id=owner_id,
+                    bucket_type=bucket_type,
+                    period_start=start,
+                    period_end=end,
+                    at=at,
                 )
-            buckets.append(bucket)
+                available = self._available(bucket, subject_policy.max_overdraft_micro, extra_capacity)
+                if reservation_micro > available:
+                    if owner_type == "workspace":
+                        code = QuotaErrorCode.WORKSPACE_EXHAUSTED
+                    else:
+                        code = (
+                            QuotaErrorCode.DAILY_EXHAUSTED
+                            if bucket_type == "daily"
+                            else QuotaErrorCode.MONTHLY_EXHAUSTED
+                        )
+                    raise self._rejection(
+                        code,
+                        f"The {owner_type} {bucket_type} quota is exhausted",
+                        remaining_micro=available,
+                        reset_at=end,
+                        retryable=True,
+                    )
+                buckets.append(bucket)
 
         if policy.concurrency_limit is not None:
             self._reserve_concurrency(
@@ -232,8 +270,34 @@ class QuotaService:
             "monthly_limit_micro": policy.monthly_limit_micro,
             "concurrency_limit": policy.concurrency_limit,
             "max_overdraft_micro": policy.max_overdraft_micro,
+            "overdrafts": {
+                "user": policy.max_overdraft_micro,
+                **(
+                    {"workspace": workspace_policy.max_overdraft_micro}
+                    if workspace_policy is not None
+                    else {}
+                ),
+            },
             "allowed_model_profiles": list(policy.allowed_model_profiles),
             "unlimited": policy.unlimited,
+            "sources": {
+                "base": {
+                    "subject_type": binding.subject_type,
+                    "subject_id": binding.subject_id,
+                    "policy_id": policy.policy_id,
+                    "version": policy.version,
+                },
+                "workspace": (
+                    {
+                        "subject_type": workspace_binding.subject_type,
+                        "subject_id": workspace_binding.subject_id,
+                        "policy_id": workspace_policy.policy_id,
+                        "version": workspace_policy.version,
+                    }
+                    if workspace_binding is not None and workspace_policy is not None
+                    else None
+                ),
+            },
         }
         if rearm_existing:
             connection.execute(
@@ -507,7 +571,14 @@ class QuotaService:
             bucket_release = min(int(bucket["reserved_micro"]), release_amount)
             new_consumed = int(bucket["consumed_micro"]) + credits_micro
             limit = bucket["limit_micro"]
-            bucket_over_limit = limit is not None and new_consumed > int(limit)
+            extra_capacity = self._additional_capacity_for_bucket(connection, bucket, db_now)
+            bucket_over_limit = (
+                limit is not None
+                and new_consumed
+                > int(limit)
+                + extra_capacity
+                + self._reservation_overdraft(reservation, bucket["owner_type"])
+            )
             over_limit = over_limit or bucket_over_limit
             self._insert_ledger(
                 connection,
@@ -701,7 +772,14 @@ class QuotaService:
             bucket_release = min(int(bucket["reserved_micro"]), release_amount)
             new_consumed = int(bucket["consumed_micro"]) + credits_micro
             limit = bucket["limit_micro"]
-            bucket_over_limit = limit is not None and new_consumed > int(limit)
+            extra_capacity = self._additional_capacity_for_bucket(connection, bucket, db_now)
+            bucket_over_limit = (
+                limit is not None
+                and new_consumed
+                > int(limit)
+                + extra_capacity
+                + self._reservation_overdraft(reservation, bucket["owner_type"])
+            )
             over_limit = over_limit or bucket_over_limit
             self._insert_ledger(
                 connection,
@@ -959,6 +1037,14 @@ class QuotaService:
                     count += 1
         return count
 
+    def expire_grants(self, *, now: datetime | None = None) -> int:
+        """Close expired developer grants from the same production reaper."""
+        from server.quota.management import QuotaManagementService
+
+        return QuotaManagementService(self._engine).expire_grants(
+            now=_utc(now)
+        )
+
     def heartbeat(
         self,
         reservation_id: str,
@@ -1007,30 +1093,142 @@ class QuotaService:
     ) -> dict[str, Any]:
         at = _utc(now)
         with self._engine.connect() as connection:
+            owners = [("user", user_id)]
+            if workspace_id is not None:
+                owners.append(("workspace", workspace_id))
+            owner_filter = or_(
+                *(
+                    and_(
+                        QuotaBucketModel.owner_type == owner_type,
+                        QuotaBucketModel.owner_id == owner_id,
+                    )
+                    for owner_type, owner_id in owners
+                )
+            )
             rows = connection.execute(
                 select(QuotaBucketModel)
                 .where(
-                    QuotaBucketModel.owner_type == "user",
-                    QuotaBucketModel.owner_id == user_id,
+                    owner_filter,
                     QuotaBucketModel.period_start <= _db_time(at),
                     QuotaBucketModel.period_end > _db_time(at),
                 )
+                .order_by(QuotaBucketModel.owner_type, QuotaBucketModel.bucket_type)
             ).mappings().all()
+            bucket_rows: dict[tuple[str, str, datetime, datetime], dict[str, Any]] = {
+                (
+                    row["owner_type"],
+                    row["owner_id"],
+                    row["period_start"],
+                    row["period_end"],
+                ): dict(row)
+                for row in rows
+            }
+            virtual_periods = connection.execute(
+                select(
+                    QuotaGrantModel.owner_type,
+                    QuotaGrantModel.owner_id,
+                    QuotaGrantModel.bucket_type,
+                    QuotaGrantModel.period_start,
+                    QuotaGrantModel.period_end,
+                )
+                .where(
+                    or_(
+                        *(
+                            and_(
+                                QuotaGrantModel.owner_type == owner_type,
+                                QuotaGrantModel.owner_id == owner_id,
+                            )
+                            for owner_type, owner_id in owners
+                        )
+                    ),
+                    QuotaGrantModel.status == "active",
+                    QuotaGrantModel.effective_from <= _db_time(at),
+                    (QuotaGrantModel.expires_at.is_(None))
+                    | (QuotaGrantModel.expires_at > _db_time(at)),
+                    QuotaGrantModel.period_start <= _db_time(at),
+                    QuotaGrantModel.period_end > _db_time(at),
+                )
+                .distinct()
+            ).mappings().all()
+            adjustment_periods = connection.execute(
+                select(
+                    QuotaAdjustmentModel.owner_type,
+                    QuotaAdjustmentModel.owner_id,
+                    QuotaAdjustmentModel.bucket_type,
+                    QuotaAdjustmentModel.period_start,
+                    QuotaAdjustmentModel.period_end,
+                )
+                .where(
+                    or_(
+                        *(
+                            and_(
+                                QuotaAdjustmentModel.owner_type == owner_type,
+                                QuotaAdjustmentModel.owner_id == owner_id,
+                            )
+                            for owner_type, owner_id in owners
+                        )
+                    ),
+                    QuotaAdjustmentModel.period_start <= _db_time(at),
+                    QuotaAdjustmentModel.period_end > _db_time(at),
+                )
+                .distinct()
+            ).mappings().all()
+            for period in [*virtual_periods, *adjustment_periods]:
+                key = (
+                    period["owner_type"],
+                    period["owner_id"],
+                    period["period_start"],
+                    period["period_end"],
+                )
+                bucket_rows.setdefault(
+                    key,
+                    {
+                        "owner_type": period["owner_type"],
+                        "owner_id": period["owner_id"],
+                        "bucket_type": period["bucket_type"],
+                        "period_start": period["period_start"],
+                        "period_end": period["period_end"],
+                        # A grant/adjustment can exist before the first
+                        # admission creates a policy-backed Bucket.  A zero
+                        # base capacity keeps this read-only projection
+                        # explicit while preserving the additional capacity.
+                        "limit_micro": 0,
+                        "consumed_micro": 0,
+                        "reserved_micro": 0,
+                        "over_limit": False,
+                    },
+                )
+            rendered_rows = []
+            for row in sorted(
+                bucket_rows.values(),
+                key=lambda item: (
+                    item["owner_type"],
+                    item["bucket_type"],
+                    item["period_start"],
+                ),
+            ):
+                grant_micro, adjustment_micro = self._capacity_components(connection, row, at)
+                rendered_rows.append(
+                    {
+                        "owner_type": row["owner_type"],
+                        "owner_id": row["owner_id"],
+                        "bucket_type": row["bucket_type"],
+                        "limit_micro": row["limit_micro"],
+                        "grant_micro": grant_micro,
+                        "adjustment_micro": adjustment_micro,
+                        "consumed_micro": row["consumed_micro"],
+                        "reserved_micro": row["reserved_micro"],
+                        "remaining_micro": self._available(
+                            row, 0, grant_micro + adjustment_micro
+                        ),
+                        "reset_at": _aware(row["period_end"]).isoformat(),
+                        "over_limit": bool(row["over_limit"]),
+                    }
+                )
         return {
             "user_id": user_id,
             "workspace_id": workspace_id,
-            "buckets": [
-                {
-                    "bucket_type": row["bucket_type"],
-                    "limit_micro": row["limit_micro"],
-                    "consumed_micro": row["consumed_micro"],
-                    "reserved_micro": row["reserved_micro"],
-                    "remaining_micro": self._available(row, 0),
-                    "reset_at": _aware(row["period_end"]).isoformat(),
-                    "over_limit": bool(row["over_limit"]),
-                }
-                for row in rows
-            ],
+            "buckets": rendered_rows,
         }
 
     def close(self) -> None:
@@ -1038,7 +1236,7 @@ class QuotaService:
             self._engine.dispose()
 
     def verify_schema(self) -> None:
-        """Fail startup when Phase 2 migrations were not applied."""
+        """Fail startup when the quota-management migrations were not applied."""
         with self._engine.connect() as connection:
             for model in (
                 QuotaPolicyModel,
@@ -1047,6 +1245,8 @@ class QuotaService:
                 QuotaConcurrencyLockModel,
                 QuotaReservationModel,
                 QuotaLedgerEntryModel,
+                QuotaGrantModel,
+                QuotaAdjustmentModel,
             ):
                 primary_key = next(iter(model.__table__.primary_key.columns))
                 connection.execute(select(primary_key).limit(1)).first()
@@ -1080,6 +1280,14 @@ class QuotaService:
             duplicate=duplicate,
         )
 
+    @staticmethod
+    def _reservation_overdraft(
+        reservation: dict[str, Any], owner_type: str
+    ) -> int:
+        snapshot = reservation.get("policy_snapshot_json") or {}
+        overdrafts = snapshot.get("overdrafts") or {}
+        return int(overdrafts.get(owner_type, reservation["max_overdraft_micro"]))
+
     def _effective_binding(
         self,
         connection: Connection,
@@ -1088,11 +1296,15 @@ class QuotaService:
         role_codes: Sequence[str],
         classroom_ids: Sequence[str],
         at: datetime,
+        subject_types: set[str] | None = None,
+        optional: bool = False,
     ) -> PolicyBinding:
         policy_rows = connection.execute(select(QuotaPolicyModel)).mappings().all()
         policies = {row["id"]: row for row in policy_rows}
         bindings: list[PolicyBinding] = []
         for row in connection.execute(select(PolicyBindingModel)).mappings().all():
+            if subject_types is not None and row["subject_type"] not in subject_types:
+                continue
             policy_row = policies.get(row["policy_id"])
             if policy_row is None or row["status"] != "active" or policy_row["status"] != "active":
                 continue
@@ -1135,6 +1347,8 @@ class QuotaService:
                 at=at,
             )
         except QuotaDomainError as error:
+            if optional and error.code is QuotaErrorCode.POLICY_NOT_FOUND:
+                return None
             raise self._rejection(error.code, str(error)) from error
 
     @staticmethod
@@ -1201,16 +1415,125 @@ class QuotaService:
         return (numerator + 1_000_000 - 1) // 1_000_000
 
     @staticmethod
-    def _available(bucket: dict[str, Any], overdraft_micro: int) -> int:
+    def _available(
+        bucket: dict[str, Any], overdraft_micro: int, additional_capacity_micro: int = 0
+    ) -> int:
         limit = bucket["limit_micro"]
         if limit is None:
             return 2**63 - 1
-        return int(limit) + overdraft_micro - int(bucket["consumed_micro"]) - int(bucket["reserved_micro"])
+        return (
+            int(limit)
+            + overdraft_micro
+            + additional_capacity_micro
+            - int(bucket["consumed_micro"])
+            - int(bucket["reserved_micro"])
+        )
+
+    @staticmethod
+    def _capacity_statement(
+        model: Any,
+        *,
+        owner_type: str,
+        owner_id: str,
+        bucket_type: str,
+        period_start: datetime,
+        period_end: datetime,
+        at: datetime,
+    ) -> Any:
+        statement = select(func.coalesce(func.sum(model.allocated_micro), 0)).where(
+            model.owner_type == owner_type,
+            model.owner_id == owner_id,
+            model.bucket_type == bucket_type,
+            model.period_start == _db_time(period_start),
+            model.period_end == _db_time(period_end),
+        )
+        if model is QuotaGrantModel:
+            statement = statement.where(
+                model.status == "active",
+                model.effective_from <= _db_time(at),
+                (model.expires_at.is_(None)) | (model.expires_at > _db_time(at)),
+            )
+        return statement
+
+    @classmethod
+    def _additional_capacity(
+        cls,
+        connection: Connection,
+        *,
+        owner_type: str,
+        owner_id: str,
+        bucket_type: str,
+        period_start: datetime,
+        period_end: datetime,
+        at: datetime,
+    ) -> int:
+        grant = connection.execute(
+            cls._capacity_statement(
+                QuotaGrantModel,
+                owner_type=owner_type,
+                owner_id=owner_id,
+                bucket_type=bucket_type,
+                period_start=period_start,
+                period_end=period_end,
+                at=at,
+            )
+        ).scalar_one()
+        adjustment = connection.execute(
+            select(func.coalesce(func.sum(QuotaAdjustmentModel.amount_micro), 0)).where(
+                QuotaAdjustmentModel.owner_type == owner_type,
+                QuotaAdjustmentModel.owner_id == owner_id,
+                QuotaAdjustmentModel.bucket_type == bucket_type,
+                QuotaAdjustmentModel.period_start == _db_time(period_start),
+                QuotaAdjustmentModel.period_end == _db_time(period_end),
+            )
+        ).scalar_one()
+        return int(grant or 0) + int(adjustment or 0)
+
+    @classmethod
+    def _additional_capacity_for_bucket(
+        cls, connection: Connection, bucket: dict[str, Any], at: datetime
+    ) -> int:
+        return cls._additional_capacity(
+            connection,
+            owner_type=bucket["owner_type"],
+            owner_id=bucket["owner_id"],
+            bucket_type=bucket["bucket_type"],
+            period_start=bucket["period_start"],
+            period_end=bucket["period_end"],
+            at=_aware(at) or _utc(at),
+        )
+
+    @classmethod
+    def _capacity_components(
+        cls, connection: Connection, bucket: dict[str, Any], at: datetime
+    ) -> tuple[int, int]:
+        grant = connection.execute(
+            cls._capacity_statement(
+                QuotaGrantModel,
+                owner_type=bucket["owner_type"],
+                owner_id=bucket["owner_id"],
+                bucket_type=bucket["bucket_type"],
+                period_start=bucket["period_start"],
+                period_end=bucket["period_end"],
+                at=at,
+            )
+        ).scalar_one()
+        adjustment = connection.execute(
+            select(func.coalesce(func.sum(QuotaAdjustmentModel.amount_micro), 0)).where(
+                QuotaAdjustmentModel.owner_type == bucket["owner_type"],
+                QuotaAdjustmentModel.owner_id == bucket["owner_id"],
+                QuotaAdjustmentModel.bucket_type == bucket["bucket_type"],
+                QuotaAdjustmentModel.period_start == _db_time(bucket["period_start"]),
+                QuotaAdjustmentModel.period_end == _db_time(bucket["period_end"]),
+            )
+        ).scalar_one()
+        return int(grant or 0), int(adjustment or 0)
 
     @staticmethod
     def _get_or_create_bucket(
         connection: Connection,
         *,
+        owner_type: str,
         owner_id: str,
         bucket_type: str,
         period_start: datetime,
@@ -1220,7 +1543,7 @@ class QuotaService:
         now: datetime,
     ) -> dict[str, Any]:
         where = and_(
-            QuotaBucketModel.owner_type == "user",
+            QuotaBucketModel.owner_type == owner_type,
             QuotaBucketModel.owner_id == owner_id,
             QuotaBucketModel.bucket_type == bucket_type,
             QuotaBucketModel.period_start == _db_time(period_start),
@@ -1232,7 +1555,7 @@ class QuotaService:
         if row is None:
             values = {
                 "id": str(uuid.uuid4()),
-                "owner_type": "user",
+                "owner_type": owner_type,
                 "owner_id": owner_id,
                 "policy_id": policy.policy_id,
                 "policy_version": policy.version,
