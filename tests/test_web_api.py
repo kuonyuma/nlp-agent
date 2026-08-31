@@ -429,6 +429,38 @@ def test_teacher_goals_and_reserved_resources_follow_the_public_http_contract(we
             }
 
 
+def test_teacher_ai_analysis_route_accepts_explicit_period_and_returns_generated_report(web_app, monkeypatch):
+    captured = {}
+
+    async def fake_ai_analysis(principal, gateway, workspace_id, body):
+        captured["workspace_id"] = workspace_id
+        captured["body"] = body
+        return {"status": "completed", "source": "deepseek", "summary": "分析完成", "diagnoses": []}
+
+    monkeypatch.setattr("server.web.app.teacher_service.ai_analysis", fake_ai_analysis)
+    app, _engine = web_app
+    with TestClient(app) as client:
+        csrf = authenticate(client)
+        response = client.post(
+            "/api/v1/teacher/reports/ai-analysis",
+            json={
+                "workspace_id": "default",
+                "course_id": "course-001",
+                "content_scope": "all",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "force_refresh": True,
+            },
+            headers=write_headers(csrf),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "deepseek"
+    assert captured["workspace_id"] == "default"
+    assert captured["body"].start_date.isoformat() == "2026-08-01"
+    assert captured["body"].force_refresh is True
+
+
 def test_learning_catalog_only_exposes_enabled_topics_and_enabled_knowledge_points(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
