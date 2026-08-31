@@ -15,7 +15,7 @@ vi.mock("@/platform/http/api", () => ({
 }));
 
 vi.mock("@/platform/auth/AuthContext", () => ({
-  useAuth: () => ({
+  useOptionalAuth: () => ({
     user: {
       user_id: "user-1",
       workspace_ids: ["workspace-a", "workspace-b"],

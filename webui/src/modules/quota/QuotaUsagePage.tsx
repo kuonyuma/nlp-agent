@@ -1,7 +1,7 @@
 import { Activity, BarChart3, CheckCircle2, CircleAlert, Clock3, Coins, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { useAuth } from "@/platform/auth/AuthContext";
+import { useOptionalAuth } from "@/platform/auth/AuthContext";
 import { api, ApiError } from "@/platform/http/api";
 import { StudentSocket } from "@/platform/realtime/client";
 import type { QuotaBucketSnapshot, QuotaPolicyExplanation, QuotaSnapshot, QuotaUsageBreakdown, QuotaUsageSnapshot } from "@/shared/types";
@@ -44,9 +44,12 @@ function UsageBreakdown({ usage }: { usage: QuotaUsageSnapshot | null }) {
   return <section className="quota-panel"><div className="quota-panel-heading"><div><h2>调用明细</h2><p>按日期、用途、Provider 和模型聚合；数据只读，不改变额度流水。</p></div><span className={`quota-data-status ${usage?.credits_complete ? "complete" : "partial"}`}>{usage?.credits_complete ? "已完整计价" : "部分待处理"}</span></div>{breakdown.length ? <div className="quota-breakdown-list">{breakdown.slice().reverse().slice(0, 12).map((item) => <article className="quota-breakdown-row" key={`${item.day}-${item.purpose}-${item.provider}-${item.provider_model}`}><div><strong>{item.purpose} · {item.provider} / {item.provider_model}</strong><small>{item.day} · {item.events} 次调用 · {item.total_tokens.toLocaleString("zh-CN")} tokens</small></div><div className="quota-breakdown-value"><strong>{formatMicro(item.priced_credits_micro)}</strong><small>{item.unpriced_events ? `待处理 ${item.unpriced_events} 条` : `${item.priced_events} 条已计价`}</small></div></article>)}</div> : <div className="quota-empty"><Activity size={20} /><span>近 {usage?.period_days ?? 30} 天暂无模型调用记录。</span></div>}</section>;
 }
 
-export function QuotaUsagePage({ embedded = false }: { embedded?: boolean }) {
-  const { user } = useAuth();
-  const workspaceIds = useMemo(() => user?.workspace_ids.filter((item) => item !== "*") ?? [], [user]);
+export function QuotaUsagePage({ embedded = false, userId, workspaceIds: providedWorkspaceIds }: { embedded?: boolean; userId?: string; workspaceIds?: string[] }) {
+  const auth = useOptionalAuth();
+  const authUser = auth?.user;
+  const resolvedUserId = userId ?? authUser?.user_id;
+  const workspaceIds = useMemo(() => (providedWorkspaceIds ?? authUser?.workspace_ids ?? []).filter((item) => item !== "*"), [authUser, providedWorkspaceIds]);
+  const hasAuthContext = Boolean(authUser || userId || providedWorkspaceIds);
   const [workspaceId, setWorkspaceId] = useState<string | undefined>();
   const selectedWorkspaceId = workspaceId && workspaceIds.includes(workspaceId) ? workspaceId : workspaceIds[0];
   const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
@@ -55,7 +58,7 @@ export function QuotaUsagePage({ embedded = false }: { embedded?: boolean }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const load = useCallback(async () => {
-    if (!user || (workspaceIds.length > 0 && !selectedWorkspaceId)) return;
+    if (!hasAuthContext || !resolvedUserId || (workspaceIds.length > 0 && !selectedWorkspaceId)) return;
     setError("");
     try {
       const [quotaResult, usageResult] = await Promise.all([api.getQuota(selectedWorkspaceId), api.getUsage(30, selectedWorkspaceId)]);
@@ -69,15 +72,22 @@ export function QuotaUsagePage({ embedded = false }: { embedded?: boolean }) {
     } finally {
       setLoading(false);
     }
-  }, [user, selectedWorkspaceId, workspaceIds]);
-  useEffect(() => { queueMicrotask(() => void load()); }, [load]);
+  }, [hasAuthContext, resolvedUserId, selectedWorkspaceId, workspaceIds]);
   useEffect(() => {
+    if (!hasAuthContext) {
+      queueMicrotask(() => setLoading(false));
+      return;
+    }
+    queueMicrotask(() => void load());
+  }, [hasAuthContext, load]);
+  useEffect(() => {
+    if (!hasAuthContext) return undefined;
     const socket = new StudentSocket((event) => {
       if (event.type === "usage.snapshot") void load();
     }, () => undefined);
     socket.connect();
     return () => socket.close();
-  }, [load]);
+  }, [hasAuthContext, load]);
   const buckets = useMemo(() => quota?.buckets ?? [], [quota]);
   const effectiveRemaining = buckets.length > 0 ? Math.min(...buckets.map((item) => item.remaining_micro)) : null;
   const totalTokens = usage?.tokens?.total_tokens ?? 0;

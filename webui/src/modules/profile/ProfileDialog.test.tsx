@@ -9,9 +9,6 @@ const methods = vi.hoisted(() => ({
 }));
 
 vi.mock("@/platform/http/api", () => ({ api: methods, ApiError: class ApiError extends Error {} }));
-vi.mock("@/platform/auth/AuthContext", () => ({
-  useAuth: () => ({ user: { workspace_ids: ["workspace-a", "workspace-b"] } }),
-}));
 vi.mock("@/platform/realtime/client", () => ({
   StudentSocket: class { connect() {} close() {} },
 }));
@@ -27,7 +24,7 @@ describe("ProfileDialog quota section", () => {
   });
 
   it("shows personal quota inside settings and scopes requests to an authorized workspace", async () => {
-    render(<ProfileDialog open onClose={vi.fn()} sessionRoles={["student"]} />);
+    render(<ProfileDialog open onClose={vi.fn()} sessionRoles={["student"]} userId="user-1" workspaceIds={["workspace-a", "workspace-b"]} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "额度与用量" }));
 
@@ -38,7 +35,7 @@ describe("ProfileDialog quota section", () => {
   });
 
   it("switches the quota scope without leaving the settings dialog", async () => {
-    render(<ProfileDialog open onClose={vi.fn()} sessionRoles={["student"]} />);
+    render(<ProfileDialog open onClose={vi.fn()} sessionRoles={["student"]} userId="user-1" workspaceIds={["workspace-a", "workspace-b"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "额度与用量" }));
 
     fireEvent.change(await screen.findByRole("combobox", { name: "工作空间" }), { target: { value: "workspace-b" } });

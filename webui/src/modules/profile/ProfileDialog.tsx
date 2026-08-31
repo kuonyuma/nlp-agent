@@ -16,10 +16,14 @@ export function ProfileDialog({
   open,
   onClose,
   sessionRoles,
+  userId,
+  workspaceIds,
 }: {
   open: boolean;
   onClose: () => void;
   sessionRoles?: string[];
+  userId?: string;
+  workspaceIds?: string[];
 }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(false);
@@ -222,7 +226,7 @@ export function ProfileDialog({
                   </form>
                 )}
 
-                {activeSection === "quota" && <QuotaUsagePage embedded />}
+                {activeSection === "quota" && <QuotaUsagePage embedded userId={userId} workspaceIds={workspaceIds} />}
               </div>
             </>
           )}
