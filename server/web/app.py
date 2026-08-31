@@ -61,7 +61,14 @@ from server.web.contracts import (
     UpdateToolPoliciesBody,
     UpdateSettingsBody,
     FeedbackBody,
+    FeedbackBulkBody,
     FeedbackReadBody,
+    FeedbackReplyBody,
+    FeedbackUpdateBody,
+    FeedbackSortValue,
+    FeedbackCategoryValue,
+    FeedbackStatusValue,
+    FeedbackPriorityValue,
     McpServerBody,
     SkillBody,
     WorkerProfileBody,
@@ -108,7 +115,20 @@ from server.release_notes.service import (
     release_note_service,
 )
 from server.web.websocket import WebSocketHub, websocket_endpoint
-from server.web.feedback import get_feedback_thread, list_feedback_threads, mark_feedback_read, submit_feedback
+from server.web.feedback import (
+    delete_feedback_thread,
+    delete_feedback_threads,
+    get_feedback_daily_state,
+    get_feedback_thread,
+    get_own_feedback,
+    list_feedback_threads,
+    mark_feedback_read,
+    mark_feedback_threads_read,
+    mark_own_feedback_read,
+    reply_feedback,
+    submit_feedback,
+    update_feedback_thread,
+)
 from server.auth.dependencies import get_db_session
 from server.auth import code_store
 from server.auth.captcha import generate_captcha_image
@@ -1365,7 +1385,61 @@ def create_app(
         session_factory = request.app.state.gateway.authorization_session_factory
         async with session_factory() as session:
             async with session.begin():
-                return await submit_feedback(session, principal, body.body)
+                try:
+                    return await submit_feedback(session, principal, body.body, category=body.category)
+                except ValueError as error:
+                    if str(error) == "feedback_daily_limit":
+                        return _problem(
+                            request,
+                            status_code=429,
+                            code="feedback_daily_limit",
+                            title="Daily feedback limit reached",
+                            detail="每天最多可发送 3 条反馈，请明天再试。",
+                        )
+                    return _problem(
+                        request,
+                        status_code=422,
+                        code="invalid_feedback",
+                        title="反馈内容无效",
+                        detail=str(error),
+                    )
+
+    @app.get("/api/v1/feedback/daily-state", tags=["feedback"])
+    async def get_feedback_daily_state_route(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.LEARNING_FEEDBACK_SUBMIT)
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            return await get_feedback_daily_state(session, principal)
+
+    @app.get("/api/v1/feedback", tags=["feedback"])
+    async def get_own_feedback_route(
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
+        authorization_service.require(principal, Permission.LEARNING_FEEDBACK_SUBMIT)
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            return await get_own_feedback(
+                session,
+                principal,
+                message_limit=limit,
+                message_offset=offset,
+            )
+
+    @app.post("/api/v1/feedback/read", tags=["feedback"])
+    async def mark_own_feedback_read_route(
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.LEARNING_FEEDBACK_SUBMIT)
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                updated = await mark_own_feedback_read(session, principal)
+        return {"ok": True, "updated": updated}
 
     @app.get("/api/v1/developer/feedback", tags=["developer"])
     async def get_feedback_list(
@@ -1374,23 +1448,78 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         q: str | None = Query(default=None, max_length=64),
+        status: FeedbackStatusValue | None = Query(default=None),
+        category: FeedbackCategoryValue | None = Query(default=None),
+        priority: FeedbackPriorityValue | None = Query(default=None),
+        sort: FeedbackSortValue | None = Query(default=None),
     ):
         authorization_service.require_resource(
             principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
         )
         session_factory = request.app.state.gateway.authorization_session_factory
         async with session_factory() as session:
-            return await list_feedback_threads(session, limit=limit, offset=offset, search=q)
+            try:
+                return await list_feedback_threads(
+                    session,
+                    limit=limit,
+                    offset=offset,
+                    search=q,
+                    status=status,
+                    category=category,
+                    priority=priority,
+                    sort=sort,
+                )
+            except ValueError as error:
+                return _problem(
+                    request,
+                    status_code=422,
+                    code="invalid_feedback_filter",
+                    title="反馈筛选条件无效",
+                    detail=str(error),
+                )
+
+    @app.post("/api/v1/developer/feedback/bulk-read", tags=["developer"])
+    async def read_feedback_bulk(body: FeedbackBulkBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                updated = await mark_feedback_threads_read(session, body.thread_ids)
+        return {"ok": True, "updated": updated}
+
+    @app.post("/api/v1/developer/feedback/bulk-delete", tags=["developer"])
+    async def delete_feedback_bulk(body: FeedbackBulkBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_WRITE, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                deleted = await delete_feedback_threads(session, body.thread_ids)
+        return {"ok": True, "deleted": deleted}
 
     @app.get("/api/v1/developer/feedback/{thread_id}", tags=["developer"])
-    async def get_feedback_detail(thread_id: str, request: Request, principal: Principal):
+    async def get_feedback_detail(
+        thread_id: str,
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
         authorization_service.require_resource(
             principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
         )
         session_factory = request.app.state.gateway.authorization_session_factory
         async with session_factory() as session:
             try:
-                return await get_feedback_thread(session, thread_id)
+                return await get_feedback_thread(
+                    session,
+                    thread_id,
+                    message_limit=limit,
+                    message_offset=offset,
+                )
             except LookupError:
                 return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
 
@@ -1407,6 +1536,68 @@ def create_app(
                 except LookupError:
                     return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
         return {"ok": True}
+
+    @app.delete("/api/v1/developer/feedback/{thread_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["developer"])
+    async def delete_feedback(thread_id: str, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_WRITE, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                try:
+                    await delete_feedback_thread(session, thread_id)
+                except LookupError:
+                    return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.patch("/api/v1/developer/feedback/{thread_id}", tags=["developer"])
+    async def patch_feedback(
+        thread_id: str,
+        body: FeedbackUpdateBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_WRITE, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                try:
+                    return await update_feedback_thread(
+                        session,
+                        thread_id,
+                        status=body.status,
+                        category=body.category,
+                        priority=body.priority,
+                    )
+                except LookupError:
+                    return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
+                except ValueError as error:
+                    return _problem(request, status_code=422, code="invalid_feedback_update", title="反馈更新无效", detail=str(error))
+
+    @app.post("/api/v1/developer/feedback/{thread_id}/reply", tags=["developer"])
+    async def reply_feedback_route(
+        thread_id: str,
+        body: FeedbackReplyBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_WRITE, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                try:
+                    return await reply_feedback(session, principal, thread_id, body.body)
+                except LookupError:
+                    return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
+                except ValueError as error:
+                    return _problem(request, status_code=422, code="invalid_feedback_reply", title="反馈回复无效", detail=str(error))
 
     @app.get("/api/v1/protocol", tags=["runtime"])
     async def get_protocol(_principal: Principal):
