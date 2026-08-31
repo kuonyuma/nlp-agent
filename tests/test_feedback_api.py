@@ -1,7 +1,7 @@
 """Interface-level coverage for the feedback HTTP contract.
 
 Drives the real FastAPI routes (auth, CSRF, RBAC guards, validation, problem
-mapping) end-to-end without MySQL: the four feedback service functions and the
+mapping) end-to-end without MySQL: the feedback service functions and the
 authorization session factory are monkeypatched, following the established
 pattern in ``test_web_api.py`` (see the release-notes route test).
 """
@@ -251,6 +251,16 @@ def test_feedback_endpoints_require_developer_permission(student_app):
             "/api/v1/developer/feedback/thread-1",
             headers=write_headers(csrf),
         )
+        bulk_read = client.post(
+            "/api/v1/developer/feedback/bulk-read",
+            json={"thread_ids": ["thread-1"]},
+            headers=write_headers(csrf),
+        )
+        bulk_delete = client.post(
+            "/api/v1/developer/feedback/bulk-delete",
+            json={"thread_ids": ["thread-1"]},
+            headers=write_headers(csrf),
+        )
 
         assert listing.status_code == 403
         assert listing.json()["code"] == "forbidden"
@@ -259,6 +269,63 @@ def test_feedback_endpoints_require_developer_permission(student_app):
         assert patched.status_code == 403
         assert replied.status_code == 403
         assert deleted.status_code == 403
+        assert bulk_read.status_code == 403
+        assert bulk_delete.status_code == 403
+
+
+def test_student_feedback_history_forwards_message_paging(student_app, monkeypatch):
+    import server.web.app as web_app_module
+
+    captured = {}
+
+    async def fake_get_own(session, principal, *, message_limit, message_offset):
+        captured.update(limit=message_limit, offset=message_offset)
+        return {"thread_id": None, "messages": []}
+
+    monkeypatch.setattr(web_app_module, "get_own_feedback", fake_get_own)
+    with TestClient(student_app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/feedback?limit=20&offset=40")
+
+    assert response.status_code == 200
+    assert captured == {"limit": 20, "offset": 40}
+
+
+def test_student_can_mark_own_feedback_replies_read(student_app, monkeypatch):
+    import server.web.app as web_app_module
+
+    captured = {}
+
+    async def fake_mark_read(session, principal):
+        captured["principal_user_id"] = principal.user_id
+        return True
+
+    monkeypatch.setattr(web_app_module, "mark_own_feedback_read", fake_mark_read)
+    with TestClient(student_app) as client:
+        csrf = authenticate(client)
+        response = client.post("/api/v1/feedback/read", headers=write_headers(csrf))
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "updated": True}
+    assert captured == {"principal_user_id": "nova"}
+
+
+def test_developer_feedback_detail_forwards_message_paging(developer_app, monkeypatch):
+    import server.web.app as web_app_module
+
+    captured = {}
+
+    async def fake_detail(session, thread_id, *, message_limit, message_offset):
+        captured.update(thread_id=thread_id, limit=message_limit, offset=message_offset)
+        return {"thread_id": thread_id, "messages": []}
+
+    monkeypatch.setattr(web_app_module, "get_feedback_thread", fake_detail)
+    with TestClient(developer_app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/developer/feedback/thread-1?limit=20&offset=40")
+
+    assert response.status_code == 200
+    assert captured == {"thread_id": "thread-1", "limit": 20, "offset": 40}
 
 
 def test_guest_cannot_read_feedback_list(developer_app):
@@ -371,8 +438,10 @@ def test_get_feedback_detail_returns_the_thread_payload(developer_app, monkeypat
     }
     seen = {}
 
-    async def fake_detail(session, thread_id):
+    async def fake_detail(session, thread_id, *, message_limit=50, message_offset=0):
         seen["thread_id"] = thread_id
+        seen["limit"] = message_limit
+        seen["offset"] = message_offset
         return thread_payload
 
     monkeypatch.setattr(web_app_module, "get_feedback_thread", fake_detail)
@@ -388,7 +457,7 @@ def test_get_feedback_detail_returns_the_thread_payload(developer_app, monkeypat
 def test_unknown_thread_maps_lookup_error_to_404_problem(developer_app, monkeypatch):
     import server.web.app as web_app_module
 
-    async def raise_detail_lookup(session, thread_id):
+    async def raise_detail_lookup(session, thread_id, *, message_limit=50, message_offset=0):
         raise LookupError(thread_id)
 
     async def raise_read_lookup(session, thread_id, read_through_message_id):
@@ -438,6 +507,52 @@ def test_mark_feedback_read_forwards_ids_and_returns_ok(developer_app, monkeypat
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert captured == {"thread_id": "thread-1", "message_id": "m-1"}
+
+
+def test_bulk_mark_feedback_read_forwards_thread_ids(developer_app, monkeypatch):
+    import server.web.app as web_app_module
+
+    captured = {}
+
+    async def fake_mark_bulk(session, thread_ids):
+        captured["thread_ids"] = thread_ids
+        return 2
+
+    monkeypatch.setattr(web_app_module, "mark_feedback_threads_read", fake_mark_bulk)
+    with TestClient(developer_app) as client:
+        csrf = authenticate(client)
+        response = client.post(
+            "/api/v1/developer/feedback/bulk-read",
+            json={"thread_ids": ["thread-1", "thread-2"]},
+            headers=write_headers(csrf),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "updated": 2}
+    assert captured == {"thread_ids": ["thread-1", "thread-2"]}
+
+
+def test_bulk_delete_feedback_forwards_thread_ids(developer_app, monkeypatch):
+    import server.web.app as web_app_module
+
+    captured = {}
+
+    async def fake_delete_bulk(session, thread_ids):
+        captured["thread_ids"] = thread_ids
+        return 2
+
+    monkeypatch.setattr(web_app_module, "delete_feedback_threads", fake_delete_bulk)
+    with TestClient(developer_app) as client:
+        csrf = authenticate(client)
+        response = client.post(
+            "/api/v1/developer/feedback/bulk-delete",
+            json={"thread_ids": ["thread-1", "thread-2"]},
+            headers=write_headers(csrf),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "deleted": 2}
+    assert captured == {"thread_ids": ["thread-1", "thread-2"]}
 
 
 # --- workflow metadata actions -----------------------------------------------

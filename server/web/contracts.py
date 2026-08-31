@@ -51,6 +51,13 @@ class FeedbackReadBody(StrictModel):
     read_through_message_id: str = Field(min_length=1, max_length=128)
 
 
+class FeedbackBulkBody(StrictModel):
+    thread_ids: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(
+        min_length=1,
+        max_length=200,
+    )
+
+
 FeedbackCategoryValue = Literal["feature", "ux", "bug", "other"]
 FeedbackStatusValue = Literal["open", "under_review", "planned", "in_progress", "complete", "closed"]
 FeedbackPriorityValue = Literal["low", "medium", "high"]

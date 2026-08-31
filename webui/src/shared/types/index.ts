@@ -78,7 +78,12 @@ export interface FeedbackThread {
   category: FeedbackCategory;
   priority: FeedbackPriority;
   updated_at: string | null;
+  student_unread_count?: number;
   messages: FeedbackMessage[];
+  message_total?: number;
+  message_offset?: number;
+  message_limit?: number;
+  message_has_more?: boolean;
 }
 
 export interface FeedbackDailyState {

@@ -25,6 +25,7 @@ FEEDBACK_CATEGORIES = ("feature", "ux", "bug", "other")
 FEEDBACK_PRIORITIES = ("low", "medium", "high")
 FEEDBACK_DAILY_LIMIT = 3
 FEEDBACK_BODY_MAX_LENGTH = 2_000
+FEEDBACK_MESSAGE_PAGE_SIZE = 50
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
 
@@ -165,12 +166,23 @@ async def get_feedback_daily_state(session: AsyncSession, principal: Authenticat
     }
 
 
-async def get_own_feedback(session: AsyncSession, principal: AuthenticatedPrincipal) -> dict:
+async def get_own_feedback(
+    session: AsyncSession,
+    principal: AuthenticatedPrincipal,
+    *,
+    message_limit: int = FEEDBACK_MESSAGE_PAGE_SIZE,
+    message_offset: int = 0,
+) -> dict:
     thread = await session.scalar(
         select(FeedbackThreadModel).where(FeedbackThreadModel.user_id == principal.user_id)
     )
     if thread is not None:
-        return await get_feedback_thread(session, thread.id)
+        return await get_feedback_thread(
+            session,
+            thread.id,
+            message_limit=message_limit,
+            message_offset=message_offset,
+        )
     user = await session.scalar(select(UserModel).where(UserModel.id == principal.user_id))
     return {
         "thread_id": None,
@@ -180,8 +192,13 @@ async def get_own_feedback(session: AsyncSession, principal: AuthenticatedPrinci
         "status": "open",
         "category": "other",
         "priority": "medium",
+        "student_unread_count": 0,
         "updated_at": None,
         "messages": [],
+        "message_total": 0,
+        "message_offset": message_offset,
+        "message_limit": message_limit,
+        "message_has_more": False,
     }
 
 
@@ -347,13 +364,50 @@ async def list_feedback_threads(
     return {"items": result, "total": total}
 
 
-async def get_feedback_thread(session: AsyncSession, thread_id: str) -> dict:
+async def get_feedback_thread(
+    session: AsyncSession,
+    thread_id: str,
+    *,
+    message_limit: int = FEEDBACK_MESSAGE_PAGE_SIZE,
+    message_offset: int = 0,
+) -> dict:
     row = await session.execute(select(FeedbackThreadModel, UserModel).join(UserModel, UserModel.id == FeedbackThreadModel.user_id).where(FeedbackThreadModel.id == thread_id))
     result = row.first()
     if result is None:
         raise LookupError(thread_id)
     thread, user = result
-    messages = list((await session.scalars(select(FeedbackMessageModel).where(FeedbackMessageModel.thread_id == thread.id).order_by(FeedbackMessageModel.created_at.asc(), FeedbackMessageModel.id.asc()))).all())
+    message_total = int(
+        await session.scalar(
+            select(func.count(FeedbackMessageModel.id)).where(
+                FeedbackMessageModel.thread_id == thread.id,
+            )
+        )
+        or 0
+    )
+    unread_conditions = [
+        FeedbackMessageModel.thread_id == thread.id,
+        FeedbackMessageModel.sender_type == _DEVELOPER_SENDER_TYPE,
+    ]
+    if thread.student_read_at is not None:
+        unread_conditions.append(FeedbackMessageModel.created_at > thread.student_read_at)
+    student_unread_count = int(
+        await session.scalar(
+            select(func.count(FeedbackMessageModel.id)).where(*unread_conditions)
+        )
+        or 0
+    )
+    newest_messages = list(
+        (
+            await session.scalars(
+                select(FeedbackMessageModel)
+                .where(FeedbackMessageModel.thread_id == thread.id)
+                .order_by(FeedbackMessageModel.created_at.desc(), FeedbackMessageModel.id.desc())
+                .limit(message_limit)
+                .offset(message_offset)
+            )
+        ).all()
+    )
+    messages = list(reversed(newest_messages))
     return {
         "thread_id": thread.id,
         "user_id": user.id,
@@ -362,8 +416,13 @@ async def get_feedback_thread(session: AsyncSession, thread_id: str) -> dict:
         "status": getattr(thread, "status", "open") or "open",
         "category": getattr(thread, "category", "other") or "other",
         "priority": getattr(thread, "priority", "medium") or "medium",
+        "student_unread_count": student_unread_count,
         "updated_at": _iso_utc(thread.updated_at),
         "messages": [_message_payload(message) for message in messages],
+        "message_total": message_total,
+        "message_offset": message_offset,
+        "message_limit": message_limit,
+        "message_has_more": message_offset + len(messages) < message_total,
     }
 
 
@@ -394,9 +453,86 @@ async def mark_feedback_read(
     )
 
 
+async def mark_feedback_threads_read(session: AsyncSession, thread_ids: list[str]) -> int:
+    """Mark the latest student message in each requested thread as read.
+
+    Bulk actions are intentionally idempotent: a thread that disappeared
+    between list and action, or a thread with no student message, is ignored.
+    The aggregate query keeps this to one read plus one ORM flush instead of
+    issuing a detail request for every selected row.
+    """
+
+    normalized_ids = list(dict.fromkeys(thread_id.strip() for thread_id in thread_ids if thread_id.strip()))
+    if not normalized_ids:
+        return 0
+    latest_rows = await session.execute(
+        select(
+            FeedbackMessageModel.thread_id,
+            func.max(FeedbackMessageModel.created_at).label("latest_created_at"),
+        )
+        .where(
+            FeedbackMessageModel.thread_id.in_(normalized_ids),
+            FeedbackMessageModel.sender_type == _STUDENT_SENDER_TYPE,
+        )
+        .group_by(FeedbackMessageModel.thread_id)
+    )
+    latest_by_thread = {row.thread_id: row.latest_created_at for row in latest_rows}
+    if not latest_by_thread:
+        return 0
+    threads = list((await session.scalars(select(FeedbackThreadModel).where(FeedbackThreadModel.id.in_(latest_by_thread)))).all())
+    updated = 0
+    for thread in threads:
+        latest_created_at = latest_by_thread[thread.id]
+        if thread.developer_read_at is None or thread.developer_read_at < latest_created_at:
+            thread.developer_read_at = latest_created_at
+            updated += 1
+    if updated:
+        await session.flush()
+    return updated
+
+
+async def mark_own_feedback_read(
+    session: AsyncSession, principal: AuthenticatedPrincipal
+) -> bool:
+    """Advance the student's read position through the latest developer reply."""
+
+    thread = await session.scalar(
+        select(FeedbackThreadModel).where(FeedbackThreadModel.user_id == principal.user_id)
+    )
+    if thread is None:
+        return False
+    latest_developer_at = await session.scalar(
+        select(func.max(FeedbackMessageModel.created_at)).where(
+            FeedbackMessageModel.thread_id == thread.id,
+            FeedbackMessageModel.sender_type == _DEVELOPER_SENDER_TYPE,
+        )
+    )
+    if latest_developer_at is None:
+        return False
+    if thread.student_read_at is not None and thread.student_read_at >= latest_developer_at:
+        return False
+    thread.student_read_at = latest_developer_at
+    await session.flush()
+    return True
+
+
 async def delete_feedback_thread(session: AsyncSession, thread_id: str) -> None:
     thread = await session.scalar(select(FeedbackThreadModel).where(FeedbackThreadModel.id == thread_id))
     if thread is None:
         raise LookupError(thread_id)
     await session.delete(thread)
     await session.flush()
+
+
+async def delete_feedback_threads(session: AsyncSession, thread_ids: list[str]) -> int:
+    """Delete selected feedback threads and their cascaded messages."""
+
+    normalized_ids = list(dict.fromkeys(thread_id.strip() for thread_id in thread_ids if thread_id.strip()))
+    if not normalized_ids:
+        return 0
+    threads = list((await session.scalars(select(FeedbackThreadModel).where(FeedbackThreadModel.id.in_(normalized_ids)))).all())
+    for thread in threads:
+        await session.delete(thread)
+    if threads:
+        await session.flush()
+    return len(threads)

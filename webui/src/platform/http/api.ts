@@ -140,7 +140,14 @@ export const api = {
     }),
   submitFeedback: (body: string, category?: FeedbackCategory) => request<{ thread_id: string; remaining: number; daily_limit: number }>("/feedback", { method: "POST", body: JSON.stringify({ body, category }) }),
   getFeedbackDailyState: () => request<FeedbackDailyState>("/feedback/daily-state"),
-  getOwnFeedback: () => request<FeedbackThread & { thread_id: string | null }>("/feedback"),
+  markOwnFeedbackRead: () => request<{ ok: boolean; updated: boolean }>("/feedback/read", { method: "POST" }),
+  getOwnFeedback: (params?: { limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<FeedbackThread & { thread_id: string | null }>(`/feedback${suffix}`);
+  },
   listFeedback: (params?: { limit?: number; offset?: number; q?: string; status?: FeedbackStatus; category?: FeedbackCategory; priority?: FeedbackPriority; sort?: "latest" | "oldest" | "unread" }) => {
     const query = new URLSearchParams();
     if (params?.limit != null) query.set("limit", String(params.limit));
@@ -153,11 +160,19 @@ export const api = {
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return request<FeedbackThreadList>(`/developer/feedback${suffix}`);
   },
-  getFeedback: (threadId: string) => request<FeedbackThread>(`/developer/feedback/${encodeURIComponent(threadId)}`),
+  getFeedback: (threadId: string, params?: { limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<FeedbackThread>(`/developer/feedback/${encodeURIComponent(threadId)}${suffix}`);
+  },
   markFeedbackRead: (threadId: string, messageId: string) => request<{ ok: boolean }>(`/developer/feedback/${encodeURIComponent(threadId)}/read`, { method: "POST", body: JSON.stringify({ read_through_message_id: messageId }) }),
+  markFeedbackThreadsRead: (threadIds: string[]) => request<{ ok: boolean; updated: number }>("/developer/feedback/bulk-read", { method: "POST", body: JSON.stringify({ thread_ids: threadIds }) }),
   updateFeedback: (threadId: string, patch: { status?: FeedbackStatus; category?: FeedbackCategory; priority?: FeedbackPriority }) => request<FeedbackThread>(`/developer/feedback/${encodeURIComponent(threadId)}`, { method: "PATCH", body: JSON.stringify(patch) }),
   replyFeedback: (threadId: string, body: string) => request<{ thread_id: string; message: FeedbackThread["messages"][number] }>(`/developer/feedback/${encodeURIComponent(threadId)}/reply`, { method: "POST", body: JSON.stringify({ body }) }),
   deleteFeedback: (threadId: string) => request<void>(`/developer/feedback/${encodeURIComponent(threadId)}`, { method: "DELETE" }),
+  deleteFeedbackThreads: (threadIds: string[]) => request<{ ok: boolean; deleted: number }>("/developer/feedback/bulk-delete", { method: "POST", body: JSON.stringify({ thread_ids: threadIds }) }),
   getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
   updateToolPolicies: (policies: Record<string, unknown>) =>
     request<Record<string, unknown>>("/developer/tools/policies", { method: "PUT", body: JSON.stringify({ policies }) }),

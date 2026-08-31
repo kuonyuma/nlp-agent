@@ -5,7 +5,7 @@ import pytest
 from core.identity import AuthenticatedPrincipal
 from server.infrastructure.mysql.models import FeedbackMessageModel, FeedbackThreadModel, UserModel
 from server.web.contracts import FeedbackBody
-from server.web.feedback import list_feedback_threads, submit_feedback
+from server.web.feedback import get_feedback_thread, list_feedback_threads, submit_feedback
 
 
 class _Result:
@@ -14,6 +14,9 @@ class _Result:
 
     def all(self):
         return list(self._rows)
+
+    def first(self):
+        return self._rows[0] if self._rows else None
 
     def __iter__(self):
         return iter(self._rows)
@@ -34,6 +37,27 @@ class _Session:
     async def execute(self, statement):
         self.statements.append(statement)
         return self.results.pop(0)
+
+
+class _DetailSession:
+    def __init__(self, thread, user, message_total, messages):
+        self.thread = thread
+        self.user = user
+        self.message_total = message_total
+        self.messages = messages
+        self.statements = []
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        return _Result([(self.thread, self.user)])
+
+    async def scalar(self, statement):
+        self.statements.append(statement)
+        return self.message_total
+
+    async def scalars(self, statement):
+        self.statements.append(statement)
+        return _Result(self.messages)
 
 
 def _sql(statement) -> str:
@@ -119,6 +143,63 @@ async def test_feedback_list_read_cutoff_scopes_unread_to_developer_read_at() ->
     page_sql = _sql(session.statements[1])
     assert "nlp_feedback_messages.created_at > nlp_feedback_threads.developer_read_at" in page_sql
     assert result["items"][0]["unread_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_feedback_detail_returns_only_the_requested_latest_message_page() -> None:
+    now = datetime(2026, 8, 18, 12, 0, 0)
+    thread = FeedbackThreadModel(id="thread-page", user_id="user-page", created_at=now, updated_at=now)
+    user = UserModel(id="user-page", username="student", password_hash="x", display_name="Student")
+    newest_first = [
+        FeedbackMessageModel(id="message-3", thread_id=thread.id, sender_type="student", body="third", created_at=now),
+        FeedbackMessageModel(id="message-2", thread_id=thread.id, sender_type="developer", body="second", created_at=now),
+    ]
+    session = _DetailSession(thread, user, 3, newest_first)
+
+    result = await get_feedback_thread(session, thread.id, message_limit=2, message_offset=1)
+
+    assert [message["id"] for message in result["messages"]] == ["message-2", "message-3"]
+    assert result["message_total"] == 3
+    assert result["message_offset"] == 1
+    assert result["message_limit"] == 2
+    assert result["message_has_more"] is False
+    assert result["student_unread_count"] == 3
+    assert "LIMIT 2 OFFSET 1" in _sql(session.statements[-1])
+
+
+class _OwnReadSession:
+    def __init__(self, thread, latest_developer_at):
+        self.thread = thread
+        self.latest_developer_at = latest_developer_at
+        self.flushed = 0
+        self.calls = 0
+
+    async def scalar(self, _statement):
+        self.calls += 1
+        if self.calls == 1:
+            return self.thread
+        return self.latest_developer_at
+
+    async def flush(self):
+        self.flushed += 1
+
+
+@pytest.mark.asyncio
+async def test_mark_own_feedback_read_persists_latest_developer_position() -> None:
+    from server.web.feedback import mark_own_feedback_read
+
+    latest = datetime(2026, 8, 18, 12, 1, 0)
+    thread = FeedbackThreadModel(
+        id="thread-student-read",
+        user_id="user-student-read",
+        created_at=latest,
+        updated_at=latest,
+    )
+    session = _OwnReadSession(thread, latest)
+
+    assert await mark_own_feedback_read(session, AuthenticatedPrincipal(user_id=thread.user_id)) is True
+    assert thread.student_read_at == latest
+    assert session.flushed == 1
 
 
 def test_feedback_body_rejects_whitespace_only_input() -> None:

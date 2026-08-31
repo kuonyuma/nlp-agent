@@ -61,6 +61,7 @@ from server.web.contracts import (
     UpdateToolPoliciesBody,
     UpdateSettingsBody,
     FeedbackBody,
+    FeedbackBulkBody,
     FeedbackReadBody,
     FeedbackReplyBody,
     FeedbackUpdateBody,
@@ -115,11 +116,14 @@ from server.release_notes.service import (
 from server.web.websocket import WebSocketHub, websocket_endpoint
 from server.web.feedback import (
     delete_feedback_thread,
+    delete_feedback_threads,
     get_feedback_daily_state,
     get_feedback_thread,
     get_own_feedback,
     list_feedback_threads,
     mark_feedback_read,
+    mark_feedback_threads_read,
+    mark_own_feedback_read,
     reply_feedback,
     submit_feedback,
     update_feedback_thread,
@@ -1407,11 +1411,34 @@ def create_app(
             return await get_feedback_daily_state(session, principal)
 
     @app.get("/api/v1/feedback", tags=["feedback"])
-    async def get_own_feedback_route(request: Request, principal: Principal):
+    async def get_own_feedback_route(
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
         authorization_service.require(principal, Permission.LEARNING_FEEDBACK_SUBMIT)
         session_factory = request.app.state.gateway.authorization_session_factory
         async with session_factory() as session:
-            return await get_own_feedback(session, principal)
+            return await get_own_feedback(
+                session,
+                principal,
+                message_limit=limit,
+                message_offset=offset,
+            )
+
+    @app.post("/api/v1/feedback/read", tags=["feedback"])
+    async def mark_own_feedback_read_route(
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.LEARNING_FEEDBACK_SUBMIT)
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                updated = await mark_own_feedback_read(session, principal)
+        return {"ok": True, "updated": updated}
 
     @app.get("/api/v1/developer/feedback", tags=["developer"])
     async def get_feedback_list(
@@ -1450,15 +1477,48 @@ def create_app(
                     detail=str(error),
                 )
 
+    @app.post("/api/v1/developer/feedback/bulk-read", tags=["developer"])
+    async def read_feedback_bulk(body: FeedbackBulkBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                updated = await mark_feedback_threads_read(session, body.thread_ids)
+        return {"ok": True, "updated": updated}
+
+    @app.post("/api/v1/developer/feedback/bulk-delete", tags=["developer"])
+    async def delete_feedback_bulk(body: FeedbackBulkBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require_resource(
+            principal, Permission.LEARNING_FEEDBACK_WRITE, ResourceRef("feedback")
+        )
+        session_factory = request.app.state.gateway.authorization_session_factory
+        async with session_factory() as session:
+            async with session.begin():
+                deleted = await delete_feedback_threads(session, body.thread_ids)
+        return {"ok": True, "deleted": deleted}
+
     @app.get("/api/v1/developer/feedback/{thread_id}", tags=["developer"])
-    async def get_feedback_detail(thread_id: str, request: Request, principal: Principal):
+    async def get_feedback_detail(
+        thread_id: str,
+        request: Request,
+        principal: Principal,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
         authorization_service.require_resource(
             principal, Permission.LEARNING_FEEDBACK_READ, ResourceRef("feedback")
         )
         session_factory = request.app.state.gateway.authorization_session_factory
         async with session_factory() as session:
             try:
-                return await get_feedback_thread(session, thread_id)
+                return await get_feedback_thread(
+                    session,
+                    thread_id,
+                    message_limit=limit,
+                    message_offset=offset,
+                )
             except LookupError:
                 return _problem(request, status_code=404, code="feedback_not_found", title="Feedback thread not found")
 

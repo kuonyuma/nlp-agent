@@ -140,6 +140,7 @@ class FeedbackThreadModel(TimestampedModel, Base):
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     user_id: Mapped[str] = mapped_column(UUID, ForeignKey("nlp_users.id", ondelete="CASCADE"), nullable=False)
     developer_read_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    student_read_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
     category: Mapped[str] = mapped_column(String(16), nullable=False, server_default="other")
     priority: Mapped[str] = mapped_column(String(16), nullable=False, server_default="medium")

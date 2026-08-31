@@ -25,8 +25,10 @@ from server.user.schemas import UserCreate
 from server.user.service import UserService
 from server.web.feedback import (
     delete_feedback_thread,
+    delete_feedback_threads,
     list_feedback_threads,
     mark_feedback_read,
+    mark_feedback_threads_read,
     reply_feedback,
     submit_feedback,
     update_feedback_thread,
@@ -129,6 +131,16 @@ async def test_concurrent_first_submissions_share_one_thread(mysql_session_facto
 async def test_migrated_schema_carries_feedback_constraints_and_indexes(mysql_session_factory) -> None:
     factory = mysql_session_factory
     async with factory() as session:
+        columns = {
+            row[0]
+            for row in await session.execute(
+                text(
+                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME = 'nlp_feedback_threads'"
+                )
+            )
+        }
         checks = {
             row[0]: row[1]
             for row in await session.execute(
@@ -158,6 +170,7 @@ async def test_migrated_schema_carries_feedback_constraints_and_indexes(mysql_se
     )
 
     assert "ix_nlp_feedback_threads_updated_at" in indexes
+    assert "student_read_at" in columns
     message_indexes = set()
     async with factory() as session:
         for row in await session.execute(
@@ -321,3 +334,32 @@ async def test_reply_and_delete_feedback_thread(mysql_session_factory) -> None:
     async with factory() as session:
         remaining = await list_feedback_threads(session)
     assert all(item["thread_id"] != submitted["thread_id"] for item in remaining["items"])
+
+
+@pytest.mark.asyncio
+async def test_bulk_feedback_actions_persist_read_state_and_delete_threads(mysql_session_factory) -> None:
+    factory = mysql_session_factory
+    prefix = f"fbbulk{uuid4().hex[:10]}"
+    first_user = await _create_user(factory, prefix + "a")
+    second_user = await _create_user(factory, prefix + "b")
+    first = await _submit(factory, first_user, "first bulk item")
+    second = await _submit(factory, second_user, "second bulk item")
+    thread_ids = [first["thread_id"], second["thread_id"]]
+
+    async with factory() as session:
+        async with session.begin():
+            updated = await mark_feedback_threads_read(session, thread_ids)
+    assert updated == 2
+
+    async with factory() as session:
+        listing = await list_feedback_threads(session, search=prefix)
+    assert {item["unread_count"] for item in listing["items"]} == {0}
+
+    async with factory() as session:
+        async with session.begin():
+            deleted = await delete_feedback_threads(session, thread_ids)
+    assert deleted == 2
+
+    async with factory() as session:
+        remaining = await list_feedback_threads(session, search=prefix)
+    assert remaining["items"] == []

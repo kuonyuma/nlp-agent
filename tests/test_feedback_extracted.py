@@ -100,6 +100,7 @@ def test_feedback_thread_model_declares_metadata_constraints() -> None:
     assert "status in" in constraints["ck_nlp_feedback_threads_status"]
     assert "category in" in constraints["ck_nlp_feedback_threads_category"]
     assert "priority in" in constraints["ck_nlp_feedback_threads_priority"]
+    assert "student_read_at" in FeedbackThreadModel.__table__.columns
 
 
 def test_feedback_message_model_keeps_student_and_developer_sender_types() -> None:

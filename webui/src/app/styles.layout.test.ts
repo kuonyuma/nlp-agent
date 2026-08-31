@@ -93,4 +93,10 @@ describe("sandbox titlebar layout", () => {
   it("keeps knowledge-book anchors in normal flow while deferring syntax highlighting", () => {
     expect(stylesheet).not.toContain(".knowledge-book-article .markdown-image-figure,.knowledge-book-article .code-shell { content-visibility: auto;");
   });
+
+  it("keeps feedback bubbles packed at the top instead of stretching grid rows", () => {
+    const feedbackMessagesRule = [...stylesheet.matchAll(/\.developer-feedback-messages\s*\{([^}]*)\}/g)].at(-1)?.[1] ?? "";
+
+    expect(feedbackMessagesRule).toContain("align-content: start");
+  });
 });
