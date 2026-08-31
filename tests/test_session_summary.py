@@ -19,6 +19,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from server.session.summary import (
+    MAX_SUMMARY_ATTEMPTS,
+    _backoff_summary,
     _clean_input,
     _clean_title,
     _decide,
@@ -99,7 +101,7 @@ async def test_build_conversation_text_uses_first_turn(monkeypatch):
     factory = _SessionFactory()
 
     async def fake_load_state(session, session_id):
-        return None, False, turns
+        return None, False, turns, 0
 
     monkeypatch.setattr("server.session.summary._load_state", fake_load_state)
 
@@ -174,11 +176,20 @@ class _SessionFactory:
         return self.session
 
 
-def _patch_env(monkeypatch, turns, title_updated_at, llm, *, title_is_manual=False, claim_rowcount=1):
+def _patch_env(
+    monkeypatch,
+    turns,
+    title_updated_at,
+    llm,
+    *,
+    title_is_manual=False,
+    claim_rowcount=1,
+    summary_attempts=0,
+):
     factory = _SessionFactory(claim_rowcount=claim_rowcount)
 
     async def fake_load_state(session, session_id):
-        return title_updated_at, title_is_manual, turns
+        return title_updated_at, title_is_manual, turns, summary_attempts
 
     monkeypatch.setattr("server.session.summary._load_state", fake_load_state)
     monkeypatch.setattr("server.session.summary.get_utility_llm", lambda: llm)
@@ -239,7 +250,55 @@ async def test_generate_degrades_on_llm_failure(monkeypatch):
     factory = _patch_env(monkeypatch, turns, None, llm)
 
     assert await generate_and_store_summary("session-1", factory) is False
+    # Title must never be written on LLM failure.
     assert _title_writes(factory) == []
+    # Lease must NOT be cleared -- it should be pushed into the future with a
+    # backoff so the 5s sweep does not hammer an unavailable model.
+    backoff_writes = [
+        p for _s, p in factory.session.writes if p and "until" in p
+    ]
+    assert len(backoff_writes) == 1
+    assert backoff_writes[0]["id"] == "session-1"
+    # First failure, attempts_so_far=0 -> backoff = BASE_BACKOFF_S (60s) in the
+    # future, i.e. strictly greater than the current time at call site.
+    assert backoff_writes[0]["until"] > datetime(2026, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_generate_backs_off_longer_with_each_failure(monkeypatch):
+    turns = _make_turns(1, datetime(2026, 1, 1))
+    llm = _FakeLLM()
+
+    async def fail_ainvoke(messages, **kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(llm, "ainvoke", fail_ainvoke)
+
+    captured = {}
+
+    async def fake_backoff(session, session_id, *, now, attempts_so_far):
+        captured["attempts_so_far"] = attempts_so_far
+
+    monkeypatch.setattr("server.session.summary._backoff_summary", fake_backoff)
+    # Pretend the row has already failed 3 times.
+    factory = _patch_env(monkeypatch, turns, None, llm, summary_attempts=3)
+
+    assert await generate_and_store_summary("session-1", factory) is False
+    assert captured["attempts_so_far"] == 3
+
+
+@pytest.mark.asyncio
+async def test_generate_gives_up_after_max_attempts(monkeypatch):
+    turns = _make_turns(1, datetime(2026, 1, 1))
+    llm = _FakeLLM()
+    factory = _patch_env(
+        monkeypatch, turns, None, llm, summary_attempts=MAX_SUMMARY_ATTEMPTS
+    )
+
+    assert await generate_and_store_summary("session-1", factory) is False
+    # LLM must not even be called once the budget is exhausted.
+    assert llm.invocations == []
+    assert factory.session.writes == []
 
 
 @pytest.mark.asyncio

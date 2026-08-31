@@ -54,6 +54,12 @@ SUMMARY_LEASE_S = 60
 # Sweep batch size / cadence for the durable backfill.
 SWEEP_BATCH = 25
 SWEEP_INTERVAL_S = 5
+# Retry budget for the first summary.  On LLM failure the lease is extended
+# (exponential backoff) rather than cleared, so an unavailable model cannot
+# trigger a retry storm across the 5-second sweep cadence.
+BASE_BACKOFF_S = 60
+MAX_BACKOFF_S = 3600
+MAX_SUMMARY_ATTEMPTS = 10
 
 
 def _utcnow() -> datetime:
@@ -118,17 +124,19 @@ def _decide(
 
 async def _load_state(
     session: AsyncSession, session_id: str
-) -> tuple[datetime | None, bool, list[TurnModel]]:
+) -> tuple[datetime | None, bool, list[TurnModel], int]:
     row = (
         await session.execute(
             select(
                 ConversationModel.title_updated_at,
                 ConversationModel.title_is_manual,
+                ConversationModel.summary_attempts,
             ).where(ConversationModel.id == session_id)
         )
     ).one_or_none()
     title_updated_at = row.title_updated_at if row is not None else None
     title_is_manual = bool(row.title_is_manual) if row is not None else False
+    summary_attempts = int(row.summary_attempts or 0) if row is not None else 0
     turns = list(
         (
             await session.execute(
@@ -141,7 +149,7 @@ async def _load_state(
             )
         ).scalars().all()
     )
-    return title_updated_at, title_is_manual, turns
+    return title_updated_at, title_is_manual, turns, summary_attempts
 
 
 async def _generate_title(text: str, llm: Any) -> str | None:
@@ -173,12 +181,31 @@ async def _claim_summary(
     return result.rowcount == 1
 
 
-async def _release_summary(session: AsyncSession, session_id: str) -> None:
+async def _backoff_summary(
+    session: AsyncSession,
+    session_id: str,
+    *,
+    now: datetime,
+    attempts_so_far: int,
+) -> None:
+    """Park the lease in the future and bump the attempt counter.
+
+    Instead of clearing the lease on LLM failure (which would let the next
+    5-second sweep immediately retry the same doomed batch), we extend the
+    lease with exponential backoff so the sweep naturally skips the session
+    until the model is likely available again.  ``attempts_so_far`` is the
+    value observed *before* this call; it drives the backoff duration and the
+    row-level counter is incremented atomically in the same UPDATE.
+    """
+    backoff = min(BASE_BACKOFF_S * (2 ** max(attempts_so_far, 0)), MAX_BACKOFF_S)
     await session.execute(
         text(
-            "UPDATE nlp_conversations SET summary_lease_expires_at=NULL WHERE id=:id"
+            "UPDATE nlp_conversations "
+            "SET summary_lease_expires_at=:until, "
+            "summary_attempts=summary_attempts+1 "
+            "WHERE id=:id"
         ),
-        {"id": session_id},
+        {"id": session_id, "until": now + timedelta(seconds=backoff)},
     )
 
 
@@ -189,7 +216,8 @@ async def _write_title(
     result = await session.execute(
         text(
             "UPDATE nlp_conversations "
-            "SET title=:title, title_updated_at=:basis, summary_lease_expires_at=NULL "
+            "SET title=:title, title_updated_at=:basis, "
+            "summary_lease_expires_at=NULL, summary_attempts=0 "
             "WHERE id=:id AND title_is_manual=0 AND title_updated_at IS NULL"
         ),
         {"title": title, "basis": basis, "id": session_id},
@@ -202,8 +230,8 @@ async def build_conversation_text(
 ) -> str:
     """Render the anchor turn of a session as prompt text."""
     async with session_factory() as session:
-        _title_updated_at, _title_is_manual, turns = await _load_state(
-            session, session_id
+        _title_updated_at, _title_is_manual, turns, _summary_attempts = (
+            await _load_state(session, session_id)
         )
     return _render_turns(_select_turns(turns))
 
@@ -214,14 +242,24 @@ async def generate_and_store_summary(
     """Generate a topic title and conditionally store it.  Never raises."""
     try:
         async with session_factory() as session:
-            title_updated_at, title_is_manual, turns = await _load_state(
-                session, session_id
+            title_updated_at, title_is_manual, turns, summary_attempts = (
+                await _load_state(session, session_id)
             )
         basis = _decide(turns, title_updated_at, title_is_manual)
         if basis is None:
             return False
         text = _render_turns(_select_turns(turns))
         if not text:
+            return False
+        if summary_attempts >= MAX_SUMMARY_ATTEMPTS:
+            # Exhausted the retry budget; leave the row alone until a manual
+            # rename or a future migration resets it.  Logging at info level
+            # keeps the operator aware without screaming into error channels.
+            logger.info(
+                "session summary gave up after %s attempts",
+                summary_attempts,
+                extra={"session_id": session_id},
+            )
             return False
 
         now = _utcnow()
@@ -234,12 +272,24 @@ async def generate_and_store_summary(
         title: str | None = None
         try:
             title = await _generate_title(text, get_utility_llm())
-        finally:
-            if title is None:
-                async with session_factory.begin() as session:
-                    await _release_summary(session, session_id)
+        except asyncio.CancelledError:
+            # Worker is shutting down; leave the 60s claim in place so another
+            # worker can pick it up after the lease expires naturally.
+            raise
+        except Exception:
+            logger.exception(
+                "session summary LLM call failed", session_id=session_id
+            )
 
         if title is None:
+            now = _utcnow()
+            async with session_factory.begin() as session:
+                await _backoff_summary(
+                    session,
+                    session_id,
+                    now=now,
+                    attempts_so_far=summary_attempts,
+                )
             return False
 
         async with session_factory.begin() as session:
@@ -263,6 +313,7 @@ async def _find_due_sessions(
                     ConversationModel.status == "active",
                     ConversationModel.title_is_manual.is_(False),
                     ConversationModel.title_updated_at.is_(None),
+                    ConversationModel.summary_attempts < MAX_SUMMARY_ATTEMPTS,
                     or_(
                         ConversationModel.summary_lease_expires_at.is_(None),
                         ConversationModel.summary_lease_expires_at < now,

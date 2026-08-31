@@ -473,7 +473,12 @@ class ConversationModel(TimestampedModel, Base):
     title_is_manual: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
     # Short-lived lease taken by the background summarizer before it pays for an
     # LLM call; prevents two workers from generating the same title concurrently.
+    # On LLM failure the lease is extended (exponential backoff) instead of
+    # cleared, so a dead model service does not trigger a retry storm.
     summary_lease_expires_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6))
+    # How many LLM calls have been attempted for the first summary.  Capped by
+    # ``MAX_SUMMARY_ATTEMPTS`` in the sweep query; reset to 0 on success.
+    summary_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
 class TurnModel(TimestampedModel, Base):
