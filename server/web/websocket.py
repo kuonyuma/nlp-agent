@@ -433,8 +433,14 @@ class WebSocketConnection:
         try:
             await asyncio.shield(waiter)
         except asyncio.CancelledError:
+            # Wait for tasks to finish but don't propagate cancellation further
+            # This ensures proper cleanup happens even when cancelled
             await waiter
+            # Now raise the cancellation so higher-level logic knows it was cancelled
             raise
+        except Exception:
+            # Handle any other exceptions during task waiting
+            pass
 
     async def _terminate(self, *, code: int, reason: str) -> None:
         if self._closed:
@@ -447,22 +453,49 @@ class WebSocketConnection:
             tasks = list(self._subscription_tasks.values())
             self._subscriptions.clear()
             self._subscription_tasks.clear()
+
+            # Close all subscriptions
             for subscription in subscriptions:
-                await subscription.close()
+                try:
+                    await subscription.close()
+                except Exception:
+                    pass  # Ignore errors during subscription cleanup
+
+            # Cancel all subscription tasks
             for task in tasks:
                 if task is not current and not task.done():
                     task.cancel()
+
+            # Wait for subscription tasks with protection against cancellation
             wait_tasks = [task for task in tasks if task is not current]
             if wait_tasks:
-                await self._wait_for_tasks(wait_tasks)
+                try:
+                    await asyncio.shield(self._wait_for_tasks(wait_tasks))
+                except asyncio.CancelledError:
+                    # Even if cancelled, continue with remaining cleanup
+                    pass
+
+            # Cancel and wait for sender task
             if self._sender_task is not None and self._sender_task is not current:
                 if not self._sender_task.done():
                     self._sender_task.cancel()
-                await self._wait_for_tasks([self._sender_task])
+                try:
+                    await asyncio.shield(self._wait_for_tasks([self._sender_task]))
+                except asyncio.CancelledError:
+                    # Even if cancelled, continue with remaining cleanup
+                    pass
+
+            # Cancel and wait for session guard task
             if self._session_guard_task is not None and self._session_guard_task is not current:
                 if not self._session_guard_task.done():
                     self._session_guard_task.cancel()
-                await self._wait_for_tasks([self._session_guard_task])
+                try:
+                    await asyncio.shield(self._wait_for_tasks([self._session_guard_task]))
+                except asyncio.CancelledError:
+                    # Even if cancelled, continue with remaining cleanup
+                    pass
+
+            # Close the WebSocket connection
             try:
                 await asyncio.wait_for(
                     self.websocket.close(code=code, reason=reason),
@@ -711,7 +744,17 @@ async def websocket_endpoint(
         try:
             await connection.close()
         except asyncio.CancelledError:
-            pass
+            # Re-raise cancellation but ensure basic cleanup happens
+            # The connection will be marked as closed in all cases
+            if not connection._closed:
+                connection._closed = True
+                connection._closed_event.set()
+            raise
+        except Exception:
+            # Other exceptions during close are logged but not propagated
+            if not connection._closed:
+                connection._closed = True
+                connection._closed_event.set()
 
 
 async def _receive_commands(
