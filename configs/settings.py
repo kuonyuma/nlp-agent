@@ -313,6 +313,22 @@ def auth_env_int(name: str, default: int) -> int:
     return int(raw) if raw not in (None, "") else default
 
 
+def auth_session_ttl_s(default: int = 86_400) -> int:
+    """Get session TTL in seconds with fallback from auth_session_ttl_s to cookie_ttl_s."""
+    # Try the new environment variable first
+    auth_ttl = auth_env_int("NLP_AGENT_AUTH_SESSION_TTL_S", None)
+    if auth_ttl is not None:
+        return auth_ttl
+
+    # Fall back to legacy cookie_ttl_s environment variable
+    cookie_ttl = auth_env_int("NLP_AGENT_COOKIE_TTL_S", None)
+    if cookie_ttl is not None:
+        return cookie_ttl
+
+    # Use the default if neither is set
+    return default
+
+
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
 
