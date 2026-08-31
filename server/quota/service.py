@@ -8,7 +8,7 @@ import uuid
 import logging
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, TypeVar
 
 from sqlalchemy import Engine, and_, create_engine, func, insert, or_, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
@@ -44,6 +44,7 @@ from server.quota.models import (
     QuotaReservationModel,
     QuotaUsageArchiveBatchModel,
 )
+from server.infrastructure.mysql.models import ClassroomModel
 from server.quota.policy import resolve_effective_policy
 
 
@@ -54,6 +55,7 @@ _ACTIVE_RESERVATION_STATUSES = ("reserved", "running", "settling")
 _RETRYABLE_MYSQL_TRANSACTION_ERRORS = frozenset({1205, 1213})
 _MYSQL_TRANSACTION_ATTEMPTS = 3
 _MYSQL_TRANSACTION_RETRY_BASE_S = 0.02
+_TransactionResult = TypeVar("_TransactionResult")
 
 
 def _utc(value: datetime | None) -> datetime:
@@ -94,6 +96,29 @@ def _is_retryable_mysql_transaction_error(error: DBAPIError) -> bool:
         not error.connection_invalidated
         and _mysql_error_code(error) in _RETRYABLE_MYSQL_TRANSACTION_ERRORS
     )
+
+
+def retry_mysql_transaction(
+    operation: Callable[[], _TransactionResult],
+) -> _TransactionResult:
+    """Run a complete MySQL transaction operation with bounded deadlock retry.
+
+    MySQL invalidates the current transaction after lock wait timeout (1205)
+    or deadlock victim selection (1213).  The callable must therefore own the
+    complete ``engine.begin()`` scope so every read, write, and commit is
+    repeated against a fresh transaction.
+    """
+    for attempt in range(_MYSQL_TRANSACTION_ATTEMPTS):
+        try:
+            return operation()
+        except DBAPIError as error:
+            if (
+                not _is_retryable_mysql_transaction_error(error)
+                or attempt + 1 >= _MYSQL_TRANSACTION_ATTEMPTS
+            ):
+                raise
+            time.sleep(_MYSQL_TRANSACTION_RETRY_BASE_S * (2**attempt))
+    raise RuntimeError("unreachable MySQL transaction retry state")
 
 
 class QuotaService:
@@ -170,6 +195,31 @@ class QuotaService:
     def reservation_id_for_turn(turn_id: str) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"pro-nlp:quota-reservation:{turn_id}"))
 
+    @staticmethod
+    def _classrooms_in_workspace(
+        connection: Connection,
+        *,
+        classroom_ids: Sequence[str],
+        workspace_id: str | None,
+    ) -> tuple[str, ...]:
+        """Return only active classrooms owned by the request workspace.
+
+        Authenticated principals carry classroom IDs across requests, but a
+        classroom ID has no meaning outside its owning workspace.  Filtering
+        at this database-backed quota seam keeps direct callers and Gateway
+        callers on the same accounting boundary.
+        """
+        if not classroom_ids or workspace_id is None:
+            return ()
+        rows = connection.execute(
+            select(ClassroomModel.id).where(
+                ClassroomModel.id.in_(set(classroom_ids)),
+                ClassroomModel.workspace_id == workspace_id,
+                ClassroomModel.status == "active",
+            )
+        ).scalars().all()
+        return tuple(sorted(set(rows)))
+
     def admit_turn(
         self,
         command: AdmitTurn,
@@ -178,31 +228,20 @@ class QuotaService:
         classroom_ids: Sequence[str] = (),
         now: datetime | None = None,
     ) -> TurnAdmissionResult:
-        # MySQL rolls back the whole transaction after 1213/1205.  Retrying
-        # only a nested savepoint is unsafe because that savepoint no longer
-        # exists after a deadlock victim is selected.  Re-run admission from a
-        # fresh engine transaction instead.
-        for attempt in range(_MYSQL_TRANSACTION_ATTEMPTS):
-            try:
-                with _GLOBAL_QUOTA_LOCK:
-                    with self._engine.begin() as connection:
-                        result = self.admit_in_transaction(
-                            connection,
-                            command,
-                            role_codes=role_codes,
-                            classroom_ids=classroom_ids,
-                            now=now,
-                        )
-                break
-            except DBAPIError as error:
-                if (
-                    not _is_retryable_mysql_transaction_error(error)
-                    or attempt + 1 >= _MYSQL_TRANSACTION_ATTEMPTS
-                ):
-                    raise
-                time.sleep(_MYSQL_TRANSACTION_RETRY_BASE_S * (2**attempt))
-        else:
-            raise RuntimeError("unreachable MySQL admission retry state")
+        def admit_once() -> TurnAdmissionResult:
+            # Keep the process lock inside the retry operation.  A retried
+            # attempt must re-enter both the lock and a fresh DB transaction.
+            with _GLOBAL_QUOTA_LOCK:
+                with self._engine.begin() as connection:
+                    return self.admit_in_transaction(
+                        connection,
+                        command,
+                        role_codes=role_codes,
+                        classroom_ids=classroom_ids,
+                        now=now,
+                    )
+
+        result = retry_mysql_transaction(admit_once)
         if not result.duplicate:
             self.notify_reservation(result.reservation_id)
         return result
@@ -217,6 +256,11 @@ class QuotaService:
         now: datetime | None = None,
     ) -> TurnAdmissionResult:
         at = _utc(now)
+        classroom_ids = self._classrooms_in_workspace(
+            connection,
+            classroom_ids=classroom_ids,
+            workspace_id=command.workspace_id,
+        )
         existing = self._find_existing_reservation(connection, command)
         rearm_existing = False
         if existing is not None:
@@ -1238,6 +1282,11 @@ class QuotaService:
     ) -> dict[str, Any]:
         at = _utc(now)
         with self._engine.connect() as connection:
+            classroom_ids = self._classrooms_in_workspace(
+                connection,
+                classroom_ids=classroom_ids,
+                workspace_id=workspace_id,
+            )
             owners = [("user", user_id)]
             if workspace_id is not None:
                 owners.append(("workspace", workspace_id))

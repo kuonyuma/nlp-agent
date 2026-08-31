@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -28,6 +28,7 @@ from server.quota.models import (
     QuotaCreditOperationModel,
     QuotaCreditScopeLockModel,
     QuotaDailyRollupModel,
+    QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaProviderBillingModel,
@@ -38,6 +39,7 @@ from server.quota.models import (
 )
 from server.quota.operations import QuotaOperationsService
 from server.quota.reporting import DurableModelUsageReporter
+from server.quota.management import QuotaManagementService
 from server.quota.service import QuotaService
 
 
@@ -254,6 +256,266 @@ def test_mysql_twenty_processes_cannot_breach_one_user_concurrency_slot():
                 delete(PolicyBindingModel).where(PolicyBindingModel.policy_id == policy_id)
             )
             connection.execute(delete(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id))
+        engine.dispose()
+
+
+def test_mysql_two_users_are_billed_separately_and_share_workspace_budget():
+    """Exercise exact billing, grant isolation, and shared workspace accounting."""
+    dsn = _mysql_dsn()
+    engine = create_engine(dsn.replace("mysql+aiomysql://", "mysql+pymysql://"))
+    policy_ids = [str(uuid4()) for _ in range(3)]
+    role_policy_id, user_b_policy_id, workspace_policy_id = policy_ids
+    user_a = f"phase4-mysql-user-a-{uuid4()}"
+    user_b = f"phase4-mysql-user-b-{uuid4()}"
+    workspace_id = f"phase4-mysql-workspace-{uuid4()}"
+    pricing_key = f"phase4-mysql/model-{uuid4()}"
+    turn_ids = [f"phase4-turn-{uuid4()}" for _ in range(2)]
+    operation_ids = [str(uuid4()) for _ in range(2)]
+    reservation_ids: list[str] = []
+    grant_id: str | None = None
+    try:
+        service = QuotaService(engine, lease_seconds=60)
+        service.verify_schema()
+        with engine.begin() as connection:
+            for policy_id, code, daily_limit in (
+                (role_policy_id, "phase4-role", 1_000),
+                (user_b_policy_id, "phase4-user-b", 10_000),
+                (workspace_policy_id, "phase4-workspace", 20_000),
+            ):
+                connection.execute(
+                    insert(QuotaPolicyModel).values(
+                        id=policy_id,
+                        code=f"{code}-{uuid4()}",
+                        version="1",
+                        name=code,
+                        status="active",
+                        request_limit_micro=10_000,
+                        daily_limit_micro=daily_limit,
+                        monthly_limit_micro=None,
+                        concurrency_limit=2,
+                        max_overdraft_micro=0,
+                        allowed_model_profiles=["economy"],
+                        unlimited=False,
+                        effective_from=NOW,
+                        effective_until=None,
+                        created_by="phase4-integration",
+                    )
+                )
+            connection.execute(
+                insert(PolicyBindingModel),
+                [
+                    {
+                        "id": str(uuid4()),
+                        "subject_type": "role",
+                        "subject_id": "student",
+                        "policy_id": role_policy_id,
+                        "priority": 100,
+                        "status": "active",
+                        "effective_from": NOW,
+                        "effective_until": None,
+                    },
+                    {
+                        "id": str(uuid4()),
+                        "subject_type": "user",
+                        "subject_id": user_b,
+                        "policy_id": user_b_policy_id,
+                        "priority": 200,
+                        "status": "active",
+                        "effective_from": NOW,
+                        "effective_until": None,
+                    },
+                    {
+                        "id": str(uuid4()),
+                        "subject_type": "workspace",
+                        "subject_id": workspace_id,
+                        "policy_id": workspace_policy_id,
+                        "priority": 100,
+                        "status": "active",
+                        "effective_from": NOW,
+                        "effective_until": None,
+                    },
+                ],
+            )
+            connection.execute(
+                insert(PricingRuleModel).values(
+                    id=str(uuid4()),
+                    pricing_key=pricing_key,
+                    version="1",
+                    effective_from=NOW,
+                    effective_until=None,
+                    ordinary_input_credits_micro_per_million_tokens=1_000_000,
+                    cached_input_credits_micro_per_million_tokens=0,
+                    cache_write_credits_micro_per_million_tokens=0,
+                    output_credits_micro_per_million_tokens=2_000_000,
+                    reasoning_output_credits_micro_per_million_tokens=None,
+                    status="active",
+                    created_by="phase4-integration",
+                    created_at=NOW,
+                )
+            )
+
+        grant = QuotaManagementService(engine).create_grant(
+            owner_type="user",
+            owner_id=user_a,
+            bucket_type="daily",
+            period_start=NOW.replace(hour=0),
+            period_end=NOW.replace(hour=0) + timedelta(days=1),
+            allocated_micro=5_000,
+            source_type="grant",
+            created_by="developer-1",
+            reason="Phase 4 MySQL multi-user grant isolation",
+            idempotency_key=f"phase4-grant-{uuid4()}",
+            effective_from=NOW,
+        )
+        grant_id = grant["grant_id"]
+
+        def admit(user_id: str, turn_id: str, estimate: int):
+            return service.admit_turn(
+                AdmitTurn(
+                    request_id=f"request-{turn_id}",
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    turn_id=turn_id,
+                    model_profile="economy",
+                    model_role="coordinator",
+                    estimated_input_tokens=1,
+                    estimated_output_tokens=1,
+                    estimated_micro=estimate,
+                    idempotency_key=f"idempotency-{turn_id}",
+                    pricing_key=pricing_key,
+                ),
+                role_codes=("student",),
+                now=NOW,
+            )
+
+        admitted_a = admit(user_a, turn_ids[0], 3_400)
+        admitted_b = admit(user_b, turn_ids[1], 6_200)
+        reservation_ids.extend([admitted_a.reservation_id, admitted_b.reservation_id])
+        reporter = DurableModelUsageReporter(engine, quota_service=service)
+
+        def report(user_id: str, turn_id: str, operation_id: str, reservation_id: str, input_tokens: int, output_tokens: int):
+            invocation = ModelInvocation(
+                operation_id=operation_id,
+                identity=ModelIdentity(
+                    provider="phase4-mysql",
+                    provider_model="phase4-model",
+                    model_profile="economy",
+                    preset="economy",
+                    route="coordinator",
+                    pricing_key=pricing_key,
+                ),
+                attribution=UsageAttributionContext(
+                    request_id=f"request-{turn_id}",
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    turn_id=turn_id,
+                    reservation_id=reservation_id,
+                    purpose="coordinator",
+                ),
+                attempt=1,
+                fallback_index=0,
+                started_at=NOW,
+            )
+            usage = CanonicalTokenUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                source="provider",
+                semantics="final",
+            )
+            outcome = InvocationOutcome(status="succeeded", finish_reason="stop", completed_at=NOW)
+            asyncio.run(reporter.report(invocation, usage, outcome))
+
+        report(user_a, turn_ids[0], operation_ids[0], admitted_a.reservation_id, 1_000, 1_200)
+        report(user_b, turn_ids[1], operation_ids[1], admitted_b.reservation_id, 2_000, 2_100)
+
+        with engine.connect() as connection:
+            events = connection.execute(
+                select(UsageEventModel.__table__).where(
+                    UsageEventModel.operation_id.in_(operation_ids)
+                )
+            ).mappings().all()
+            buckets = connection.execute(
+                select(QuotaBucketModel.__table__).where(
+                    QuotaBucketModel.owner_id.in_([user_a, user_b, workspace_id]),
+                    QuotaBucketModel.bucket_type == "daily",
+                )
+            ).mappings().all()
+        a_snapshot = service.snapshot(
+            user_id=user_a, workspace_id=workspace_id, now=NOW
+        )
+        b_snapshot = service.snapshot(
+            user_id=user_b, workspace_id=workspace_id, now=NOW
+        )
+        assert {(event["user_id"], event["credits_micro"], event["usage_status"]) for event in events} == {
+            (user_a, 3_400, "exact"),
+            (user_b, 6_200, "exact"),
+        }
+        by_owner = {bucket["owner_id"]: bucket for bucket in buckets}
+        assert by_owner[user_a]["consumed_micro"] == 3_400
+        assert by_owner[user_b]["consumed_micro"] == 6_200
+        def snapshot_bucket(snapshot: dict, owner_id: str) -> dict:
+            return next(
+                bucket
+                for bucket in snapshot["buckets"]
+                if bucket["owner_id"] == owner_id and bucket["bucket_type"] == "daily"
+            )
+
+        assert snapshot_bucket(a_snapshot, user_a)["grant_micro"] == 5_000
+        assert snapshot_bucket(b_snapshot, user_b)["grant_micro"] == 0
+        assert snapshot_bucket(a_snapshot, workspace_id)["consumed_micro"] == 9_600
+    finally:
+        with engine.begin() as connection:
+            if operation_ids:
+                connection.execute(
+                    delete(UsageEventModel).where(
+                        UsageEventModel.operation_id.in_(operation_ids)
+                    )
+                )
+            if reservation_ids:
+                reservation_select = select(QuotaReservationModel.id).where(
+                    QuotaReservationModel.id.in_(reservation_ids)
+                )
+                connection.execute(
+                    delete(QuotaLedgerEntryModel).where(
+                        QuotaLedgerEntryModel.reservation_id.in_(reservation_select)
+                    )
+                )
+                connection.execute(
+                    delete(QuotaReservationModel).where(
+                        QuotaReservationModel.id.in_(reservation_ids)
+                    )
+                )
+            if grant_id is not None:
+                connection.execute(
+                    delete(QuotaLedgerEntryModel).where(
+                        QuotaLedgerEntryModel.grant_id == grant_id
+                    )
+                )
+                connection.execute(
+                    delete(QuotaGrantModel).where(QuotaGrantModel.id == grant_id)
+                )
+            connection.execute(
+                delete(QuotaBucketModel).where(
+                    QuotaBucketModel.owner_id.in_([user_a, user_b, workspace_id])
+                )
+            )
+            connection.execute(
+                delete(QuotaConcurrencyLockModel).where(
+                    QuotaConcurrencyLockModel.user_id.in_([user_a, user_b])
+                )
+            )
+            connection.execute(
+                delete(PolicyBindingModel).where(
+                    PolicyBindingModel.policy_id.in_(policy_ids)
+                )
+            )
+            connection.execute(
+                delete(QuotaPolicyModel).where(QuotaPolicyModel.id.in_(policy_ids))
+            )
+            connection.execute(
+                delete(PricingRuleModel).where(PricingRuleModel.pricing_key == pricing_key)
+            )
         engine.dispose()
 
 

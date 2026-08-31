@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, insert, select
+from sqlalchemy import Column, MetaData, String, Table, create_engine, func, insert, select
 from sqlalchemy.pool import StaticPool
 
 from server.quota.contracts import AdmitTurn, FinishTurn
@@ -29,6 +29,15 @@ from server.quota.service import QuotaService
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 30, 8, 0, tzinfo=UTC)
+_CLASSROOM_METADATA = MetaData()
+_CLASSROOM_TABLE = Table(
+    "nlp_classrooms",
+    _CLASSROOM_METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("workspace_id", String(36), nullable=False),
+    Column("name", String(128), nullable=False),
+    Column("status", String(16), nullable=False),
+)
 
 
 @pytest.fixture
@@ -51,6 +60,40 @@ def quota_engine():
         QuotaAdjustmentModel,
     ):
         model.__table__.create(engine)
+    _CLASSROOM_TABLE.create(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            _CLASSROOM_TABLE.insert().values(
+                id="classroom-a",
+                workspace_id="workspace-a",
+                name="Workspace A classroom",
+                status="active",
+            )
+        )
+        connection.execute(
+            _CLASSROOM_TABLE.insert().values(
+                id="classroom-b",
+                workspace_id="workspace-b",
+                name="Workspace B classroom",
+                status="active",
+            )
+        )
+        connection.execute(
+            _CLASSROOM_TABLE.insert().values(
+                id="classroom-1",
+                workspace_id="workspace-1",
+                name="Workspace 1 classroom",
+                status="active",
+            )
+        )
+        connection.execute(
+            _CLASSROOM_TABLE.insert().values(
+                id="classroom-without-policy",
+                workspace_id="workspace-1",
+                name="Workspace 1 classroom without policy",
+                status="active",
+            )
+        )
     try:
         yield engine
     finally:
@@ -108,6 +151,38 @@ def _bind(engine, *, subject_type: str, subject_id: str, policy_id: str, priorit
                 effective_until=None,
             )
         )
+
+
+def test_classroom_policy_from_another_workspace_is_not_applied(quota_engine):
+    user_policy = _policy(
+        quota_engine, code="workspace-a-user", version="1", daily=100, monthly=None
+    )
+    foreign_classroom_policy = _policy(
+        quota_engine,
+        code="workspace-b-classroom",
+        version="1",
+        daily=1,
+        monthly=None,
+        request=1,
+    )
+    _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
+    _bind(
+        quota_engine,
+        subject_type="classroom",
+        subject_id="classroom-b",
+        policy_id=foreign_classroom_policy,
+    )
+
+    admitted = QuotaService(quota_engine).admit_turn(
+        _command("cross-workspace-classroom", estimated_micro=20).model_copy(
+            update={"workspace_id": "workspace-a"}
+        ),
+        role_codes=("student",),
+        classroom_ids=("classroom-a", "classroom-b"),
+        now=NOW,
+    )
+
+    assert admitted.allowed is True
 
 
 def _command(turn_id: str, *, estimated_micro: int = 20) -> AdmitTurn:

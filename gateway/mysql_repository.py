@@ -26,7 +26,7 @@ from gateway.contracts import (
     TurnStatus,
 )
 from server.quota.contracts import AdmitTurn
-from server.quota.service import QuotaService
+from server.quota.service import QuotaService, retry_mysql_transaction
 
 
 def _now() -> datetime:
@@ -118,47 +118,55 @@ class MySQLGatewayRepository:
         quota_classroom_ids: tuple[str, ...] = (),
         **_: Any,
     ) -> tuple[TurnRecord, bool]:
-        with self._engine.begin() as c:
-            self._ensure_conversation(
-                c,
-                session_id=session_id,
-                workspace_id=workspace_id,
-                user_id=user_id,
-                title=input_text,
-            )
-            if idempotency_key:
-                old = c.execute(text("SELECT * FROM nlp_turns WHERE user_id=:u AND conversation_id=:s AND idempotency_key=:k"), {"u": user_id, "s": session_id, "k": idempotency_key}).mappings().first()
-                if old:
-                    if (
-                        old["status"] == "failed"
-                        and old.get("error_kind") == "dispatch_failed"
-                        and self.quota_service is not None
-                        and quota_admission is not None
-                    ):
-                        self.quota_service.admit_in_transaction(
-                            c,
-                            quota_admission.model_copy(
-                                update={"turn_id": old["id"]}
-                            ),
-                            role_codes=quota_role_codes,
-                            classroom_ids=quota_classroom_ids,
-                        )
-                    return self._record(dict(old)), True
-            if self.quota_service is not None and quota_admission is not None:
-                self.quota_service.admit_in_transaction(
+        quota_service = getattr(self, "quota_service", None)
+
+        def create_once() -> tuple[TurnRecord | None, bool]:
+            with self._engine.begin() as c:
+                self._ensure_conversation(
                     c,
-                    quota_admission,
-                    role_codes=quota_role_codes,
-                    classroom_ids=quota_classroom_ids,
+                    session_id=session_id,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    title=input_text,
                 )
-            state = {"context": learning_context.model_dump(mode="json") if learning_context else None, "progress": learning_progress.model_dump(mode="json") if learning_progress else None, "exercise": exercise_state.model_dump(mode="json") if exercise_state else None}
-            c.execute(text("INSERT INTO nlp_turns(id,conversation_id,workspace_id,user_id,status,input_text,learning_state_json,idempotency_key) VALUES(:id,:s,:w,:u,'accepted',:input,:state,:key)"), {"id": turn_id, "s": session_id, "w": workspace_id, "u": user_id, "input": input_text, "state": json.dumps(state), "key": idempotency_key})
-            if dispatch_payload is not None:
-                c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
+                if idempotency_key:
+                    old = c.execute(text("SELECT * FROM nlp_turns WHERE user_id=:u AND conversation_id=:s AND idempotency_key=:k"), {"u": user_id, "s": session_id, "k": idempotency_key}).mappings().first()
+                    if old:
+                        if (
+                            old["status"] == "failed"
+                            and old.get("error_kind") == "dispatch_failed"
+                            and quota_service is not None
+                            and quota_admission is not None
+                        ):
+                            quota_service.admit_in_transaction(
+                                c,
+                                quota_admission.model_copy(
+                                    update={"turn_id": old["id"]}
+                                ),
+                                role_codes=quota_role_codes,
+                                classroom_ids=quota_classroom_ids,
+                            )
+                        return self._record(dict(old)), True
+                if quota_service is not None and quota_admission is not None:
+                    quota_service.admit_in_transaction(
+                        c,
+                        quota_admission,
+                        role_codes=quota_role_codes,
+                        classroom_ids=quota_classroom_ids,
+                    )
+                state = {"context": learning_context.model_dump(mode="json") if learning_context else None, "progress": learning_progress.model_dump(mode="json") if learning_progress else None, "exercise": exercise_state.model_dump(mode="json") if exercise_state else None}
+                c.execute(text("INSERT INTO nlp_turns(id,conversation_id,workspace_id,user_id,status,input_text,learning_state_json,idempotency_key) VALUES(:id,:s,:w,:u,'accepted',:input,:state,:key)"), {"id": turn_id, "s": session_id, "w": workspace_id, "u": user_id, "input": input_text, "state": json.dumps(state), "key": idempotency_key})
+                if dispatch_payload is not None:
+                    c.execute(text("INSERT INTO nlp_outbox_messages(id,topic,payload_json,status) VALUES(UUID(),'turn.dispatch',:payload,'pending')"), {"payload": json.dumps({"turn_id": turn_id, "task": dispatch_payload})})
+            return None, False
+
+        existing_record, duplicate = retry_mysql_transaction(create_once)
+        if duplicate:
+            return existing_record, True  # type: ignore[return-value]
         record = self._record(self._row(turn_id) or {})
-        if self.quota_service is not None and quota_admission is not None:
-            self.quota_service.notify_reservation(
-                self.quota_service.reservation_id_for_turn(turn_id)
+        if quota_service is not None and quota_admission is not None:
+            quota_service.notify_reservation(
+                quota_service.reservation_id_for_turn(turn_id)
             )
         return record, False
 
