@@ -2,7 +2,7 @@ import { Activity, BarChart3, CheckCircle2, CircleAlert, Clock3, Coins, RefreshC
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/platform/auth/AuthContext";
-import { api } from "@/platform/http/api";
+import { api, ApiError } from "@/platform/http/api";
 import { StudentSocket } from "@/platform/realtime/client";
 import type { QuotaBucketSnapshot, QuotaPolicyExplanation, QuotaSnapshot, QuotaUsageBreakdown, QuotaUsageSnapshot } from "@/shared/types";
 
@@ -44,7 +44,7 @@ function UsageBreakdown({ usage }: { usage: QuotaUsageSnapshot | null }) {
   return <section className="quota-panel"><div className="quota-panel-heading"><div><h2>调用明细</h2><p>按日期、用途、Provider 和模型聚合；数据只读，不改变额度流水。</p></div><span className={`quota-data-status ${usage?.credits_complete ? "complete" : "partial"}`}>{usage?.credits_complete ? "已完整计价" : "部分待处理"}</span></div>{breakdown.length ? <div className="quota-breakdown-list">{breakdown.slice().reverse().slice(0, 12).map((item) => <article className="quota-breakdown-row" key={`${item.day}-${item.purpose}-${item.provider}-${item.provider_model}`}><div><strong>{item.purpose} · {item.provider} / {item.provider_model}</strong><small>{item.day} · {item.events} 次调用 · {item.total_tokens.toLocaleString("zh-CN")} tokens</small></div><div className="quota-breakdown-value"><strong>{formatMicro(item.priced_credits_micro)}</strong><small>{item.unpriced_events ? `待处理 ${item.unpriced_events} 条` : `${item.priced_events} 条已计价`}</small></div></article>)}</div> : <div className="quota-empty"><Activity size={20} /><span>近 {usage?.period_days ?? 30} 天暂无模型调用记录。</span></div>}</section>;
 }
 
-export function QuotaUsagePage() {
+export function QuotaUsagePage({ embedded = false }: { embedded?: boolean }) {
   const { user } = useAuth();
   const workspaceIds = useMemo(() => user?.workspace_ids.filter((item) => item !== "*") ?? [], [user]);
   const [workspaceId, setWorkspaceId] = useState<string | undefined>();
@@ -63,7 +63,9 @@ export function QuotaUsagePage() {
       setPolicy(quotaResult.policy);
       setUsage(usageResult);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(reason instanceof ApiError && reason.status === 403
+        ? "当前账号没有该工作空间的额度查看权限，请切换到已加入的工作空间。"
+        : reason instanceof Error ? reason.message : String(reason));
     } finally {
       setLoading(false);
     }
@@ -79,8 +81,8 @@ export function QuotaUsagePage() {
   const buckets = useMemo(() => quota?.buckets ?? [], [quota]);
   const effectiveRemaining = buckets.length > 0 ? Math.min(...buckets.map((item) => item.remaining_micro)) : null;
   const totalTokens = usage?.tokens?.total_tokens ?? 0;
-  if (loading && !quota) return <main className="quota-page"><div className="quota-loading"><RefreshCw className="spin" />正在读取额度快照…</div></main>;
-  return <main className="quota-page">
+  if (loading && !quota) return <main className={`quota-page${embedded ? " quota-page-embedded" : ""}`}><div className="quota-loading"><RefreshCw className="spin" />正在读取额度快照…</div></main>;
+  return <main className={`quota-page${embedded ? " quota-page-embedded" : ""}`}>
     <header className="quota-page-header"><div><span className="quota-eyebrow">ACCOUNT RESOURCE</span><h1>额度与用量</h1><p>额度由开发者统一分配。当前可用值取所有有效 Bucket 的最小值，和 Codex 一样只展示真正可发起请求的额度。</p></div><div className="quota-header-actions">{workspaceIds.length > 0 && <label className="quota-workspace-selector" htmlFor="quota-workspace"><span>工作空间</span><select id="quota-workspace" value={selectedWorkspaceId ?? ""} onChange={(event) => setWorkspaceId(event.target.value || undefined)}>{workspaceIds.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>}<button type="button" onClick={() => void load()} disabled={loading}><RefreshCw size={16} className={loading ? "spin" : ""} />刷新快照</button></div></header>
     {error && <div className="quota-error" role="alert"><CircleAlert size={17} /><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
     <section className="quota-summary-grid quota-summary-grid-four"><article className="quota-summary-primary"><Coins /><span>当前可用</span><strong>{effectiveRemaining == null ? "暂无额度" : formatMicro(effectiveRemaining)}</strong><small>受用户、工作空间和周期限制共同约束</small></article><article><Activity /><span>30 天已计费用量</span><strong>{formatMicro(usage?.priced_credits_micro)}</strong><small>{usage?.unpriced_events ? `另有 ${usage.unpriced_events} 条待处理` : "所有已记录事件均已计价"}</small></article><article><BarChart3 /><span>累计 Token</span><strong>{totalTokens.toLocaleString("zh-CN")}</strong><small>输入、输出及推理 Token 合计</small></article><article><Clock3 /><span>账务状态</span><strong>{usage?.credits_complete ? "完整" : "待补齐"}</strong><small>{Number(usage?.events ?? 0).toLocaleString("zh-CN")} 条 UsageEvent</small></article></section>
