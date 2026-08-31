@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { BlueprintCatalogEditor, GuidedBlueprintCatalogEditor, TopicCatalogEditor } from "./TeacherCatalogEditor";
@@ -115,10 +116,13 @@ describe("TeacherWorkspace catalog CRUD", () => {
     history.replaceState({}, "", "/teacher/topics"); render(<TeacherWorkspace />);
     await screen.findByRole("heading", { name: "主题与知识点", level: 2 });
 
-    const menu = screen.getByRole("button", { name: "Transformer目录选项" }).closest("details") as HTMLDetailsElement;
-    menu.open = true;
-    fireEvent.pointerDown(document.body);
-    expect(menu.open).toBe(false);
+    const user = userEvent.setup();
+    const summary = screen.getByRole("button", { name: "Transformer目录选项" });
+    const menu = summary.closest("details") as HTMLDetailsElement;
+    await user.click(summary);
+    expect(menu.open).toBe(true);
+    await user.click(document.body);
+    await waitFor(() => expect(menu.open).toBe(false));
 
     fireEvent.click(screen.getByRole("button", { name: "收起主题与知识点目录" }));
     const expandButton = screen.getByRole("button", { name: "展开主题与知识点目录" });

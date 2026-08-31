@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/platform/http/api";
 import { useOptionalAuth } from "@/platform/auth/AuthContext";
 import { StudentSocket } from "@/platform/realtime/client";
+import { clearImportedFiles } from "../../components/importedFiles";
 import type { AuthSession, ChatMessage, RuntimeModelProfile } from "@/shared/types";
 
 import { useWorkspaceBootstrap } from "../internal/bootstrap";
@@ -146,6 +147,7 @@ export function useStudentWorkspace() {
     setAuthRevision((current) => current + 1);
   }, []);
   const logout = useCallback(async () => {
+    clearImportedFiles(authSession?.user_id ?? null, workspaceId);
     try {
       if (globalAuth) await globalAuth.logout();
       else await api.logout();
@@ -162,7 +164,7 @@ export function useStudentWorkspace() {
       // Redirect to login page
       window.location.href = "/";
     }
-  }, [globalAuth, setActiveSessionId, setSessions]);
+  }, [authSession, globalAuth, setActiveSessionId, setSessions, workspaceId]);
 
   return {
     sessions,
