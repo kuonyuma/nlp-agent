@@ -33,7 +33,7 @@ function Overview({ data, catalog }: { data: TeacherOverview; catalog: TeacherCa
 
 const quotaCredits = (micro: number) => `${(micro / 1_000_000).toFixed(2)} credits`;
 
-function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
+export function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
   const [classrooms, setClassrooms] = useState<ClassroomSummary[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [usage, setUsage] = useState<QuotaClassroomUsage | null>(null);
@@ -43,7 +43,7 @@ function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
+    queueMicrotask(() => { if (active) setLoading(true); });
     void api.listClassrooms().then((result) => {
       if (!active) return;
       const items = result.items.filter((item) => item.workspace_id === workspaceId);
@@ -54,9 +54,9 @@ function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId]);
 
   useEffect(() => {
-    if (!selected) { setUsage(null); return; }
+    if (!selected) { queueMicrotask(() => setUsage(null)); return; }
     let active = true;
-    setLoading(true);
+    queueMicrotask(() => { if (active) setLoading(true); });
     void api.getTeacherClassroomUsage(selected.id, workspaceId, 30).then((result) => { if (active) setUsage(result); }).catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : String(reason)); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [selected, workspaceId]);
@@ -65,7 +65,7 @@ function ClassroomQuotaPage({ workspaceId }: { workspaceId: string }) {
     <div className="teacher-page-summary quota"><div><span className="teacher-eyebrow">CLASSROOM USAGE</span><h2>班级额度用量</h2><p>仅聚合当前工作空间内的课堂，帮助教师观察学生的模型消费和待对账事件。</p></div><Coins size={46} /></div>
     <section className="teacher-panel teacher-quota-toolbar"><label htmlFor="teacher-classroom-select">选择班级<select id="teacher-classroom-select" value={selectedId} onChange={(event) => setSelectedId(event.target.value)} disabled={!classrooms.length}>{classrooms.length ? classrooms.map((item) => <option key={item.id} value={item.id}>{item.name}</option>) : <option>暂无可查看班级</option>}</select></label><span>统计范围：近 30 天</span></section>
     {error ? <div className="teacher-state error"><AlertCircle /><p>{error}</p></div> : loading ? <div className="teacher-state"><RefreshCw className="spin" />正在加载班级用量…</div> : !usage ? <div className="teacher-state"><Users /><p>当前工作空间暂无可查看班级。</p></div> : <>
-      <div className="teacher-insight-kpis teacher-quota-kpis"><article><Users /><span>活跃学生</span><strong>{usage.students}</strong><small>{usage.active_student_ids.length} 个有效成员</small></article><article><Coins /><span>已计价额度</span><strong>{quotaCredits(usage.priced_credits_micro)}</strong><small>{usage.priced_events} 条已计价事件</small></article><article className={usage.pending_events || usage.unavailable_events ? "warning" : ""}><Clock3 /><span>待处理事件</span><strong>{usage.pending_events + usage.unavailable_events}</strong><small>{usage.unavailable_events ? `${usage.unavailable_events} 条无法计价` : "当前已完成对账"}</small></article></div>
+      <div className="teacher-insight-kpis teacher-quota-kpis"><article><Users /><span>活跃学生</span><strong>{usage.students}</strong><small>{usage.active_student_ids.length} 个有效成员</small></article><article><Coins /><span>已计价额度</span><strong>{quotaCredits(usage.priced_credits_micro)}</strong><small>{usage.priced_events} 条已计价事件</small></article><article className={usage.pending_events || usage.unavailable_events ? "warning" : ""}><Clock3 /><span>待处理事件</span><strong>{usage.pending_events + usage.unavailable_events}</strong><small>{usage.pending_events ? `有 ${usage.pending_events} 条用量待对账` : usage.unavailable_events ? `${usage.unavailable_events} 条无法计价` : "当前已完成对账"}</small></article></div>
       <section className="teacher-panel"><header><div><h2>{selected?.name ?? "班级"} · 学生用量</h2><p>基于原始 UsageEvent 聚合，不修改个人和班级 Ledger</p></div></header>{usage.by_user.length ? <div className="teacher-table"><table><thead><tr><th>用户</th><th>事件</th><th>Token</th><th>Credits</th><th>状态</th></tr></thead><tbody>{usage.by_user.map((item) => <tr key={item.user_id}><td>{item.user_id}</td><td>{item.events}</td><td>{item.total_tokens.toLocaleString()}</td><td>{quotaCredits(item.priced_credits_micro)}</td><td>{item.pending_events ? `待对账 ${item.pending_events}` : item.unavailable_events ? `无法计价 ${item.unavailable_events}` : "已完成"}</td></tr>)}</tbody></table></div> : <p className="teacher-empty-state">近 30 天暂无模型调用记录。</p>}</section>
     </>}
   </div>;

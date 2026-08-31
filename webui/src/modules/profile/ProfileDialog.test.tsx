@@ -33,7 +33,7 @@ describe("ProfileDialog quota section", () => {
 
     await waitFor(() => expect(methods.getQuota).toHaveBeenCalledWith("workspace-a"));
     expect(methods.getUsage).toHaveBeenCalledWith(30, "workspace-a");
-    expect(screen.getByText("额度与用量")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "额度与用量" })).toBeVisible();
     expect(screen.getByRole("combobox", { name: "工作空间" })).toHaveValue("workspace-a");
   });
 

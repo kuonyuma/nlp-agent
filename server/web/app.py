@@ -319,6 +319,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         gateway = gateway_factory()
+        # Tests and embedded callers may inject lightweight quota readers on
+        # app.state before entering the lifespan.  Preserve those doubles in
+        # auth-injected mode while keeping production startup responsible for
+        # constructing the real persistence-backed services.
+        injected_usage_reader = getattr(app.state, "quota_usage_reader", None)
+        injected_quota_read_service = getattr(app.state, "quota_read_service", None)
         usage_reporter = None
         usage_reader = None
         quota_read_service = None
@@ -380,6 +386,9 @@ def create_app(
                     database_url,
                     quota_enforcement=True,
                 )
+        elif auth_injected:
+            usage_reader = injected_usage_reader
+            quota_read_service = injected_quota_read_service
         app.state.quota_usage_reporter = usage_reporter
         app.state.quota_usage_reader = usage_reader
         app.state.quota_read_service = quota_read_service
@@ -536,7 +545,9 @@ def create_app(
             await gateway.close()
             shutdown_usage_reporter(usage_reporter)
             if usage_reader is not None:
-                usage_reader.close()
+                close_usage_reader = getattr(usage_reader, "close", None)
+                if close_usage_reader is not None:
+                    close_usage_reader()
             if owns_quota_read_service and quota_read_service is not None:
                 quota_read_service.close()
             if quota_operations is not None:
