@@ -91,6 +91,7 @@ from server.teacher.models import (
     ReviewBlueprint,
     TeacherBookImportApplyRequest,
     TeacherBookImportPreviewRequest,
+    TeacherAIAnalysisRequest,
     UpdateTeacherBookPage,
     UpdateTeacherCatalog,
     UpdateTeachingGoals,
@@ -1565,6 +1566,20 @@ def create_app(
             principal, request.app.state.gateway, workspace_id
         )
         return {**analytics, **goals}
+
+    @app.post("/api/v1/teacher/reports/ai-analysis", tags=["teacher"])
+    async def teacher_ai_analysis(
+        body: TeacherAIAnalysisRequest,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        return await teacher_service.ai_analysis(
+            principal,
+            request.app.state.gateway,
+            body.workspace_id,
+            body,
+        )
 
     @app.get("/api/v1/teacher/goals/{workspace_id}", tags=["teacher"])
     async def get_teacher_goals(workspace_id: str, request: Request, principal: Principal):
