@@ -44,8 +44,10 @@ from server.web.auth import (
 )
 from server.web.database_auth import DatabaseSessionAuth, DatabaseSessionClaims
 from server.agent.session_service import DatabaseSessionService, local_session_service
+from server.session.summary import summary_sweep_loop
 from server.web.contracts import (
     CreateSessionBody,
+    RenameSessionBody,
     LoginBody,
     ReplaceUserRolesBody,
     ReplaceRolePermissionsBody,
@@ -373,9 +375,22 @@ def create_app(
             asyncio.create_task(reconcile_sandbox_leases(), name="sandbox-lease-reconciler")
             if gateway.authorization_session_factory is not None else None
         )
+
+        async def run_summary_sweep() -> None:
+            # Durable backfill for titles lost to a restart; the lease claim in
+            # ``generate_and_store_summary`` deduplicates it against the Worker.
+            await summary_sweep_loop(gateway.authorization_session_factory)
+
+        summary_sweeper = (
+            asyncio.create_task(run_summary_sweep(), name="session-summary-sweep")
+            if gateway.authorization_session_factory is not None else None
+        )
         try:
             yield
         finally:
+            if summary_sweeper is not None:
+                summary_sweeper.cancel()
+                await asyncio.gather(summary_sweeper, return_exceptions=True)
             if sandbox_reconciler is not None:
                 sandbox_reconciler.cancel()
                 await asyncio.gather(sandbox_reconciler, return_exceptions=True)
@@ -1290,6 +1305,27 @@ def create_app(
         authorization_service.require(principal, Permission.AGENT_SESSION_READ)
         context = await request.app.state.gateway.sessions.resolve(principal, session_id)
         return context.model_dump(mode="json")
+
+    @app.patch("/api/v1/sessions/{session_id}", tags=["sessions"])
+    async def rename_session(
+        session_id: str,
+        body: RenameSessionBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        result = await request.app.state.gateway.sessions.rename(
+            principal, session_id, body.title
+        )
+        await hub.broadcast(
+            control_event(
+                "session.updated",
+                session_id=session_id,
+                payload={"scope": "title"},
+            ),
+            user_id=principal.user_id,
+        )
+        return result
 
     @app.get("/api/v1/sessions/{session_id}/messages", tags=["sessions"])
     async def get_messages(session_id: str, request: Request, principal: Principal):

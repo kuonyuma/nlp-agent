@@ -26,6 +26,7 @@ export function useStudentWorkspace() {
     deleteCategory,
   } = usePreferencesController();
   const { settings, settingsError, initializeSettings, patchSettings, resetSettings } = useSettingsController();
+  const [requestError, setRequestError] = useState("");
   const {
     sessions,
     setSessions,
@@ -41,14 +42,14 @@ export function useStudentWorkspace() {
     createBackendSession,
     startNewChat,
     deleteSession,
-  } = useSessionController({ preferences, persistPreferences, updateSessionMeta });
+    renameSessionTitle,
+  } = useSessionController({ preferences, persistPreferences, updateSessionMeta, onRequestError: setRequestError });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [modelProfiles, setModelProfiles] = useState<Record<string, RuntimeModelProfile>>({});
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [bootStatus, setBootStatus] = useState<"loading" | "ready" | "unauthenticated" | "error">("loading");
   const [authRevision, setAuthRevision] = useState(0);
   const [error, setError] = useState("");
-  const [requestError, setRequestError] = useState("");
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "offline">("connecting");
   const [loadingMessages, setLoadingMessages] = useState(false);
   const socketRef = useRef<StudentSocket | null>(null);
@@ -188,6 +189,7 @@ export function useStudentWorkspace() {
     send,
     cancel,
     deleteSession,
+    renameSessionTitle,
     updateSessionMeta,
     setLearningContext,
     addCategory,

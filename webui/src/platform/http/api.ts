@@ -128,6 +128,11 @@ export const api = {
     }),
   deleteSession: (sessionId: string) =>
     request<void>(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }),
+  renameSession: (sessionId: string, title: string) =>
+    request<{ session_id: string; title: string }>(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
   listTurns: (sessionId: string) =>
     request<{ items: TurnRecord[] }>(`/sessions/${encodeURIComponent(sessionId)}/turns?limit=500`),
   cancelTurn: (turnId: string) =>
