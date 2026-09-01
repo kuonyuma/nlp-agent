@@ -7,6 +7,7 @@ from dotenv import dotenv_values
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from core.runtime_config import load_runtime_config
+from server.quota.rollout import QuotaRollout
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -39,6 +40,10 @@ class Settings(BaseSettings):
     NLP_AGENT_REDIS_URL: str = ""
     NLP_AGENT_STATE_FACTORY: str = ""
     NLP_AGENT_DATABASE_URL: str = ""
+    NLP_AGENT_QUOTA_ENFORCEMENT: bool = False
+    NLP_AGENT_QUOTA_ENFORCEMENT_PERCENT: int | None = None
+    NLP_AGENT_QUOTA_ENFORCEMENT_USERS: str = ""
+    NLP_AGENT_QUOTA_ENFORCEMENT_WORKSPACES: str = ""
     NLP_AGENT_DB_POOL_SIZE: int = 10
     NLP_AGENT_DB_MAX_OVERFLOW: int = 20
     NLP_AGENT_DB_POOL_RECYCLE_S: int = 1800
@@ -162,7 +167,31 @@ class Settings(BaseSettings):
             config["redis_url"] = self.NLP_AGENT_REDIS_URL.strip()
         if self.NLP_AGENT_STATE_FACTORY.strip():
             config["state_factory"] = self.NLP_AGENT_STATE_FACTORY.strip()
+        if self.NLP_AGENT_QUOTA_ENFORCEMENT_PERCENT is not None:
+            config["quota_enforcement_percentage"] = self.NLP_AGENT_QUOTA_ENFORCEMENT_PERCENT
+        if self.NLP_AGENT_QUOTA_ENFORCEMENT_USERS.strip():
+            config["quota_enforcement_users"] = self.NLP_AGENT_QUOTA_ENFORCEMENT_USERS
+        if self.NLP_AGENT_QUOTA_ENFORCEMENT_WORKSPACES.strip():
+            config["quota_enforcement_workspaces"] = self.NLP_AGENT_QUOTA_ENFORCEMENT_WORKSPACES
         return config
+
+    @property
+    def quota_rollout(self) -> QuotaRollout:
+        return QuotaRollout.from_config(
+            self.gateway_runtime,
+            global_enabled=bool(
+                self.NLP_AGENT_QUOTA_ENFORCEMENT
+                or self.gateway_runtime.get("quota_enforcement", False)
+            ),
+        )
+
+    @property
+    def quota_enforcement_enabled(self) -> bool:
+        """Whether any rollout target requires quota services at startup."""
+        return self.quota_rollout.configured
+
+    def quota_enforcement_for(self, user_id: str, workspace_id: str | None) -> bool:
+        return self.quota_rollout.enabled_for(user_id, workspace_id)
 
     @property
     def database_runtime(self) -> dict:

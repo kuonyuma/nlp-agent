@@ -2,7 +2,7 @@ import {
   Activity, AppWindow, Bot, Box, ChevronLeft, ChevronRight, Clock3, Code2, Database,
   ExternalLink, FileKey2, Gauge, Globe2, KeyRound, Mail, MailOpen, Newspaper, PlugZap,
   Inbox, MessageCircle, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, User, Wrench,
-  Users, LayoutList, MessageSquare,
+  Users, LayoutList, ScrollText, MessageSquare, WalletCards,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -11,34 +11,31 @@ import type { DeveloperSnapshot, FeedbackCategory, FeedbackPriority, FeedbackSta
 import { UserManagementPage } from "@/modules/admin/UserManagementPage";
 import { RoleManagementPageV2 } from "@/modules/admin/RoleManagementPageV2";
 import { MenuManagementPageV2 } from "@/modules/admin/MenuManagementPageV2";
+import { AuditLogPageV2 } from "@/modules/admin/AuditLogPageV2";
 import { AgentSessionListPageV2 } from "@/modules/admin/AgentSessionListPageV2";
 import { monitorUrl } from "@/monitor/monitor-helpers";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
+import { QuotaManagementPage } from "@/modules/quota/QuotaManagementPage";
 
-export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "feedback" | "settings" | "users" | "roles" | "menus" | "sessions";
+export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "feedback" | "settings" | "users" | "roles" | "menus" | "audit" | "sessions" | "quotas";
 
-type NavGroup = "control" | "integrations" | "operations";
-const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge; group: NavGroup }> = [
-  { page: "overview", label: "工作台", icon: Gauge, group: "control" },
-  { page: "agents", label: "Agent 与 Worker", icon: Bot, group: "control" },
-  { page: "tools", label: "工具", icon: Wrench, group: "control" },
-  { page: "models", label: "模型与 Provider", icon: Sparkles, group: "control" },
-  { page: "mcp", label: "MCP", icon: PlugZap, group: "integrations" },
-  { page: "skills", label: "Skills", icon: Code2, group: "integrations" },
-  { page: "automations", label: "Apps 与自动化", icon: Clock3, group: "integrations" },
-  { page: "release-notes", label: "发布说明", icon: Newspaper, group: "operations" },
-  { page: "feedback", label: "意见反馈", icon: Mail, group: "operations" },
-  { page: "sessions", label: "Agent 会话", icon: MessageSquare, group: "operations" },
-  { page: "settings", label: "运行时设置", icon: Settings2, group: "operations" },
-  { page: "users", label: "用户管理", icon: Users, group: "operations" },
-  { page: "roles", label: "角色权限", icon: ShieldCheck, group: "operations" },
-  { page: "menus", label: "菜单管理", icon: LayoutList, group: "operations" },
-];
-
-const NAV_GROUPS: Array<{ key: NavGroup; label: string }> = [
-  { key: "control", label: "控制面" },
-  { key: "integrations", label: "能力与集成" },
-  { key: "operations", label: "运营与治理" },
+const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge }> = [
+  { page: "overview", label: "工作台", icon: Gauge },
+  { page: "agents", label: "Agent 与 Worker", icon: Bot },
+  { page: "tools", label: "工具", icon: Wrench },
+  { page: "models", label: "模型与 Provider", icon: Sparkles },
+  { page: "mcp", label: "MCP", icon: PlugZap },
+  { page: "skills", label: "Skills", icon: Code2 },
+  { page: "release-notes", label: "发布说明", icon: Newspaper },
+  { page: "automations", label: "Apps 与自动化", icon: Clock3 },
+  { page: "feedback", label: "意见反馈", icon: Mail },
+  { page: "settings", label: "运行时设置", icon: Settings2 },
+  { page: "users", label: "用户管理", icon: Users },
+  { page: "roles", label: "角色权限", icon: ShieldCheck },
+  { page: "menus", label: "菜单管理", icon: LayoutList },
+  { page: "audit", label: "审计日志", icon: ScrollText },
+  { page: "sessions", label: "Agent 会话", icon: MessageSquare },
+  { page: "quotas", label: "额度管理", icon: WalletCards },
 ];
 
 function currentPage(): DeveloperPage {
@@ -83,15 +80,15 @@ function Overview({ snapshot }: { snapshot: DeveloperSnapshot }) {
   const runtime = snapshot.runtime;
   const monitorOrigin = monitorUrl(location);
   return <div className="developer-page-grid">
-    <section className="developer-hero"><div className="developer-hero-copy"><span className="developer-eyebrow">DEVELOPER CONTROL PLANE · 8765</span><h1>后端基础工作台</h1><p>从一个工作台掌握 Agent、模型、工具和运行时边界。学生界面不会显示这些内部信息。</p><div className="developer-hero-actions"><a href={monitorOrigin} target="_blank" rel="noreferrer"><Gauge size={16} />打开监控平台</a><span><i className={`developer-live-dot ${runtime.status === "ok" ? "on" : ""}`} />{runtime.status === "ok" ? "Runtime 正常" : "Runtime 待检查"}</span></div></div><div className="developer-hero-mark"><ShieldCheck size={30} /><small>CONTROL<br />PLANE</small></div></section>
+    <section className="developer-hero"><div><span>DEVELOPER CONTROL PLANE</span><h1>后端基础工作台</h1><p>查看 Agent、工具、模型和本地数据边界。学生界面不会显示这些内部信息。</p></div><ShieldCheck size={54} /></section>
     <div className="developer-kpis">
-      <article><div><Activity /><span>Gateway 状态</span></div><strong>{String(runtime.status ?? "unknown")}</strong><small>运行时心跳</small></article>
-      <article><div><Bot /><span>活跃 Turn</span></div><strong>{String(runtime.active_turns ?? 0)}</strong><small>当前请求上下文</small></article>
-      <article><div><Database /><span>持久事件</span></div><strong>{Number(runtime.durable_events ?? 0).toLocaleString()}</strong><small>已写入的运行事件</small></article>
-      <article><div><PlugZap /><span>工具目录</span></div><strong>v{snapshot.tools.catalog_revision}</strong><small>可供 Agent 发现</small></article>
+      <article><Activity /><span>Gateway</span><strong>{String(runtime.status ?? "unknown")}</strong></article>
+      <article><Bot /><span>活跃 Turn</span><strong>{String(runtime.active_turns ?? 0)}</strong></article>
+      <article><Database /><span>持久事件</span><strong>{Number(runtime.durable_events ?? 0).toLocaleString()}</strong></article>
+      <article><PlugZap /><span>工具目录版本</span><strong>{snapshot.tools.catalog_revision}</strong></article>
     </div>
-    <Section title="能力状态" hint="未配置的通用工作台能力会明确显示，不伪造可用状态。"><div className="developer-card-grid">{Object.entries(snapshot.features).map(([name, feature]) => <article className="developer-card" key={name}><div><AppWindow size={18} /><strong>{name}</strong></div><StatusPill ok={feature.available}>{feature.available ? "已启用" : "未启用"}</StatusPill><p>{feature.reason}</p><small className="developer-card-link">查看能力详情 <ChevronRight size={14} /></small></article>)}</div></Section>
-    <Section title="独立观测平台" hint="Trace、Token、错误和实时事件在隔离端口展示，审计日志也归入这里。"><a className="developer-monitor-link" href={monitorOrigin} target="_blank" rel="noreferrer"><Gauge size={20} /><span><strong>打开 Observability Monitor</strong><small>{new URL(monitorOrigin).host} · 运行链路、会话、审计</small></span><ExternalLink size={16} /></a></Section>
+    <Section title="能力状态" hint="未配置的通用工作台能力会明确显示，不伪造可用状态。"><div className="developer-card-grid">{Object.entries(snapshot.features).map(([name, feature]) => <article className="developer-card" key={name}><div><AppWindow size={18} /><strong>{name}</strong></div><StatusPill ok={feature.available}>{feature.available ? "已启用" : "未启用"}</StatusPill><p>{feature.reason}</p></article>)}</div></Section>
+    <Section title="独立观测平台" hint="Trace、Token、错误和实时事件在当前环境的隔离端口展示。"><a className="developer-monitor-link" href={monitorOrigin} target="_blank" rel="noreferrer"><Gauge size={20} /><span><strong>打开 Observability Monitor</strong><small>{new URL(monitorOrigin).host}</small></span><ExternalLink size={16} /></a></Section>
   </div>;
 }
 
@@ -443,7 +440,7 @@ export function ReleaseNotes() {
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [version, setVersion] = useState("");
-  const [releasedAt, setReleasedAt] = useState(todayInputValue);
+  const [releasedAt, setReleasedAt] = useState("");
   const [notes, setNotes] = useState("");
   const [status, setStatus] = useState<"draft" | "published">("published");
   const [message, setMessage] = useState("");
@@ -455,11 +452,11 @@ export function ReleaseNotes() {
   }, []);
   useEffect(() => { queueMicrotask(() => void load()); }, [load]);
 
-  const resetForm = () => { setEditingId(null); setVersion(""); setReleasedAt(todayInputValue()); setNotes(""); setStatus("published"); setMessage(""); };
-  const startEdit = (item: ReleaseNoteEntry) => { setEditingId(item.id); setVersion(item.version); setReleasedAt(item.released_at.slice(0, 10) || todayInputValue()); setNotes(item.notes.join("\n")); setStatus(item.status); setMessage(""); };
+  const resetForm = () => { setEditingId(null); setVersion(""); setReleasedAt(""); setNotes(""); setStatus("published"); setMessage(""); };
+  const startEdit = (item: ReleaseNoteEntry) => { setEditingId(item.id); setVersion(item.version); setReleasedAt(item.released_at.slice(0, 10)); setNotes(item.notes.join("\n")); setStatus(item.status); setMessage(""); };
   const save = async () => {
     const note: Omit<ReleaseNoteEntry, "id"> = {
-      version: version.trim(),
+      version,
       released_at: releasedAt,
       notes: notes.split("\n").map((item) => item.trim()).filter(Boolean),
       status,
@@ -476,22 +473,16 @@ export function ReleaseNotes() {
     catch (reason) { setMessage(reason instanceof Error ? reason.message : String(reason)); }
   };
 
-  return <><Section title="发布说明" hint="每个版本一条记录；学生端「版本与更新」只展示已发布的条目。保存后会通过公开只读接口同步到主页面。">
+  return <><Section title="发布说明" hint="每个版本一条记录；学生端「版本与更新」只展示已发布的条目。版本号来自构建，这里只需维护更新与修复文案。">
     {error && <div className="developer-error"><ShieldCheck /><strong>无法读取发布说明</strong><p>{error}</p></div>}
-    <div className="developer-release-editor">
-      <div className="developer-release-editor-heading"><div><span className="developer-eyebrow">RELEASE PIPELINE</span><h3>{editingId ? "编辑发布说明" : "准备下一次发布"}</h3></div><StatusPill ok={status === "published"}>{status === "published" ? "学生端可见" : "仅内部草稿"}</StatusPill></div>
-      <div className="developer-release-fields"><label><span>版本号</span><input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="版本，例如 1.0.0" disabled={Boolean(editingId)} /></label><label><span>发布日期</span><input type="date" value={releasedAt} onChange={(event) => setReleasedAt(event.target.value)} aria-label="发布日期" /></label><label><span>发布状态</span><select value={status} onChange={(event) => setStatus(event.target.value as "draft" | "published")} aria-label="发布状态"><option value="draft">草稿</option><option value="published">已发布</option></select></label></div>
-      <label className="developer-release-notes-field"><span>更新与修复说明 <small>每行一条，学生端按原顺序展示</small></span><textarea value={notes} onChange={(event) => setNotes(event.target.value)} spellCheck={false} placeholder="每行一条更新与修复说明" /></label>
-      <div className="developer-release-actions"><button type="button" onClick={() => void save()} disabled={!version.trim() || !releasedAt || !notes.trim()}>{editingId ? "保存修改" : "新建发布说明"}</button>{editingId && <button className="secondary" type="button" onClick={resetForm}>取消编辑</button>}{message && <small className="developer-form-message">{message}</small>}</div>
+    <div className="developer-editor">
+      <div className="developer-inline-form"><input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="版本，例如 1.0.0" disabled={Boolean(editingId)} /><input type="date" value={releasedAt} onChange={(event) => setReleasedAt(event.target.value)} aria-label="发布日期" /></div>
+      <textarea value={notes} onChange={(event) => setNotes(event.target.value)} spellCheck={false} placeholder="每行一条更新与修复说明" />
+      <div><select value={status} onChange={(event) => setStatus(event.target.value as "draft" | "published")} aria-label="发布状态"><option value="draft">草稿</option><option value="published">已发布</option></select><button type="button" onClick={() => void save()} disabled={!version.trim() || !notes.trim()}>{editingId ? "保存修改" : "新建发布说明"}</button>{editingId && <button type="button" onClick={resetForm}>取消编辑</button>}{message && <small>{message}</small>}</div>
     </div>
-    <div className="developer-release-list">{(items ?? []).map((item) => <article className="developer-release-card" key={item.id}><div className="developer-release-card-top"><div><span className="developer-release-version"><Newspaper size={17} />v{item.version} · {item.released_at.slice(0, 10)}</span><small>{item.status === "published" ? "这条说明会出现在学生端设置中的“版本与更新”" : "草稿仅开发者可见，发布后才会同步"}</small></div><StatusPill ok={item.status === "published"}>{item.status === "published" ? "已发布" : "草稿"}</StatusPill></div><ul>{item.notes.map((note) => <li key={note}>{note}</li>)}</ul><div className="developer-release-card-actions"><button type="button" onClick={() => startEdit(item)}>编辑</button><button className="danger" type="button" onClick={() => void remove(item)}>删除</button></div></article>)}</div>
+    <div className="developer-list">{(items ?? []).map((item) => <article key={item.id}><Newspaper size={18} /><span><strong>v{item.version} · {item.released_at.slice(0, 10)}</strong><small>{item.notes.join("；")}</small></span><StatusPill ok={item.status === "published"}>{item.status === "published" ? "已发布" : "草稿"}</StatusPill><button type="button" onClick={() => startEdit(item)}>编辑</button><button className="danger" type="button" onClick={() => void remove(item)}>删除</button></article>)}</div>
     {items && items.length === 0 && <div className="developer-empty"><Newspaper /><strong>暂无发布说明</strong><p>新建一条记录，学生端即可在「版本与更新」中看到。</p></div>}
   </Section></>;
-}
-
-function todayInputValue() {
-  const today = new Date();
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 }
 
 export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: DeveloperPage; onNavigate?: (page: DeveloperPage) => void }) {
@@ -630,7 +621,9 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
     if (page === "users") return <UserManagementPage />;
     if (page === "roles") return <RoleManagementPageV2 />;
     if (page === "menus") return <MenuManagementPageV2 />;
+    if (page === "audit") return <AuditLogPageV2 />;
     if (page === "sessions") return <AgentSessionListPageV2 />;
+    if (page === "quotas") return <QuotaManagementPage />;
     if (!snapshot) return <div className="developer-error"><ShieldCheck /><strong>无法读取运行时快照</strong><p>{snapshotError || "当前身份可能缺少运行时检查权限；其余页面不受影响。"}</p></div>;
     if (page === "agents") return <Agents snapshot={snapshot} refresh={load} />;
     if (page === "tools") return <Tools snapshot={snapshot} refresh={load} />;
@@ -642,5 +635,5 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
     return <Overview snapshot={snapshot} />;
   }, [changeFeedbackCategory, changeFeedbackPriority, changeFeedbackSearch, changeFeedbackSort, changeFeedbackStatus, deleteFeedback, deleteFeedbackThreads, feedbackCategory, feedbackLoadError, feedbackLoading, feedbackOffset, feedbackPriority, feedbackSearch, feedbackSelectedId, feedbackSort, feedbackStatus, feedbackThreads, feedbackTotal, markFeedbackRead, markFeedbackThreadsRead, page, refreshFeedback, snapshot, snapshotError, load]);
   const accessDenied = !loading && visiblePages.size > 0 && !visiblePages.has(page);
-  return <div className="developer-shell"><aside className="developer-nav"><div className="developer-brand"><TerminalSquare /><span><strong>NLP Developer</strong><small>CONTROL PLANE · 8765</small></span></div><nav>{NAV_GROUPS.map((group) => { const items = NAV.filter((item) => item.group === group.key && visiblePages.has(item.page)); return items.length ? <div className="developer-nav-group" key={group.key}><span className="developer-nav-group-label">{group.label}</span>{items.map(({ page: itemPage, label, icon: Icon }) => <button className={page === itemPage ? "active" : ""} type="button" key={itemPage} onClick={() => navigate(itemPage)}><Icon size={17} />{label}</button>)}</div> : null; })}</nav><a href="/"><ChevronLeft size={16} />返回学生模式</a></aside><main className="developer-main"><header className="developer-topbar"><div><Globe2 size={16} /><span>开发者控制面</span><small>仅对当前身份生效</small></div><button type="button" onClick={() => { if (page === "feedback") void refreshFeedback(); void load(); }} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新数据</button></header><div className="developer-content">{loading && visiblePages.size === 0 ? <div className="developer-loading"><RefreshCw className="spin" />正在读取运行时…</div> : error ? <div className="developer-error"><ShieldCheck /><strong>无法进入开发者模式</strong><p>{error}</p></div> : accessDenied ? <div className="developer-error"><ShieldCheck /><strong>无权访问该页面</strong><p>当前身份未被授予此菜单；请从左侧导航选择可用的页面。</p></div> : content}</div></main></div>;
+  return <div className="developer-shell"><aside className="developer-nav"><div className="developer-brand"><TerminalSquare /><span><strong>NLP Developer</strong><small>Control plane · 8765</small></span></div><nav>{NAV.filter(({ page: itemPage }) => visiblePages.has(itemPage)).map(({ page: itemPage, label, icon: Icon }) => <button className={page === itemPage ? "active" : ""} type="button" key={itemPage} onClick={() => navigate(itemPage)}><Icon size={17} />{label}</button>)}</nav><a href="/"><ChevronLeft size={16} />返回学生模式</a></aside><main className="developer-main"><header className="developer-topbar"><div><Globe2 size={16} /><span>当前开发者</span></div><button type="button" onClick={() => { if (page === "feedback") void refreshFeedback(); void load(); }} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button></header><div className="developer-content">{loading && visiblePages.size === 0 ? <div className="developer-loading"><RefreshCw className="spin" />正在读取运行时…</div> : error ? <div className="developer-error"><ShieldCheck /><strong>无法进入开发者模式</strong><p>{error}</p></div> : accessDenied ? <div className="developer-error"><ShieldCheck /><strong>无权访问该页面</strong><p>当前身份未被授予此菜单；请从左侧导航选择可用的页面。</p></div> : content}</div></main></div>;
 }

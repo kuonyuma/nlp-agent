@@ -232,6 +232,14 @@ class GatewayRepository:
         guided_session_status: str | None = None,
         exercise_state: ExerciseState | None = None,
         dispatch_payload: str | None = None,
+        # The MySQL repository performs quota admission in the same
+        # transaction as turn creation.  Keep the in-memory repository
+        # compatible with that gateway contract; quota-aware callers may use
+        # this repository in tests and local development where admission is
+        # intentionally disabled.
+        quota_admission: Any = None,
+        quota_role_codes: tuple[str, ...] = (),
+        quota_classroom_ids: tuple[str, ...] = (),
     ) -> tuple[TurnRecord, bool]:
         with self._lock, self._conn:
             if idempotency_key:
