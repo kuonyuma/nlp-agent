@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import Engine, create_engine, select
 
@@ -21,6 +21,8 @@ TOKEN_FIELDS = (
     "total_tokens",
 )
 
+UsageGranularity = Literal["day", "week"]
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -37,7 +39,7 @@ class UsageReadService:
 
     The service deliberately sums facts rather than reading quota balances.
     Callers receive priced totals, token totals, completeness, and—when Phase
-    2 enforcement is enabled—the current daily/monthly bucket snapshot.
+    2 enforcement is enabled—the current daily/weekly bucket snapshot.
     """
 
     def __init__(self, database: str | Engine, *, quota_enforcement: bool = False) -> None:
@@ -57,8 +59,11 @@ class UsageReadService:
         *,
         workspace_id: str | None = None,
         days: int = 30,
+        granularity: UsageGranularity = "day",
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        if granularity not in {"day", "week"}:
+            raise ValueError("granularity must be 'day' or 'week'")
         end = _utc(now or _utc_now())
         start = end - timedelta(days=max(1, days))
         rows = self._usage_rows(
@@ -73,6 +78,7 @@ class UsageReadService:
             start=start,
             end=end,
             rows=rows,
+            granularity=granularity,
         )
         if self._quota_service is not None:
             snapshot["quota"] = self._quota_service.snapshot(
@@ -145,6 +151,9 @@ class UsageReadService:
         statement = select(UsageEventModel.__table__).where(
             UsageEventModel.occurred_at >= start,
             UsageEventModel.occurred_at < end,
+            # Archived events remain available for reconciliation and audit,
+            # but must leave the operational usage view after archiving.
+            UsageEventModel.archived_at.is_(None),
         )
         if user_id is not None:
             statement = statement.where(UsageEventModel.user_id == user_id)
@@ -163,6 +172,7 @@ class UsageReadService:
         start: datetime,
         end: datetime,
         rows: list[dict[str, Any]],
+        granularity: UsageGranularity = "day",
     ) -> dict[str, Any]:
         tokens = {
             field: sum(int(row[field] or 0) for row in rows)
@@ -171,8 +181,11 @@ class UsageReadService:
         breakdown: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for row in rows:
             occurred_at = _utc(row["occurred_at"])
+            period_start, period_end = UsageReadService._period_bounds(
+                occurred_at, granularity
+            )
             key = (
-                occurred_at.date().isoformat(),
+                period_start.date().isoformat(),
                 str(row["purpose"]),
                 str(row["provider"]),
                 str(row["provider_model"]),
@@ -181,6 +194,9 @@ class UsageReadService:
                 key,
                 {
                     "day": key[0],
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "granularity": granularity,
                     "purpose": key[1],
                     "provider": key[2],
                     "provider_model": key[3],
@@ -212,6 +228,7 @@ class UsageReadService:
             "period_days": max(1, (end - start).days),
             "from": start.isoformat(),
             "to": end.isoformat(),
+            "granularity": granularity,
             "events": len(rows),
             "priced_events": len(rows) - unpriced_events,
             "unpriced_events": unpriced_events,
@@ -226,6 +243,18 @@ class UsageReadService:
                 breakdown[key] for key in sorted(breakdown)
             ],
         }
+
+    @staticmethod
+    def _period_bounds(
+        occurred_at: datetime, granularity: UsageGranularity
+    ) -> tuple[datetime, datetime]:
+        period_start = occurred_at.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        if granularity == "week":
+            period_start -= timedelta(days=period_start.weekday())
+            return period_start, period_start + timedelta(days=7)
+        return period_start, period_start + timedelta(days=1)
 
     def _observability_model_spans(
         self, *, start: datetime, end: datetime

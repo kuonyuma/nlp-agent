@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import http from "node:http";
@@ -76,8 +77,9 @@ function waitUntil<T>(subscribe: (resolve: (value: T) => void) => void, timeoutM
 }
 
 describe.sequential("real frontend API client to FastAPI integration", () => {
-  const integrationUsername = process.env.PRO_NLP_INTEGRATION_USERNAME ?? "integration";
-  const integrationPassword = process.env.PRO_NLP_INTEGRATION_PASSWORD ?? "integration-password";
+  const testRunId = randomUUID().replaceAll("-", "");
+  const integrationUsername = process.env.PRO_NLP_INTEGRATION_USERNAME ?? `integrationtest${testRunId.slice(0, 24)}`;
+  const integrationPassword = process.env.PRO_NLP_INTEGRATION_PASSWORD ?? `Integration-${testRunId}!`;
   let serverProcess: ChildProcess;
   let origin = "";
   let cookie = "";
@@ -93,7 +95,7 @@ describe.sequential("real frontend API client to FastAPI integration", () => {
       : path.join(repositoryRoot, ".venv", "bin", "python");
     const python = process.env.PRO_NLP_PYTHON ?? (existsSync(virtualEnvironmentPython) ? virtualEnvironmentPython : "python");
     const script = path.join(repositoryRoot, "tests", "support", "run_web_api_server.py");
-    serverProcess = spawn(python, [script, String(port)], { cwd: repositoryRoot, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    serverProcess = spawn(python, [script, String(port)], { cwd: repositoryRoot, env: { ...process.env, PRO_NLP_INTEGRATION_USERNAME: integrationUsername, PRO_NLP_INTEGRATION_PASSWORD: integrationPassword }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     serverProcess.stdout?.on("data", (chunk: Buffer) => { serverStdout += chunk.toString(); });
     serverProcess.stderr?.on("data", (chunk: Buffer) => { serverStderr += chunk.toString(); });
     try {

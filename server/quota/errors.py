@@ -16,7 +16,7 @@ class QuotaErrorCode(StrEnum):
     REQUEST_LIMIT = "quota_request_limit"
     CONCURRENCY_LIMIT = "quota_concurrency_limit"
     DAILY_EXHAUSTED = "quota_daily_exhausted"
-    MONTHLY_EXHAUSTED = "quota_monthly_exhausted"
+    WEEKLY_EXHAUSTED = "quota_weekly_exhausted"
     WORKSPACE_EXHAUSTED = "quota_workspace_exhausted"
     RESERVATION_CONFLICT = "quota_reservation_conflict"
     RESERVATION_NOT_ACTIVE = "quota_reservation_not_active"
@@ -26,8 +26,10 @@ class QuotaErrorCode(StrEnum):
     UPSTREAM_PROVIDER_QUOTA_EXHAUSTED = "upstream_provider_quota_exhausted"
     OVER_LIMIT = "quota_over_limit"
     POLICY_VERSION_CONFLICT = "quota_policy_version_conflict"
+    POLICY_CONFLICT = "quota_policy_conflict"
     GRANT_CONFLICT = "quota_grant_conflict"
     ADJUSTMENT_CONFLICT = "quota_adjustment_conflict"
+    BINDING_CONFLICT = "quota_binding_conflict"
     INVALID_GRANT = "quota_invalid_grant"
 
 

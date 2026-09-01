@@ -32,7 +32,7 @@ def _policy(code: str, version: str = "1") -> QuotaPolicy:
         version=version,
         request_limit_micro=1_000,
         daily_limit_micro=10_000,
-        monthly_limit_micro=100_000,
+        weekly_limit_micro=100_000,
         concurrency_limit=2,
         max_overdraft_micro=0,
         allowed_model_profiles=("economy",),
@@ -257,7 +257,7 @@ def test_phase0_commands_keep_admission_and_snapshot_inputs_typed():
     snapshot = UsageSnapshotQuery(
         user_id="user-1",
         workspace_id="workspace-1",
-        window="30d",
+        window="week",
         at=AT_START,
     )
     finish = FinishTurn(
@@ -268,7 +268,7 @@ def test_phase0_commands_keep_admission_and_snapshot_inputs_typed():
 
     assert admission.model_role == "coordinator"
     assert admission.estimated_input_tokens is None
-    assert snapshot.window == "30d"
+    assert snapshot.window == "week"
     assert finish.reservation_id == "reservation-1"
 
     with pytest.raises(ValidationError):

@@ -61,14 +61,15 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
   const [releaseNotesAttempt, setReleaseNotesAttempt] = useState(0);
   const canTeach = roles.includes("teacher") || roles.includes("developer");
   const canDevelop = roles.includes("developer");
-  const canViewQuota = permissions
-    ? permissions.includes("quota:usage:read_self")
+  const hasExplicitPermissions = Boolean(permissions?.length);
+  const canViewQuota = hasExplicitPermissions
+    ? permissions?.includes("quota:usage:read_self") ?? false
     : roles.some((role) => ["guest", "student", "teacher", "developer"].includes(role));
   const visibleSections = canViewQuota ? sections : sections.filter((item) => item.id !== "quota");
   // Server-side permissions win when present (custom RBAC roles); legacy guest
   // sessions only carry roles, so fall back to the built-in role packages.
-  const canSubmitFeedback = permissions
-    ? permissions.includes("learning:feedback:submit")
+  const canSubmitFeedback = hasExplicitPermissions
+    ? permissions?.includes("learning:feedback:submit") ?? false
     : ["student", "teacher", "developer"].some((role) => roles.includes(role));
   useEffect(() => {
     if (!open || section !== "updates" || releaseNotes !== null) return;
@@ -133,7 +134,7 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
           <p><CircleHelp size={14} />额度只读展示，分配和策略调整由开发者统一管理。</p>
         </aside>
         <div className="settings-content">
-          <header><div><strong>{visibleSections.find((item) => item.id === section)?.label}</strong><p>{section === "data" ? "数据、隐私与开发者配置集中在此管理。" : section === "quota" ? "查看当前账号在不同工作空间中的额度、用量与账务状态。" : "修改会立即保存，并在下次打开时恢复。"}</p></div><button className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}><X size={19} /></button></header>
+          <header><div><strong>{visibleSections.find((item) => item.id === section)?.label}</strong><p>{section === "data" ? "数据、隐私与开发者配置集中在此管理。" : section === "quota" ? "查看当前额度与 Token 用量。" : "修改会立即保存，并在下次打开时恢复。"}</p></div><button className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}><X size={19} /></button></header>
           <div className="settings-scroll">
             {section === "general" && <>
               <SettingGroup title="界面语言" description="语言偏好会同步保存到本地后端，并立即切换学生模式的界面语言。"><label className="settings-field"><span><Globe2 size={15} />阅读语言</span><select value={settings.locale} onChange={(event) => onChange({ locale: event.target.value })}>{supportedLocales.map((locale) => <option key={locale.code} value={locale.code}>{locale.nativeLabel} · {locale.label}</option>)}</select></label></SettingGroup>

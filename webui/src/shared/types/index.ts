@@ -535,7 +535,7 @@ export interface AuthorizationAuditSummary { period_days: number; since: string;
 export interface QuotaBucketSnapshot {
   owner_type: "user" | "workspace" | "classroom";
   owner_id: string;
-  bucket_type: "daily" | "monthly";
+  bucket_type: "daily" | "weekly";
   limit_micro: number | null;
   grant_micro: number;
   adjustment_micro: number;
@@ -552,6 +552,9 @@ export interface QuotaSnapshot {
 }
 export interface QuotaUsageBreakdown {
   day: string;
+  period_start?: string;
+  period_end?: string;
+  granularity?: "day" | "week";
   purpose: string;
   provider: string;
   provider_model: string;
@@ -570,6 +573,7 @@ export interface QuotaUsageSnapshot {
   period_days: number;
   from: string;
   to: string;
+  granularity: "day" | "week";
   events: number;
   priced_events: number;
   unpriced_events: number;
@@ -588,7 +592,7 @@ export interface QuotaPolicy {
   status: string;
   request_limit_micro: number | null;
   daily_limit_micro: number | null;
-  monthly_limit_micro: number | null;
+  weekly_limit_micro: number | null;
   concurrency_limit: number | null;
   max_overdraft_micro: number;
   allowed_model_profiles: string[];
@@ -598,6 +602,20 @@ export interface QuotaPolicy {
   created_by: string;
   created_at: string;
   updated_at: string;
+}
+export interface QuotaPolicyUpdateInput {
+  code?: string;
+  version?: string;
+  name?: string;
+  request_limit_micro?: number | null;
+  daily_limit_micro?: number | null;
+  weekly_limit_micro?: number | null;
+  concurrency_limit?: number | null;
+  max_overdraft_micro?: number;
+  allowed_model_profiles?: string[];
+  unlimited?: boolean;
+  effective_from?: string;
+  effective_until?: string | null;
 }
 export interface QuotaBinding {
   binding_id: string;
@@ -693,16 +711,19 @@ export interface QuotaCreditOperation {
   period_start: string;
   period_end: string;
   amount_micro: number;
+  grant_id?: string | null;
   effective_from: string;
   expires_at: string | null;
   reason: string;
   idempotency_key: string;
   status: string;
+  recipient_count?: number;
+  created_at?: string;
 }
 export interface QuotaCreditOperationInput {
   owner_type: "user" | "workspace" | "classroom";
   owner_id: string;
-  bucket_type: "daily" | "monthly";
+  bucket_type: "daily" | "weekly";
   period_start: string;
   period_end: string;
   amount_micro: number;
@@ -710,6 +731,25 @@ export interface QuotaCreditOperationInput {
   idempotency_key: string;
   effective_from: string;
   expires_at: string | null;
+}
+export interface QuotaRoleCreditOperationInput {
+  role_code: string;
+  bucket_type: "daily" | "weekly";
+  period_start: string;
+  period_end: string;
+  amount_micro: number;
+  reason: string;
+  idempotency_key: string;
+  effective_from: string;
+  expires_at: string | null;
+}
+export interface QuotaRoleCreditOperationResult {
+  operation_type: "gift";
+  target_type: "role";
+  target_id: string;
+  recipient_count: number;
+  items: QuotaCreditOperation[];
+  idempotency_key: string;
 }
 export interface QuotaAlert {
   alert_id: string;
@@ -735,6 +775,28 @@ export interface QuotaBucketReplay {
   expected_over_limit: boolean;
   ledger_entries: number;
   needs_repair: boolean;
+}
+export interface QuotaBucketCandidate {
+  bucket_id: string;
+  owner_type: "user" | "workspace" | "classroom";
+  owner_id: string;
+  bucket_type: "daily" | "weekly";
+  period_start: string;
+  period_end: string;
+  limit_micro: number | null;
+  consumed_micro: number;
+  reserved_micro: number;
+  over_limit: boolean;
+  updated_at: string;
+}
+export interface QuotaArchiveBatch {
+  batch_id: string;
+  cutoff_at: string;
+  event_count: number;
+  status: string;
+  actor_user_id: string | null;
+  created_at: string;
+  completed_at: string | null;
 }
 export interface QuotaPolicyExplanation {
   user_id: string;

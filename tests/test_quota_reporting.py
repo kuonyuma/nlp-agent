@@ -206,7 +206,7 @@ async def test_durable_reporter_settles_provider_usage_once(quota_engine):
                 status="active",
                 request_limit_micro=100,
                 daily_limit_micro=1_000,
-                monthly_limit_micro=10_000,
+                weekly_limit_micro=10_000,
                 concurrency_limit=2,
                 max_overdraft_micro=0,
                 allowed_model_profiles=["profile-a"],
@@ -291,7 +291,7 @@ async def test_pending_usage_can_be_reconciled_after_turn_reservation_is_closed(
                 status="active",
                 request_limit_micro=100,
                 daily_limit_micro=1_000,
-                monthly_limit_micro=10_000,
+                weekly_limit_micro=10_000,
                 concurrency_limit=2,
                 max_overdraft_micro=0,
                 allowed_model_profiles=["profile-a"],
@@ -462,6 +462,41 @@ async def test_user_usage_snapshot_can_be_scoped_to_one_workspace(quota_engine):
     assert snapshot["workspace_id"] == "workspace-1"
     assert snapshot["events"] == 1
     assert snapshot["tokens"]["total_tokens"] == 25
+
+
+@pytest.mark.asyncio
+async def test_user_usage_snapshot_can_aggregate_token_activity_by_week(quota_engine):
+    _insert_pricing_rule(quota_engine)
+    reporter = DurableModelUsageReporter(quota_engine)
+    base = _invocation()
+    monday = base.model_copy(
+        update={
+            "operation_id": str(uuid4()),
+            "started_at": datetime(2026, 8, 24, 8, tzinfo=timezone.utc),
+        }
+    )
+    sunday = base.model_copy(
+        update={
+            "operation_id": str(uuid4()),
+            "started_at": datetime(2026, 8, 30, 8, tzinfo=timezone.utc),
+        }
+    )
+    usage = CanonicalTokenUsage(input_tokens=20, output_tokens=5, total_tokens=25, source="provider")
+    await reporter.report(monday, usage, _outcome())
+    await reporter.report(sunday, usage, _outcome())
+
+    snapshot = UsageReadService(quota_engine).user_snapshot(
+        "user-1",
+        days=14,
+        granularity="week",
+        now=datetime(2026, 8, 31, tzinfo=timezone.utc),
+    )
+
+    assert snapshot["granularity"] == "week"
+    assert len(snapshot["breakdown"]) == 1
+    assert snapshot["breakdown"][0]["period_start"] == "2026-08-24T00:00:00+00:00"
+    assert snapshot["breakdown"][0]["period_end"] == "2026-08-31T00:00:00+00:00"
+    assert snapshot["breakdown"][0]["total_tokens"] == 50
 
 
 @pytest.mark.asyncio

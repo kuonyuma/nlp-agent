@@ -200,7 +200,7 @@ class QuotaPolicyModel(Base):
     daily_limit_micro: Mapped[int | None] = mapped_column(
         BIGINT(unsigned=True), nullable=True
     )
-    monthly_limit_micro: Mapped[int | None] = mapped_column(
+    weekly_limit_micro: Mapped[int | None] = mapped_column(
         BIGINT(unsigned=True), nullable=True
     )
     concurrency_limit: Mapped[int | None] = mapped_column(
@@ -260,10 +260,14 @@ class PolicyBindingModel(Base):
 
 
 class QuotaBucketModel(Base):
-    """Materialized daily/monthly counters protected by row-level locking."""
+    """Materialized daily/weekly counters protected by row-level locking."""
 
     __tablename__ = "nlp_quota_buckets"
     __table_args__ = (
+        CheckConstraint(
+            "bucket_type IN ('daily', 'weekly')",
+            name="ck_nlp_quota_buckets_bucket_type",
+        ),
         UniqueConstraint(
             "owner_type",
             "owner_id",
@@ -449,6 +453,10 @@ class QuotaGrantModel(Base):
 
     __tablename__ = "nlp_quota_grants"
     __table_args__ = (
+        CheckConstraint(
+            "bucket_type IN ('daily', 'weekly')",
+            name="ck_nlp_quota_grants_bucket_type",
+        ),
         UniqueConstraint(
             "owner_type",
             "owner_id",
@@ -504,6 +512,10 @@ class QuotaAdjustmentModel(Base):
 
     __tablename__ = "nlp_quota_adjustments"
     __table_args__ = (
+        CheckConstraint(
+            "bucket_type IN ('daily', 'weekly')",
+            name="ck_nlp_quota_adjustments_bucket_type",
+        ),
         UniqueConstraint(
             "idempotency_key",
             name="uq_nlp_quota_adjustments_idempotency_key",
@@ -538,6 +550,10 @@ class QuotaCreditOperationModel(Base):
 
     __tablename__ = "nlp_quota_credit_operations"
     __table_args__ = (
+        CheckConstraint(
+            "bucket_type IN ('daily', 'weekly')",
+            name="ck_nlp_quota_credit_operations_bucket_type",
+        ),
         UniqueConstraint(
             "idempotency_key",
             name="uq_nlp_quota_credit_operations_idempotency_key",
@@ -566,6 +582,45 @@ class QuotaCreditOperationModel(Base):
         DATETIME(fsp=6), nullable=True
     )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, default=_utc_now
+    )
+
+
+class QuotaRoleCreditOperationModel(Base):
+    """Idempotent batch intent for gifting credits to a role's members."""
+
+    __tablename__ = "nlp_quota_role_credit_operations"
+    __table_args__ = (
+        CheckConstraint(
+            "bucket_type IN ('daily', 'weekly')",
+            name="ck_nlp_quota_role_credit_operations_bucket_type",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_nlp_quota_role_credit_operations_idempotency_key",
+        ),
+        Index(
+            "ix_nlp_quota_role_credit_operations_role_created",
+            "role_code",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(UUID, primary_key=True)
+    role_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    bucket_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    amount_micro: Mapped[int] = mapped_column(BIGINT(unsigned=True), nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6), nullable=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipient_user_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DATETIME(fsp=6), nullable=False, default=_utc_now
     )
@@ -769,6 +824,7 @@ QuotaLedgerEntryModel.__table__.comment = TABLE_COMMENTS["nlp_quota_ledger_entri
 QuotaGrantModel.__table__.comment = TABLE_COMMENTS["nlp_quota_grants"]
 QuotaAdjustmentModel.__table__.comment = TABLE_COMMENTS["nlp_quota_adjustments"]
 QuotaCreditOperationModel.__table__.comment = TABLE_COMMENTS["nlp_quota_credit_operations"]
+QuotaRoleCreditOperationModel.__table__.comment = TABLE_COMMENTS["nlp_quota_role_credit_operations"]
 QuotaCreditScopeLockModel.__table__.comment = TABLE_COMMENTS["nlp_quota_credit_scope_locks"]
 QuotaDailyRollupModel.__table__.comment = TABLE_COMMENTS["nlp_quota_daily_rollups"]
 QuotaProviderBillingModel.__table__.comment = TABLE_COMMENTS["nlp_quota_provider_billing"]

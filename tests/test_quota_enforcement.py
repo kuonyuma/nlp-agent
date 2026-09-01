@@ -62,7 +62,7 @@ def _policy(
     engine,
     *,
     daily: int | None = 100,
-    monthly: int | None = 1_000,
+    weekly: int | None = 1_000,
     request: int | None = 100,
     concurrency: int | None = 2,
     overdraft: int = 0,
@@ -78,7 +78,7 @@ def _policy(
                 status="active",
                 request_limit_micro=request,
                 daily_limit_micro=daily,
-                monthly_limit_micro=monthly,
+                weekly_limit_micro=weekly,
                 concurrency_limit=concurrency,
                 max_overdraft_micro=overdraft,
                 allowed_model_profiles=["economy"],
@@ -124,8 +124,28 @@ def _command(
     )
 
 
+def test_weekly_quota_bucket_uses_monday_utc_boundary(quota_engine):
+    _policy(quota_engine, daily=None, weekly=60, request=60)
+    service = QuotaService(quota_engine, lease_seconds=60)
+
+    first = _admit(service, _command(turn_id="weekly-boundary-1"))
+    second = _admit(service, _command(turn_id="weekly-boundary-2"))
+
+    assert first.allowed is True
+    assert isinstance(second, QuotaRejectedError)
+    assert second.problem.code is QuotaErrorCode.WEEKLY_EXHAUSTED
+    with quota_engine.connect() as connection:
+        bucket = connection.execute(
+            select(QuotaBucketModel.__table__).where(
+                QuotaBucketModel.bucket_type == "weekly"
+            )
+        ).mappings().one()
+    assert bucket["period_start"] == datetime(2026, 8, 24)
+    assert bucket["period_end"] == datetime(2026, 8, 31)
+
+
 def test_concurrent_admission_cannot_both_reserve_the_last_balance(quota_engine):
-    _policy(quota_engine, daily=100, monthly=1_000, request=100)
+    _policy(quota_engine, daily=100, weekly=1_000, request=100)
     service = QuotaService(quota_engine, lease_seconds=60)
     commands = [_command(turn_id=f"turn-{index}") for index in range(2)]
 
@@ -278,7 +298,7 @@ def test_turn_idempotency_replays_one_reservation_and_one_reserve_ledger(quota_e
     with quota_engine.connect() as connection:
         assert connection.execute(select(QuotaReservationModel.__table__)).fetchall().__len__() == 1
         ledger = connection.execute(select(QuotaLedgerEntryModel.__table__)).mappings().all()
-    assert len(ledger) == 2  # daily and monthly bucket entries
+    assert len(ledger) == 2  # daily and weekly bucket entries
 
 
 def test_turn_creation_rollback_removes_reservation_bucket_and_ledger(quota_engine):
@@ -373,7 +393,7 @@ def test_admission_persists_a_database_concurrency_counter(quota_engine):
 
 
 def test_zero_override_uses_versioned_pricing_for_conservative_admission(quota_engine):
-    _policy(quota_engine, daily=1_000, monthly=10_000, request=1_000)
+    _policy(quota_engine, daily=1_000, weekly=10_000, request=1_000)
     with quota_engine.begin() as connection:
         connection.execute(
             insert(PricingRuleModel).values(
@@ -409,7 +429,7 @@ def test_zero_override_uses_versioned_pricing_for_conservative_admission(quota_e
 
 
 def test_settlement_is_idempotent_records_actual_over_limit_and_blocks_next_admission(quota_engine):
-    _policy(quota_engine, daily=100, monthly=1_000, request=100, overdraft=0)
+    _policy(quota_engine, daily=100, weekly=1_000, request=100, overdraft=0)
     service = QuotaService(quota_engine)
     admitted = service.admit_turn(
         _command(turn_id="turn-settle", estimated_micro=60),

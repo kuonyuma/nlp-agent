@@ -53,7 +53,9 @@ Gift 和 Reset 都通过 `QuotaCreditOperationModel` 保存操作意图，再委
 
 ## 7. UsageEvent 归档与分区策略
 
-归档接口只给旧 UsageEvent 写入 `archived_at` 和 `archive_batch_id`，并记录 `QuotaUsageArchiveBatchModel`。当前实现不物理删除，避免影响对账、审计和 Ledger 重放。
+归档接口只给旧 UsageEvent 写入 `archived_at` 和 `archive_batch_id`，并记录 `QuotaUsageArchiveBatchModel`。当前实现不物理删除，避免影响对账、审计和 Ledger 重放；当没有新的事件可归档时直接返回，不创建空批次。
+
+归档标记写入后，个人用量、Daily Rollup、课堂聚合等日常运营查询必须过滤 `archived_at IS NULL`，因此归档事件不会继续出现在活动图和运营统计中；对账、审计和余额恢复查询仍可读取原始事件。确认完成留存期后，开发者可显式执行清理：只删除已归档、已结算且没有 Provider 账单引用的事件，Ledger 与归档批次清单仍保留；系统不会在普通归档请求中自动物理删除。
 
 生产 MySQL 建议按 `occurred_at` 做月度 RANGE 分区，例如 `p202608` 覆盖 `[2026-08-01, 2026-09-01)`。新增月份前先建立下一分区，归档完成且经过账单对账、审计留存确认后，才允许运维导出并删除/交换历史分区。应用提供 `partition_strategy()` 生成分区计划，但物理 `ALTER TABLE` 必须由经过审批的数据库变更执行，不能由请求接口自动 Drop。
 

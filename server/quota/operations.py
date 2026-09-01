@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
@@ -17,7 +18,12 @@ from sqlalchemy import Engine, case, create_engine, delete, func, insert, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
-from server.infrastructure.mysql.models import ClassroomMemberModel
+from server.infrastructure.mysql.models import (
+    ClassroomMemberModel,
+    RoleModel,
+    UserModel,
+    UserRoleModel,
+)
 from server.quota.management import QuotaManagementService
 from server.quota.models import (
     QuotaAlertModel,
@@ -30,6 +36,7 @@ from server.quota.models import (
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
     QuotaProviderBillingModel,
+    QuotaRoleCreditOperationModel,
     QuotaUsageArchiveBatchModel,
     UsageEventModel,
 )
@@ -52,7 +59,7 @@ _REPLAY_ENTRY_TYPES = (
     "billing_adjustment",
 )
 _OWNER_TYPES = {"user", "workspace", "classroom"}
-_BUCKET_TYPES = {"daily", "monthly"}
+_BUCKET_TYPES = {"daily", "weekly"}
 
 
 def _bounded_idempotency_key(prefix: str, *parts: object) -> str:
@@ -712,6 +719,7 @@ class QuotaOperationsService:
         *,
         operation_type: str,
         source_type: str,
+        connection: Connection | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         required = ("owner_type", "owner_id", "bucket_type", "period_start", "period_end", "amount_micro", "actor_user_id", "reason", "idempotency_key", "effective_from")
@@ -724,7 +732,12 @@ class QuotaOperationsService:
         if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
             raise ValueError("amount_micro must be a non-negative integer")
         operation_key = str(kwargs["idempotency_key"])
-        with self._engine.begin() as connection:
+        transaction = (
+            self._engine.begin()
+            if connection is None
+            else nullcontext(connection)
+        )
+        with transaction as connection:
             # Serialize both the global idempotency key and the target
             # owner-period scope before inspecting or writing either record.
             # This keeps a concurrent reset from expiring another reset's
@@ -842,6 +855,203 @@ class QuotaOperationsService:
             ).mappings().one()
             return self._credit_payload(connection, row)
 
+    def gift_credits_for_role(
+        self,
+        management: QuotaManagementService,
+        *,
+        role_code: str,
+        bucket_type: str,
+        period_start: datetime,
+        period_end: datetime,
+        amount_micro: int,
+        actor_user_id: str,
+        reason: str,
+        idempotency_key: str,
+        effective_from: datetime,
+        expires_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Gift credits to every active user currently assigned to a role.
+
+        Role is only a selection scope.  The durable grants remain user-owned
+        so admission, settlement, snapshots, and later revocation all use the
+        same bucket semantics as an individually gifted grant.  A durable
+        batch record retains the complete request and recipient list, while
+        deterministic per-recipient keys make retries safe.
+        """
+        role_code = str(role_code).strip()
+        if not role_code:
+            raise ValueError("role_code is required")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+        with self._engine.begin() as connection:
+            self._lock_credit_scope(
+                connection, _credit_idempotency_scope_key(idempotency_key)
+            )
+            existing = connection.execute(
+                select(QuotaRoleCreditOperationModel)
+                .where(
+                    QuotaRoleCreditOperationModel.idempotency_key
+                    == idempotency_key
+                )
+                .with_for_update()
+            ).mappings().first()
+            if existing is not None:
+                self._assert_role_credit_operation_matches(
+                    existing,
+                    role_code=role_code,
+                    bucket_type=bucket_type,
+                    period_start=period_start,
+                    period_end=period_end,
+                    amount_micro=amount_micro,
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                    effective_from=effective_from,
+                    expires_at=expires_at,
+                )
+                user_ids = [str(user_id) for user_id in existing["recipient_user_ids"]]
+                items = [
+                    self._credit_operation(
+                        management,
+                        operation_type="gift",
+                        source_type="role",
+                        connection=connection,
+                        owner_type="user",
+                        owner_id=user_id,
+                        bucket_type=bucket_type,
+                        period_start=period_start,
+                        period_end=period_end,
+                        amount_micro=amount_micro,
+                        source_id=role_code,
+                        actor_user_id=actor_user_id,
+                        reason=reason,
+                        idempotency_key=_bounded_idempotency_key(
+                            "role-gift", idempotency_key, role_code, user_id
+                        ),
+                        effective_from=effective_from,
+                        expires_at=expires_at,
+                    )
+                    for user_id in user_ids
+                ]
+                return {
+                    "operation_type": "gift",
+                    "target_type": "role",
+                    "target_id": role_code,
+                    "recipient_count": len(items),
+                    "items": items,
+                    "idempotency_key": idempotency_key,
+                }
+
+            role_id = connection.execute(
+                select(RoleModel.id)
+                .where(
+                    RoleModel.code == role_code,
+                    RoleModel.status == "active",
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if role_id is None:
+                raise ValueError("active role does not exist")
+
+            now = _db_time(datetime.now(UTC))
+            user_ids = connection.execute(
+                select(UserModel.id)
+                .join(UserRoleModel, UserRoleModel.user_id == UserModel.id)
+                .where(
+                    UserRoleModel.role_id == role_id,
+                    UserModel.status == "active",
+                    UserModel.deleted_at.is_(None),
+                    (
+                        UserRoleModel.expires_at.is_(None)
+                        | (UserRoleModel.expires_at > now)
+                    ),
+                )
+                .order_by(UserModel.id)
+            ).scalars().all()
+            if not user_ids:
+                raise ValueError("role has no active users")
+
+            items = [
+                self._credit_operation(
+                    management,
+                    operation_type="gift",
+                    source_type="role",
+                    connection=connection,
+                    owner_type="user",
+                    owner_id=user_id,
+                    bucket_type=bucket_type,
+                    period_start=period_start,
+                    period_end=period_end,
+                    amount_micro=amount_micro,
+                    source_id=role_code,
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                    idempotency_key=_bounded_idempotency_key(
+                        "role-gift", idempotency_key, role_code, user_id
+                    ),
+                    effective_from=effective_from,
+                    expires_at=expires_at,
+                )
+                for user_id in user_ids
+            ]
+            connection.execute(
+                insert(QuotaRoleCreditOperationModel).values(
+                    id=str(uuid.uuid4()),
+                    role_code=role_code,
+                    bucket_type=bucket_type,
+                    period_start=_db_time(period_start),
+                    period_end=_db_time(period_end),
+                    amount_micro=amount_micro,
+                    actor_user_id=actor_user_id,
+                    reason=reason,
+                    effective_from=_db_time(effective_from),
+                    expires_at=(
+                        _db_time(expires_at) if expires_at is not None else None
+                    ),
+                    idempotency_key=idempotency_key,
+                    recipient_user_ids=user_ids,
+                    created_at=_db_time(datetime.now(UTC)),
+                )
+            )
+            return {
+                "operation_type": "gift",
+                "target_type": "role",
+                "target_id": role_code,
+                "recipient_count": len(items),
+                "items": items,
+                "idempotency_key": idempotency_key,
+            }
+
+    @staticmethod
+    def _assert_role_credit_operation_matches(
+        row: Mapping[str, Any],
+        *,
+        role_code: str,
+        bucket_type: str,
+        period_start: datetime,
+        period_end: datetime,
+        amount_micro: int,
+        actor_user_id: str,
+        reason: str,
+        effective_from: datetime,
+        expires_at: datetime | None,
+    ) -> None:
+        same = (
+            row["role_code"] == role_code
+            and row["bucket_type"] == bucket_type
+            and row["period_start"] == _db_time(period_start)
+            and row["period_end"] == _db_time(period_end)
+            and int(row["amount_micro"]) == int(amount_micro)
+            and row["actor_user_id"] == actor_user_id
+            and row["reason"] == reason
+            and row["effective_from"] == _db_time(effective_from)
+            and row["expires_at"]
+            == (_db_time(expires_at) if expires_at is not None else None)
+        )
+        if not same:
+            raise ValueError(
+                "role credit operation idempotency key conflicts with existing operation"
+            )
+
     @staticmethod
     def _assert_credit_operation_matches(row: Mapping[str, Any], operation_type: str, kwargs: Mapping[str, Any]) -> None:
         same = (
@@ -876,6 +1086,8 @@ class QuotaOperationsService:
             "owner_type": row["owner_type"],
             "owner_id": row["owner_id"],
             "bucket_type": row["bucket_type"],
+            "period_start": _payload_value(row["period_start"]),
+            "period_end": _payload_value(row["period_end"]),
             "amount_micro": row["amount_micro"],
             "grant_id": row["grant_id"],
             "reason": row["reason"],
@@ -885,6 +1097,118 @@ class QuotaOperationsService:
             "status": grant_status or "unknown",
             "created_at": _payload_value(row["created_at"]),
         }
+
+    def list_credit_operations(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return operator gift/reset history, including role batches.
+
+        The individual grant rows are the authoritative per-owner records;
+        role batches are included as separate entries so the developer can
+        audit the original intent and recipient count without expanding every
+        recipient in the page.
+        """
+        bounded_limit = max(1, min(limit, 1000))
+        with self._engine.connect() as connection:
+            operations = [
+                self._credit_payload(connection, row)
+                for row in connection.execute(
+                    select(QuotaCreditOperationModel)
+                    .order_by(QuotaCreditOperationModel.created_at.desc())
+                    .limit(bounded_limit)
+                ).mappings()
+            ]
+            role_operations = [
+                {
+                    "operation_id": row["id"],
+                    "operation_type": "gift",
+                    "owner_type": "role",
+                    "owner_id": row["role_code"],
+                    "bucket_type": row["bucket_type"],
+                    "period_start": _payload_value(row["period_start"]),
+                    "period_end": _payload_value(row["period_end"]),
+                    "amount_micro": row["amount_micro"],
+                    "grant_id": None,
+                    "reason": row["reason"],
+                    "idempotency_key": row["idempotency_key"],
+                    "effective_from": _payload_value(row["effective_from"]),
+                    "expires_at": _payload_value(row["expires_at"]),
+                    "status": "batch",
+                    "recipient_count": len(row["recipient_user_ids"] or []),
+                    "created_at": _payload_value(row["created_at"]),
+                }
+                for row in connection.execute(
+                    select(QuotaRoleCreditOperationModel)
+                    .order_by(QuotaRoleCreditOperationModel.created_at.desc())
+                    .limit(bounded_limit)
+                ).mappings()
+            ]
+        return sorted(
+            (*operations, *role_operations),
+            key=lambda item: str(item.get("created_at") or ""),
+            reverse=True,
+        )[:bounded_limit]
+
+    def list_buckets(
+        self,
+        *,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """List materialized buckets for recovery selection.
+
+        Recovery is intentionally allowed to inspect historical periods, so
+        this endpoint does not filter by the current time.  It only exposes
+        identifiers and counters needed to choose a bucket; replay remains
+        the authority for the expected balance.
+        """
+        bounded_limit = max(1, min(limit, 1000))
+        with self._engine.connect() as connection:
+            statement = select(QuotaBucketModel).order_by(
+                QuotaBucketModel.updated_at.desc()
+            )
+            if owner_type:
+                statement = statement.where(QuotaBucketModel.owner_type == owner_type)
+            if owner_id:
+                statement = statement.where(QuotaBucketModel.owner_id == owner_id)
+            rows = connection.execute(statement.limit(bounded_limit)).mappings()
+            return [
+                {
+                    "bucket_id": row["id"],
+                    "owner_type": row["owner_type"],
+                    "owner_id": row["owner_id"],
+                    "bucket_type": row["bucket_type"],
+                    "period_start": _payload_value(row["period_start"]),
+                    "period_end": _payload_value(row["period_end"]),
+                    "limit_micro": row["limit_micro"],
+                    "consumed_micro": row["consumed_micro"],
+                    "reserved_micro": row["reserved_micro"],
+                    "over_limit": bool(row["over_limit"]),
+                    "updated_at": _payload_value(row["updated_at"]),
+                }
+                for row in rows
+            ]
+
+    def list_archive_batches(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """List non-destructive archive manifests for operator audit."""
+        bounded_limit = max(1, min(limit, 1000))
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                select(QuotaUsageArchiveBatchModel)
+                .order_by(QuotaUsageArchiveBatchModel.created_at.desc())
+                .limit(bounded_limit)
+            ).mappings()
+            return [
+                {
+                    "batch_id": row["id"],
+                    "cutoff_at": _payload_value(row["cutoff_at"]),
+                    "event_count": row["event_count"],
+                    "status": row["status"],
+                    "actor_user_id": row["actor_user_id"],
+                    "created_at": _payload_value(row["created_at"]),
+                    "completed_at": _payload_value(row["completed_at"]),
+                }
+                for row in rows
+            ]
 
     # ---- Daily rollups, alerts, and archive ---------------------------
 
@@ -919,6 +1243,9 @@ class QuotaOperationsService:
                 .where(
                     UsageEventModel.occurred_at >= _db_time(start),
                     UsageEventModel.occurred_at < _db_time(end),
+                    # Rollups are an operational read model.  Rebuilding a
+                    # period must not reintroduce events already archived.
+                    UsageEventModel.archived_at.is_(None),
                 )
                 .group_by(
                     UsageEventModel.user_id,
@@ -1138,6 +1465,13 @@ class QuotaOperationsService:
                     .with_for_update(skip_locked=True)
                 ).scalars()
             )
+            if not event_ids:
+                return {
+                    "batch_id": None,
+                    "archived_events": 0,
+                    "cutoff_at": cutoff.isoformat(),
+                    "deleted_events": 0,
+                }
             batch_id = str(uuid.uuid4())
             if event_ids:
                 connection.execute(
@@ -1174,6 +1508,64 @@ class QuotaOperationsService:
                 "archived_events": len(claimed_ids),
                 "cutoff_at": cutoff.isoformat(),
                 "deleted_events": 0,
+            }
+
+    def purge_archived_usage_events(
+        self, *, before: datetime, actor_user_id: str | None = None, batch_size: int = 10_000
+    ) -> dict[str, Any]:
+        """Physically remove settled events that were archived previously.
+
+        Archiving is the safe, reversible operational step. Purging is an
+        explicit retention action and only accepts rows that have an archive
+        marker, have settled usage, and are not referenced by a billing line.
+        Ledger and archive manifests remain untouched.
+        """
+        del actor_user_id  # retained for the audited service boundary
+        cutoff = _utc(before)
+        with self._engine.begin() as connection:
+            event_ids = list(
+                connection.execute(
+                    select(UsageEventModel.id)
+                    .where(
+                        UsageEventModel.archived_at.is_not(None),
+                        UsageEventModel.occurred_at < _db_time(cutoff),
+                        UsageEventModel.usage_status.in_(("exact", "estimated")),
+                    )
+                    .order_by(UsageEventModel.occurred_at)
+                    .limit(max(1, min(batch_size, 100_000)))
+                    .with_for_update(skip_locked=True)
+                ).scalars()
+            )
+            if not event_ids:
+                return {
+                    "purged_events": 0,
+                    "deleted_events": 0,
+                    "cutoff_at": cutoff.isoformat(),
+                }
+            billing_references = list(
+                connection.execute(
+                    select(QuotaProviderBillingModel.id).where(
+                        QuotaProviderBillingModel.matched_usage_event_id.in_(event_ids)
+                    )
+                ).scalars()
+            )
+            if billing_references:
+                raise ValueError(
+                    "cannot purge UsageEvents still referenced by provider billing; "
+                    "retain or purge the billing records first"
+                )
+            deleted = connection.execute(
+                delete(UsageEventModel).where(
+                    UsageEventModel.id.in_(event_ids),
+                    UsageEventModel.archived_at.is_not(None),
+                    UsageEventModel.usage_status.in_(("exact", "estimated")),
+                )
+            )
+            deleted_events = int(deleted.rowcount or 0)
+            return {
+                "purged_events": deleted_events,
+                "deleted_events": deleted_events,
+                "cutoff_at": cutoff.isoformat(),
             }
 
     @staticmethod
@@ -1223,6 +1615,7 @@ class QuotaOperationsService:
                     UsageEventModel.workspace_id == workspace_id,
                     UsageEventModel.occurred_at >= _db_time(start),
                     UsageEventModel.occurred_at < _db_time(end),
+                    UsageEventModel.archived_at.is_(None),
                 )
             ).mappings().all()
         priced = [row for row in rows if row["credits_micro"] is not None]

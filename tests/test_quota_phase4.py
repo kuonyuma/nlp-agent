@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Column, MetaData, String, Table, create_engine, insert, select, update
+from sqlalchemy import Column, DateTime, MetaData, String, Table, create_engine, insert, select, update
 from sqlalchemy.pool import StaticPool
 
 from server.quota.models import (
@@ -21,6 +21,7 @@ from server.quota.models import (
     QuotaPolicyModel,
     QuotaProviderBillingModel,
     QuotaReservationModel,
+    QuotaRoleCreditOperationModel,
     QuotaUsageArchiveBatchModel,
     QuotaAlertModel,
     UsageEventModel,
@@ -28,6 +29,7 @@ from server.quota.models import (
 from server.quota.management import QuotaManagementService
 from server.quota.operations import QuotaOperationsService
 from server.quota.service import QuotaService
+from server.quota.usage import UsageReadService
 from server.quota.contracts import AdmitTurn
 
 
@@ -41,6 +43,28 @@ _CLASSROOM_MEMBER_TABLE = Table(
     Column("user_id", String(128), primary_key=True),
     Column("member_role", String(16), nullable=False),
     Column("status", String(16), nullable=False),
+)
+_RBAC_METADATA = MetaData()
+_USER_TABLE = Table(
+    "nlp_users",
+    _RBAC_METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("status", String(16), nullable=False),
+    Column("deleted_at", DateTime, nullable=True),
+)
+_ROLE_TABLE = Table(
+    "nlp_roles",
+    _RBAC_METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("code", String(64), unique=True, nullable=False),
+    Column("status", String(16), nullable=False),
+)
+_USER_ROLE_TABLE = Table(
+    "nlp_user_roles",
+    _RBAC_METADATA,
+    Column("user_id", String(36), primary_key=True),
+    Column("role_id", String(36), primary_key=True),
+    Column("expires_at", DateTime, nullable=True),
 )
 
 
@@ -62,6 +86,7 @@ def _engine():
         QuotaGrantModel,
         QuotaAdjustmentModel,
         QuotaCreditOperationModel,
+        QuotaRoleCreditOperationModel,
         QuotaCreditScopeLockModel,
         QuotaDailyRollupModel,
         QuotaProviderBillingModel,
@@ -70,6 +95,7 @@ def _engine():
     ):
         model.__table__.create(engine)
     _CLASSROOM_MEMBER_TABLE.create(engine)
+    _RBAC_METADATA.create_all(engine)
     return engine
 
 
@@ -85,7 +111,7 @@ def _policy_and_binding(engine, *, daily: int = 1_000, max_overdraft: int = 0):
                 status="active",
                 request_limit_micro=1_000,
                 daily_limit_micro=daily,
-                monthly_limit_micro=None,
+                weekly_limit_micro=None,
                 concurrency_limit=10,
                 max_overdraft_micro=max_overdraft,
                 allowed_model_profiles=["economy"],
@@ -261,10 +287,13 @@ def test_ledger_replay_over_limit_includes_grants_adjustments_and_overdraft():
     with engine.connect() as connection:
         bucket_id = connection.execute(select(QuotaBucketModel.id)).scalar_one()
 
-    replay = QuotaOperationsService(engine).replay_bucket(bucket_id)
+    operations = QuotaOperationsService(engine)
+    replay = operations.replay_bucket(bucket_id)
+    candidates = operations.list_buckets(owner_type="user", owner_id="user-1")
 
     assert replay.expected_consumed_micro == 135
     assert replay.expected_over_limit is False
+    assert candidates[0]["bucket_id"] == bucket_id
 
 
 def test_snapshot_recomputes_over_limit_from_current_grant_capacity():
@@ -508,7 +537,7 @@ def test_gift_and_reset_credits_are_idempotent_and_append_only():
         period_end=start + timedelta(days=1),
         amount_micro=50,
         actor_user_id="developer-1",
-        reason="monthly reset",
+        reason="weekly reset",
         idempotency_key="reset-1",
         effective_from=NOW,
     )
@@ -521,7 +550,7 @@ def test_gift_and_reset_credits_are_idempotent_and_append_only():
         period_end=start + timedelta(days=1),
         amount_micro=50,
         actor_user_id="developer-1",
-        reason="monthly reset",
+        reason="weekly reset",
         idempotency_key="reset-1",
         effective_from=NOW,
     )
@@ -531,6 +560,73 @@ def test_gift_and_reset_credits_are_idempotent_and_append_only():
     with engine.connect() as connection:
         assert connection.execute(select(QuotaGrantModel)).fetchall().__len__() == 2
         assert connection.execute(select(QuotaCreditOperationModel)).fetchall().__len__() == 2
+
+
+def test_role_gift_materializes_user_grants_and_replays():
+    engine = _engine()
+    role_id = "role-student"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(_ROLE_TABLE).values(id=role_id, code="student", status="active")
+        )
+        connection.execute(
+            insert(_USER_TABLE),
+            [
+                {"id": "user-a", "status": "active", "deleted_at": None},
+                {"id": "user-b", "status": "active", "deleted_at": None},
+                {"id": "user-disabled", "status": "disabled", "deleted_at": None},
+            ],
+        )
+        connection.execute(
+            insert(_USER_ROLE_TABLE),
+            [
+                {"user_id": "user-a", "role_id": role_id, "expires_at": None},
+                {"user_id": "user-b", "role_id": role_id, "expires_at": None},
+                {"user_id": "user-disabled", "role_id": role_id, "expires_at": None},
+            ],
+        )
+
+    management = QuotaManagementService(engine)
+    operations = QuotaOperationsService(engine)
+    start = NOW.replace(hour=0)
+    kwargs = {
+        "role_code": "student",
+        "bucket_type": "daily",
+        "period_start": start,
+        "period_end": start + timedelta(days=1),
+        "amount_micro": 300,
+        "actor_user_id": "developer-1",
+        "reason": "student welcome",
+        "idempotency_key": "role-gift-1",
+        "effective_from": NOW,
+    }
+    result = operations.gift_credits_for_role(management, **kwargs)
+
+    assert result["recipient_count"] == 2
+    with engine.connect() as connection:
+        grants = connection.execute(
+            select(
+                QuotaGrantModel.owner_id,
+                QuotaGrantModel.allocated_micro,
+                QuotaGrantModel.source_type,
+            ).order_by(QuotaGrantModel.owner_id)
+        ).all()
+    assert grants == [("user-a", 300, "role"), ("user-b", 300, "role")]
+
+    replay = operations.gift_credits_for_role(management, **kwargs)
+    assert replay["recipient_count"] == 2
+    with pytest.raises(ValueError, match="role credit operation idempotency key conflicts"):
+        operations.gift_credits_for_role(
+            management,
+            **{**kwargs, "amount_micro": 400},
+        )
+    with engine.connect() as connection:
+        assert connection.execute(select(QuotaGrantModel)).fetchall().__len__() == 2
+        assert connection.execute(select(QuotaRoleCreditOperationModel)).fetchall().__len__() == 1
+    history = operations.list_credit_operations()
+    role_history = next(item for item in history if item["owner_type"] == "role")
+    assert role_history["owner_id"] == "student"
+    assert role_history["recipient_count"] == 2
 
 
 def test_daily_rollup_alert_and_archive_are_off_path_from_usage_events():
@@ -572,6 +668,101 @@ def test_daily_rollup_alert_and_archive_are_off_path_from_usage_events():
         batch = connection.execute(select(QuotaUsageArchiveBatchModel)).mappings().one()
     assert original["credits_micro"] == 10
     assert original["archive_batch_id"] == batch["id"]
+
+    empty_archive = operations.archive_usage_events(
+        before=NOW - timedelta(hours=1), actor_user_id="operator-1"
+    )
+    assert empty_archive["archived_events"] == 0
+    assert empty_archive["batch_id"] is None
+    with engine.connect() as connection:
+        assert connection.execute(select(QuotaUsageArchiveBatchModel)).fetchall().__len__() == 1
+
+    purged = operations.purge_archived_usage_events(
+        before=NOW, actor_user_id="operator-1"
+    )
+    assert purged["deleted_events"] == 3
+    with engine.connect() as connection:
+        remaining = connection.execute(select(UsageEventModel)).mappings().all()
+        assert len(remaining) == 1
+        assert remaining[0]["operation_id"] == "op-rollup-spike"
+        assert connection.execute(select(QuotaUsageArchiveBatchModel)).fetchall().__len__() == 1
+
+
+def test_purge_keeps_archived_event_when_provider_billing_still_references_it():
+    engine = _engine()
+    with engine.begin() as connection:
+        connection.execute(
+            insert(UsageEventModel).values(
+                _usage_event(
+                    operation_id="op-archive-billing",
+                    occurred_at=NOW - timedelta(days=2),
+                )
+            )
+        )
+
+    operations = QuotaOperationsService(engine)
+    operations.archive_usage_events(before=NOW, actor_user_id="operator-1")
+    operations.reconcile_provider_billing(
+        [
+            {
+                "provider": "provider-a",
+                "statement_id": "archive-billing-1",
+                "operation_id": "op-archive-billing",
+                "billed_credits_micro": 10,
+                "billed_tokens": {"total_tokens": 10},
+                "billed_at": NOW,
+                "idempotency_key": "archive-billing-1",
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="still referenced by provider billing"):
+        operations.purge_archived_usage_events(before=NOW, actor_user_id="operator-1")
+    with engine.connect() as connection:
+        assert connection.execute(select(UsageEventModel)).fetchall().__len__() == 1
+
+
+def test_archived_events_leave_operational_usage_views_but_remain_auditable():
+    engine = _engine()
+    archived_at = NOW - timedelta(days=1)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(UsageEventModel).values(
+                _usage_event(
+                    operation_id="op-archive-old",
+                    occurred_at=NOW - timedelta(days=2),
+                )
+            )
+        )
+        connection.execute(
+            insert(UsageEventModel).values(
+                _usage_event(
+                    operation_id="op-archive-live",
+                    occurred_at=NOW - timedelta(hours=1),
+                )
+            )
+        )
+
+    operations = QuotaOperationsService(engine)
+    result = operations.archive_usage_events(
+        before=archived_at, actor_user_id="operator-1"
+    )
+    assert result["archived_events"] == 1
+
+    snapshot = UsageReadService(engine).user_snapshot(
+        "user-1", days=7, now=NOW
+    )
+    assert snapshot["events"] == 1
+    assert snapshot["tokens"]["total_tokens"] == 10
+
+    assert operations.build_daily_rollup((NOW - timedelta(days=2)).date()) == 0
+    with engine.connect() as connection:
+        archived = connection.execute(
+            select(UsageEventModel).where(
+                UsageEventModel.operation_id == "op-archive-old"
+            )
+        ).mappings().one()
+    assert archived["archive_batch_id"] == result["batch_id"]
 
 
 def test_alert_status_can_be_acknowledged_and_resolved():

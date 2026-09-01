@@ -29,18 +29,19 @@ describe("ProfileDialog quota section", () => {
     fireEvent.click(await screen.findByRole("button", { name: "额度与用量" }));
 
     await waitFor(() => expect(methods.getQuota).toHaveBeenCalledWith("workspace-a"));
-    expect(methods.getUsage).toHaveBeenCalledWith(30, "workspace-a");
-    expect(screen.getByRole("heading", { name: "额度与用量" })).toBeVisible();
-    expect(screen.getByRole("combobox", { name: "工作空间" })).toHaveValue("workspace-a");
+    expect(methods.getUsage).toHaveBeenCalledWith(7, "workspace-a", "day");
+    expect(methods.getUsage).toHaveBeenCalledWith(182, "workspace-a", "day");
+    expect(methods.getUsage).toHaveBeenCalledWith(182, "workspace-a", "week");
+    expect(await screen.findByText("Token 活动")).toBeVisible();
+    expect(screen.queryByRole("combobox", { name: "工作空间" })).not.toBeInTheDocument();
   });
 
-  it("switches the quota scope without leaving the settings dialog", async () => {
+  it("keeps the quota view inside the settings dialog without exposing workspace scope", async () => {
     render(<ProfileDialog open onClose={vi.fn()} sessionRoles={["student"]} userId="user-1" workspaceIds={["workspace-a", "workspace-b"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "额度与用量" }));
 
-    fireEvent.change(await screen.findByRole("combobox", { name: "工作空间" }), { target: { value: "workspace-b" } });
-
-    await waitFor(() => expect(methods.getQuota).toHaveBeenCalledWith("workspace-b"));
+    await waitFor(() => expect(methods.getQuota).toHaveBeenCalledWith("workspace-a"));
+    expect(screen.queryByRole("combobox", { name: "工作空间" })).not.toBeInTheDocument();
     expect(window.location.pathname).not.toBe("/usage");
   });
 });

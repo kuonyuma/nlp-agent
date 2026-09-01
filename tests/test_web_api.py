@@ -10,6 +10,7 @@ import pytest
 from argon2 import PasswordHasher
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 from starlette.websockets import WebSocketDisconnect
 
 from core.identity import AuthenticatedPrincipal
@@ -241,11 +242,31 @@ def test_usage_me_forwards_workspace_scope_to_usage_reader(web_app):
     app.state.quota_usage_reader = reader
     with TestClient(app) as client:
         authenticate(client)
-        response = client.get("/api/v1/usage/me?workspace_id=default&days=7")
+        response = client.get("/api/v1/usage/me?workspace_id=default&days=7&granularity=week")
 
     assert response.status_code == 200
     assert response.json() == {"user_id": "nova", "workspace_id": "default"}
-    assert reader.kwargs == ("nova", {"workspace_id": "default", "days": 7})
+    assert reader.kwargs == ("nova", {"workspace_id": "default", "days": 7, "granularity": "week"})
+
+
+def test_quota_me_reports_database_schema_upgrade_instead_of_internal_error(web_app):
+    app, _engine = web_app
+
+    class OutdatedQuotaService:
+        def snapshot(self, **_kwargs):
+            raise OperationalError(
+                "select quota policy",
+                {},
+                RuntimeError("(1054, 'Unknown column weekly_limit_micro')"),
+            )
+
+    app.state.quota_read_service = OutdatedQuotaService()
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.get("/api/v1/quota/me")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "quota_schema_outdated"
 
 
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):

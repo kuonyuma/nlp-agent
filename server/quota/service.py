@@ -6,7 +6,6 @@ import threading
 import time
 import uuid
 import logging
-from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Sequence, TypeVar
 
@@ -42,6 +41,7 @@ from server.quota.models import (
     QuotaPolicyModel,
     QuotaProviderBillingModel,
     QuotaReservationModel,
+    QuotaRoleCreditOperationModel,
     QuotaUsageArchiveBatchModel,
 )
 from server.infrastructure.mysql.models import ClassroomModel
@@ -399,7 +399,7 @@ class QuotaService:
                         code = (
                             QuotaErrorCode.DAILY_EXHAUSTED
                             if bucket_type == "daily"
-                            else QuotaErrorCode.MONTHLY_EXHAUSTED
+                            else QuotaErrorCode.WEEKLY_EXHAUSTED
                         )
                     raise self._rejection(
                         code,
@@ -427,7 +427,7 @@ class QuotaService:
             "version": policy.version,
             "request_limit_micro": policy.request_limit_micro,
             "daily_limit_micro": policy.daily_limit_micro,
-            "monthly_limit_micro": policy.monthly_limit_micro,
+            "weekly_limit_micro": policy.weekly_limit_micro,
             "concurrency_limit": policy.concurrency_limit,
             "max_overdraft_micro": policy.max_overdraft_micro,
             "overdrafts": {
@@ -1469,6 +1469,7 @@ class QuotaService:
                 QuotaGrantModel,
                 QuotaAdjustmentModel,
                 QuotaCreditOperationModel,
+                QuotaRoleCreditOperationModel,
                 QuotaCreditScopeLockModel,
                 QuotaDailyRollupModel,
                 QuotaProviderBillingModel,
@@ -1477,6 +1478,16 @@ class QuotaService:
             ):
                 primary_key = next(iter(model.__table__.primary_key.columns))
                 connection.execute(select(primary_key).limit(1)).first()
+            # A legacy database can still have the quota-management tables but
+            # miss the daily/weekly policy column introduced by the period
+            # migration. Probe the fields used by both admission and policy
+            # explanation so readiness fails before requests reach the route.
+            connection.execute(
+                select(
+                    QuotaPolicyModel.daily_limit_micro,
+                    QuotaPolicyModel.weekly_limit_micro,
+                ).limit(1)
+            ).first()
             # The scope-lock migration also adds the timestamps used to make
             # Gift/Reset requests replay-safe.  Probe those columns so a
             # partially upgraded production process fails readiness early.
@@ -1602,7 +1613,7 @@ class QuotaService:
                         version=policy_row["version"],
                         request_limit_micro=policy_row["request_limit_micro"],
                         daily_limit_micro=policy_row["daily_limit_micro"],
-                        monthly_limit_micro=policy_row["monthly_limit_micro"],
+                        weekly_limit_micro=policy_row["weekly_limit_micro"],
                         concurrency_limit=policy_row["concurrency_limit"],
                         max_overdraft_micro=policy_row["max_overdraft_micro"],
                         allowed_model_profiles=tuple(policy_row["allowed_model_profiles"] or ()),
@@ -1635,14 +1646,12 @@ class QuotaService:
         if policy.daily_limit_micro is not None:
             start = at.replace(hour=0, minute=0, second=0, microsecond=0)
             periods.append(("daily", start, start + timedelta(days=1), policy.daily_limit_micro))
-        if policy.monthly_limit_micro is not None:
-            start = at.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            days = monthrange(start.year, start.month)[1]
-            if start.month == 12:
-                end = start.replace(year=start.year + 1, month=1)
-            else:
-                end = start.replace(month=start.month + 1)
-            periods.append(("monthly", start, end, policy.monthly_limit_micro))
+        if policy.weekly_limit_micro is not None:
+            start = (at - timedelta(days=at.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            end = start + timedelta(days=7)
+            periods.append(("weekly", start, end, policy.weekly_limit_micro))
         return periods
 
     @staticmethod

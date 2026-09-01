@@ -10,7 +10,7 @@ from sqlalchemy import Column, MetaData, String, Table, create_engine, func, ins
 from sqlalchemy.pool import StaticPool
 
 from server.quota.contracts import AdmitTurn, FinishTurn
-from server.quota.errors import QuotaErrorCode, QuotaRejectedError
+from server.quota.errors import QuotaDomainError, QuotaErrorCode, QuotaRejectedError
 from server.quota.management import QuotaManagementService
 from server.quota.models import (
     PolicyBindingModel,
@@ -106,7 +106,7 @@ def _policy(
     code: str,
     version: str,
     daily: int | None = 100,
-    monthly: int | None = 1_000,
+    weekly: int | None = 1_000,
     request: int | None = 100,
     concurrency: int | None = 2,
     allowed_profiles: list[str] | None = None,
@@ -124,7 +124,7 @@ def _policy(
                 status=status,
                 request_limit_micro=request,
                 daily_limit_micro=daily,
-                monthly_limit_micro=monthly,
+                weekly_limit_micro=weekly,
                 concurrency_limit=concurrency,
                 max_overdraft_micro=max_overdraft,
                 allowed_model_profiles=allowed_profiles or ["economy"],
@@ -155,14 +155,14 @@ def _bind(engine, *, subject_type: str, subject_id: str, policy_id: str, priorit
 
 def test_classroom_policy_from_another_workspace_is_not_applied(quota_engine):
     user_policy = _policy(
-        quota_engine, code="workspace-a-user", version="1", daily=100, monthly=None
+        quota_engine, code="workspace-a-user", version="1", daily=100, weekly=None
     )
     foreign_classroom_policy = _policy(
         quota_engine,
         code="workspace-b-classroom",
         version="1",
         daily=1,
-        monthly=None,
+        weekly=None,
         request=1,
     )
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
@@ -244,8 +244,8 @@ def test_policy_resolution_returns_one_explainable_base_and_separate_workspace_p
 
 
 def test_user_and_workspace_buckets_are_reserved_and_settled_together(quota_engine):
-    user_policy = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
-    workspace_policy = _policy(quota_engine, code="workspace", version="1", daily=50, monthly=None)
+    user_policy = _policy(quota_engine, code="user", version="1", daily=100, weekly=None)
+    workspace_policy = _policy(quota_engine, code="workspace", version="1", daily=50, weekly=None)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
     _bind(quota_engine, subject_type="workspace", subject_id="workspace-1", policy_id=workspace_policy)
     service = QuotaService(quota_engine)
@@ -315,6 +315,7 @@ def test_grant_revoke_expire_and_manual_adjustment_are_idempotent(quota_engine):
     )
     adjustment = management.create_adjustment(**adjustment_input)
     assert management.create_adjustment(**adjustment_input)["adjustment_id"] == adjustment["adjustment_id"]
+    assert management.get_adjustment(adjustment["adjustment_id"])["reason"] == "support compensation"
 
     revoked = management.revoke_grant(grant["grant_id"], actor_user_id="developer-1", idempotency_key="revoke-1")
     assert revoked["status"] == "revoked"
@@ -400,6 +401,67 @@ def test_snapshot_exposes_active_grant_before_first_admission(quota_engine):
     ]
 
 
+def test_policy_and_binding_lifecycle_has_safe_crud_semantics(quota_engine):
+    management = QuotaManagementService(quota_engine)
+    draft = management.create_policy(
+        code="developer-crud",
+        version="1",
+        name="Developer CRUD draft",
+        daily_limit_micro=100,
+        weekly_limit_micro=500,
+        request_limit_micro=50,
+        concurrency_limit=2,
+        created_by="developer-1",
+        effective_from=NOW,
+        status="draft",
+    )
+
+    assert management.get_policy(draft["policy_id"])["status"] == "draft"
+    updated = management.update_policy(
+        draft["policy_id"],
+        actor_user_id="developer-1",
+        name="Developer CRUD updated",
+        daily_limit_micro=200,
+    )
+    assert updated["name"] == "Developer CRUD updated"
+    assert updated["daily_limit_micro"] == 200
+
+    archived = management.archive_policy(draft["policy_id"], actor_user_id="developer-1")
+    assert archived["status"] == "archived"
+    assert management.archive_policy(draft["policy_id"], actor_user_id="developer-2")["status"] == "archived"
+    with pytest.raises(QuotaDomainError) as error:
+        management.update_policy(
+            draft["policy_id"],
+            actor_user_id="developer-1",
+            name="must not change",
+        )
+    assert error.value.code is QuotaErrorCode.POLICY_CONFLICT
+
+    active = management.create_policy(
+        code="developer-binding",
+        version="1",
+        name="Developer binding",
+        daily_limit_micro=100,
+        weekly_limit_micro=None,
+        request_limit_micro=100,
+        concurrency_limit=2,
+        created_by="developer-1",
+        effective_from=NOW,
+        status="active",
+    )
+    binding = management.bind_policy(
+        subject_type="default",
+        subject_id="*",
+        policy_id=active["policy_id"],
+        priority=1,
+        effective_from=NOW,
+    )
+    assert management.get_binding(binding["binding_id"])["status"] == "active"
+    retired = management.retire_binding(binding["binding_id"], actor_user_id="developer-1")
+    assert retired["status"] == "retired"
+    assert management.retire_binding(binding["binding_id"], actor_user_id="developer-2")["status"] == "retired"
+
+
 def test_policy_version_and_manual_adjustment_are_recorded_without_mutating_history(quota_engine):
     old_id = _policy(quota_engine, code="student", version="1", daily=100)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=old_id)
@@ -411,7 +473,7 @@ def test_policy_version_and_manual_adjustment_are_recorded_without_mutating_hist
         version="2",
         name="Student v2",
         daily_limit_micro=200,
-        monthly_limit_micro=None,
+        weekly_limit_micro=None,
         request_limit_micro=200,
         concurrency_limit=2,
         created_by="developer-1",
@@ -428,8 +490,8 @@ def test_policy_version_and_manual_adjustment_are_recorded_without_mutating_hist
 
 
 def test_workspace_budget_rejects_after_user_budget_would_still_allow(quota_engine):
-    user_policy = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
-    workspace_policy = _policy(quota_engine, code="workspace", version="1", daily=30, monthly=None)
+    user_policy = _policy(quota_engine, code="user", version="1", daily=100, weekly=None)
+    workspace_policy = _policy(quota_engine, code="workspace", version="1", daily=30, weekly=None)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
     _bind(quota_engine, subject_type="workspace", subject_id="workspace-1", policy_id=workspace_policy)
     service = QuotaService(quota_engine)
@@ -440,7 +502,7 @@ def test_workspace_budget_rejects_after_user_budget_would_still_allow(quota_engi
 
 
 def test_active_grant_and_manual_adjustment_extend_the_atomic_bucket_balance(quota_engine):
-    user_policy = _policy(quota_engine, code="user", version="1", daily=10, monthly=None)
+    user_policy = _policy(quota_engine, code="user", version="1", daily=10, weekly=None)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
     start = NOW.replace(hour=0)
     end = start + timedelta(days=1)
@@ -480,13 +542,13 @@ def test_active_grant_and_manual_adjustment_extend_the_atomic_bucket_balance(quo
 
 
 def test_settlement_uses_workspace_policy_overdraft_for_workspace_bucket(quota_engine):
-    user_policy = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
+    user_policy = _policy(quota_engine, code="user", version="1", daily=100, weekly=None)
     workspace_policy = _policy(
         quota_engine,
         code="workspace",
         version="1",
         daily=100,
-        monthly=None,
+        weekly=None,
         max_overdraft=20,
     )
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
@@ -517,8 +579,8 @@ def test_settlement_uses_workspace_policy_overdraft_for_workspace_bucket(quota_e
 
 
 def test_classroom_grant_is_reserved_in_a_shared_classroom_bucket(quota_engine):
-    user_policy = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
-    classroom_policy = _policy(quota_engine, code="classroom", version="1", daily=100, monthly=None)
+    user_policy = _policy(quota_engine, code="user", version="1", daily=100, weekly=None)
+    classroom_policy = _policy(quota_engine, code="classroom", version="1", daily=100, weekly=None)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
     _bind(quota_engine, subject_type="classroom", subject_id="classroom-1", policy_id=classroom_policy)
     QuotaManagementService(quota_engine).create_grant(
@@ -559,7 +621,7 @@ def test_classroom_grant_is_reserved_in_a_shared_classroom_bucket(quota_engine):
 
 
 def test_classroom_capacity_without_policy_fails_closed(quota_engine):
-    user_policy = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
+    user_policy = _policy(quota_engine, code="user", version="1", daily=100, weekly=None)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=user_policy)
     QuotaManagementService(quota_engine).create_grant(
         owner_type="classroom",
@@ -647,7 +709,7 @@ def test_concurrent_same_grant_idempotency_returns_one_committed_result(quota_en
 
 
 def test_quota_mutations_publish_snapshot_notifications(quota_engine):
-    policy_id = _policy(quota_engine, code="user", version="1", daily=100, monthly=None)
+    policy_id = _policy(quota_engine, code="user", version="1", daily=100, weekly=None)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=policy_id)
     notifications: list[tuple[str | None, str | None]] = []
     service = QuotaService(

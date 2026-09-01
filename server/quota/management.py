@@ -24,7 +24,7 @@ from server.quota.policy import resolve_effective_policy
 
 UTC = timezone.utc
 _OWNER_TYPES = {"user", "workspace", "classroom"}
-_BUCKET_TYPES = {"daily", "monthly"}
+_BUCKET_TYPES = {"daily", "weekly"}
 _SOURCE_TYPES = {"role", "purchase", "grant", "adjustment", "reset"}
 
 
@@ -82,6 +82,34 @@ class QuotaManagementService:
         if self._owns_engine:
             self._engine.dispose()
 
+    @staticmethod
+    def _validate_policy_values(
+        *,
+        code: str,
+        version: str,
+        name: str,
+        request_limit_micro: int | None,
+        daily_limit_micro: int | None,
+        weekly_limit_micro: int | None,
+        concurrency_limit: int | None,
+        max_overdraft_micro: int,
+    ) -> None:
+        if not code or not version or not name:
+            raise ValueError("policy code, version, and name are required")
+        for field_name, value in (
+            ("request_limit_micro", request_limit_micro),
+            ("daily_limit_micro", daily_limit_micro),
+            ("weekly_limit_micro", weekly_limit_micro),
+            ("concurrency_limit", concurrency_limit),
+            ("max_overdraft_micro", max_overdraft_micro),
+        ):
+            if value is not None and (isinstance(value, bool) or value < 0):
+                raise ValueError(f"{field_name} must be a non-negative integer")
+
+    @staticmethod
+    def _stored_utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
     def create_policy(
         self,
         *,
@@ -90,7 +118,7 @@ class QuotaManagementService:
         name: str,
         request_limit_micro: int | None = None,
         daily_limit_micro: int | None = None,
-        monthly_limit_micro: int | None = None,
+        weekly_limit_micro: int | None = None,
         concurrency_limit: int | None = None,
         max_overdraft_micro: int = 0,
         allowed_model_profiles: Sequence[str] = (),
@@ -105,15 +133,16 @@ class QuotaManagementService:
             effective_until = _utc(effective_until)
             if effective_until <= effective_from:
                 raise ValueError("effective_until must be after effective_from")
-        for field_name, value in (
-            ("request_limit_micro", request_limit_micro),
-            ("daily_limit_micro", daily_limit_micro),
-            ("monthly_limit_micro", monthly_limit_micro),
-            ("concurrency_limit", concurrency_limit),
-            ("max_overdraft_micro", max_overdraft_micro),
-        ):
-            if value is not None and (isinstance(value, bool) or value < 0):
-                raise ValueError(f"{field_name} must be a non-negative integer")
+        self._validate_policy_values(
+            code=code,
+            version=version,
+            name=name,
+            request_limit_micro=request_limit_micro,
+            daily_limit_micro=daily_limit_micro,
+            weekly_limit_micro=weekly_limit_micro,
+            concurrency_limit=concurrency_limit,
+            max_overdraft_micro=max_overdraft_micro,
+        )
         if status not in {"draft", "active"}:
             raise ValueError("policy status must be draft or active")
         with self._engine.begin() as connection:
@@ -138,7 +167,7 @@ class QuotaManagementService:
                     status=status,
                     request_limit_micro=request_limit_micro,
                     daily_limit_micro=daily_limit_micro,
-                    monthly_limit_micro=monthly_limit_micro,
+                    weekly_limit_micro=weekly_limit_micro,
                     concurrency_limit=concurrency_limit,
                     max_overdraft_micro=max_overdraft_micro,
                     allowed_model_profiles=list(allowed_model_profiles),
@@ -162,6 +191,13 @@ class QuotaManagementService:
             ).mappings().first()
             if policy is None:
                 raise QuotaDomainError(QuotaErrorCode.POLICY_NOT_FOUND, "Policy does not exist")
+            if policy["status"] == "active":
+                return self._policy_payload(policy)
+            if policy["status"] != "draft":
+                raise QuotaDomainError(
+                    QuotaErrorCode.POLICY_CONFLICT,
+                    "Only a draft policy can be published",
+                )
             # Publishing makes this immutable version eligible for a new
             # binding. Existing bindings continue to point at their prior
             # version until the developer explicitly publishes a replacement
@@ -175,6 +211,134 @@ class QuotaManagementService:
                 select(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id)
             ).mappings().one()
         return {**self._policy_payload(row), "published_by": actor_user_id}
+
+    def get_policy(self, policy_id: str) -> dict[str, Any]:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id)
+            ).mappings().first()
+        if row is None:
+            raise QuotaDomainError(QuotaErrorCode.POLICY_NOT_FOUND, "Policy does not exist")
+        return self._policy_payload(row)
+
+    def update_policy(
+        self,
+        policy_id: str,
+        *,
+        actor_user_id: str,
+        **changes: Any,
+    ) -> dict[str, Any]:
+        allowed = {
+            "code",
+            "version",
+            "name",
+            "request_limit_micro",
+            "daily_limit_micro",
+            "weekly_limit_micro",
+            "concurrency_limit",
+            "max_overdraft_micro",
+            "allowed_model_profiles",
+            "unlimited",
+            "effective_from",
+            "effective_until",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unsupported policy fields: {', '.join(sorted(unknown))}")
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(QuotaPolicyModel)
+                .where(QuotaPolicyModel.id == policy_id)
+                .with_for_update()
+            ).mappings().first()
+            if row is None:
+                raise QuotaDomainError(QuotaErrorCode.POLICY_NOT_FOUND, "Policy does not exist")
+            if row["status"] != "draft":
+                raise QuotaDomainError(
+                    QuotaErrorCode.POLICY_CONFLICT,
+                    "Published policies are immutable; create a new version instead",
+                )
+            merged = {
+                key: row[key]
+                for key in (
+                    "code",
+                    "version",
+                    "name",
+                    "request_limit_micro",
+                    "daily_limit_micro",
+                    "weekly_limit_micro",
+                    "concurrency_limit",
+                    "max_overdraft_micro",
+                    "allowed_model_profiles",
+                    "unlimited",
+                    "effective_from",
+                    "effective_until",
+                )
+            }
+            merged.update(changes)
+            effective_from = self._stored_utc(merged["effective_from"])
+            effective_until = merged["effective_until"]
+            if effective_until is not None:
+                effective_until = self._stored_utc(effective_until)
+                if effective_until <= effective_from:
+                    raise ValueError("effective_until must be after effective_from")
+            self._validate_policy_values(
+                code=merged["code"],
+                version=merged["version"],
+                name=merged["name"],
+                request_limit_micro=merged["request_limit_micro"],
+                daily_limit_micro=merged["daily_limit_micro"],
+                weekly_limit_micro=merged["weekly_limit_micro"],
+                concurrency_limit=merged["concurrency_limit"],
+                max_overdraft_micro=merged["max_overdraft_micro"],
+            )
+            values = {
+                **merged,
+                "effective_from": _db_time(effective_from),
+                "effective_until": _db_time(effective_until) if effective_until else None,
+                "updated_at": _db_time(datetime.now(UTC)),
+            }
+            try:
+                connection.execute(
+                    update(QuotaPolicyModel)
+                    .where(QuotaPolicyModel.id == policy_id)
+                    .values(**values)
+                )
+            except IntegrityError as error:
+                raise QuotaDomainError(
+                    QuotaErrorCode.POLICY_VERSION_CONFLICT,
+                    "Policy code and version already exist",
+                ) from error
+            updated = connection.execute(
+                select(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id)
+            ).mappings().one()
+        return {**self._policy_payload(updated), "updated_by": actor_user_id}
+
+    def archive_policy(self, policy_id: str, *, actor_user_id: str) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(QuotaPolicyModel)
+                .where(QuotaPolicyModel.id == policy_id)
+                .with_for_update()
+            ).mappings().first()
+            if row is None:
+                raise QuotaDomainError(QuotaErrorCode.POLICY_NOT_FOUND, "Policy does not exist")
+            if row["status"] == "archived":
+                return self._policy_payload(row)
+            if row["status"] != "draft":
+                raise QuotaDomainError(
+                    QuotaErrorCode.POLICY_CONFLICT,
+                    "Only a draft policy can be archived; published versions are immutable",
+                )
+            connection.execute(
+                update(QuotaPolicyModel)
+                .where(QuotaPolicyModel.id == policy_id)
+                .values(status="archived", updated_at=_db_time(datetime.now(UTC)))
+            )
+            archived = connection.execute(
+                select(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id)
+            ).mappings().one()
+        return {**self._policy_payload(archived), "archived_by": actor_user_id}
 
     def list_policies(self, *, code: str | None = None) -> list[dict[str, Any]]:
         with self._engine.connect() as connection:
@@ -272,6 +436,50 @@ class QuotaManagementService:
                     )
                 )
             return result
+
+    def get_binding(self, binding_id: str) -> dict[str, Any]:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(
+                    *PolicyBindingModel.__table__.c,
+                    QuotaPolicyModel.code.label("policy_code"),
+                    QuotaPolicyModel.version.label("policy_version"),
+                )
+                .join(QuotaPolicyModel, QuotaPolicyModel.id == PolicyBindingModel.policy_id)
+                .where(PolicyBindingModel.id == binding_id)
+            ).mappings().first()
+        if row is None:
+            raise QuotaDomainError(QuotaErrorCode.BINDING_CONFLICT, "Policy binding does not exist")
+        return self._binding_payload(row, {"code": row["policy_code"], "version": row["policy_version"]})
+
+    def retire_binding(self, binding_id: str, *, actor_user_id: str) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(PolicyBindingModel)
+                .where(PolicyBindingModel.id == binding_id)
+                .with_for_update()
+            ).mappings().first()
+            if row is None:
+                raise QuotaDomainError(QuotaErrorCode.BINDING_CONFLICT, "Policy binding does not exist")
+            if row["status"] == "active":
+                connection.execute(
+                    update(PolicyBindingModel)
+                    .where(PolicyBindingModel.id == binding_id)
+                    .values(status="retired", updated_at=_db_time(datetime.now(UTC)))
+                )
+            updated = connection.execute(
+                select(
+                    *PolicyBindingModel.__table__.c,
+                    QuotaPolicyModel.code.label("policy_code"),
+                    QuotaPolicyModel.version.label("policy_version"),
+                )
+                .join(QuotaPolicyModel, QuotaPolicyModel.id == PolicyBindingModel.policy_id)
+                .where(PolicyBindingModel.id == binding_id)
+            ).mappings().one()
+        return {
+            **self._binding_payload(updated, {"code": updated["policy_code"], "version": updated["policy_version"]}),
+            "retired_by": actor_user_id,
+        }
 
     def explain_policy(
         self,
@@ -665,6 +873,18 @@ class QuotaManagementService:
             ).mappings().one()
         return self._adjustment_payload(row)
 
+    def get_adjustment(self, adjustment_id: str) -> dict[str, Any]:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(QuotaAdjustmentModel).where(QuotaAdjustmentModel.id == adjustment_id)
+            ).mappings().first()
+        if row is None:
+            raise QuotaDomainError(
+                QuotaErrorCode.ADJUSTMENT_CONFLICT,
+                "Adjustment does not exist",
+            )
+        return self._adjustment_payload(row)
+
     def list_adjustments(self, *, owner_type: str | None = None, owner_id: str | None = None) -> list[dict[str, Any]]:
         with self._engine.connect() as connection:
             statement = select(QuotaAdjustmentModel).order_by(QuotaAdjustmentModel.created_at.desc())
@@ -684,7 +904,7 @@ class QuotaManagementService:
             "status": row["status"],
             "request_limit_micro": row["request_limit_micro"],
             "daily_limit_micro": row["daily_limit_micro"],
-            "monthly_limit_micro": row["monthly_limit_micro"],
+            "weekly_limit_micro": row["weekly_limit_micro"],
             "concurrency_limit": row["concurrency_limit"],
             "max_overdraft_micro": row["max_overdraft_micro"],
             "allowed_model_profiles": list(row["allowed_model_profiles"] or []),
@@ -768,7 +988,7 @@ class QuotaManagementService:
             "limits": {
                 "request_limit_micro": policy.request_limit_micro,
                 "daily_limit_micro": policy.daily_limit_micro,
-                "monthly_limit_micro": policy.monthly_limit_micro,
+                "weekly_limit_micro": policy.weekly_limit_micro,
                 "concurrency_limit": policy.concurrency_limit,
             },
         }
@@ -876,7 +1096,7 @@ class QuotaManagementService:
                         version=policy["version"],
                         request_limit_micro=policy["request_limit_micro"],
                         daily_limit_micro=policy["daily_limit_micro"],
-                        monthly_limit_micro=policy["monthly_limit_micro"],
+                        weekly_limit_micro=policy["weekly_limit_micro"],
                         concurrency_limit=policy["concurrency_limit"],
                         max_overdraft_micro=policy["max_overdraft_micro"],
                         allowed_model_profiles=tuple(policy["allowed_model_profiles"] or ()),

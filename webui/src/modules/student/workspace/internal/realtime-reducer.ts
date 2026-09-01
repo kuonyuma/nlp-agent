@@ -26,7 +26,7 @@ function toolDetail(event: ServerEvent): string | undefined {
 function quotaErrorMessage(event: ServerEvent): string | undefined {
   const messages: Record<string, string> = {
     quota_daily_exhausted: "今日额度已用尽",
-    quota_monthly_exhausted: "本月额度已用尽",
+    quota_weekly_exhausted: "本周额度已用尽",
     quota_workspace_exhausted: "工作区额度已用尽",
     quota_request_limit: "本次请求预计超过单次额度限制",
     quota_concurrency_limit: "当前并发请求已达上限，请稍后重试",

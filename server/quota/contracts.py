@@ -28,7 +28,7 @@ ReservationStatus = Literal[
     "reserved", "running", "settling", "settled", "released", "expired"
 ]
 ModelRole = Literal["coordinator", "worker", "utility"]
-UsageWindow = Literal["today", "7d", "30d", "daily", "monthly"]
+UsageWindow = Literal["day", "week"]
 
 
 class QuotaFrozenModel(BaseModel):
@@ -51,7 +51,7 @@ class QuotaPolicy(QuotaFrozenModel):
     version: str = Field(min_length=1)
     request_limit_micro: StrictNonNegativeInt | None = None
     daily_limit_micro: StrictNonNegativeInt | None = None
-    monthly_limit_micro: StrictNonNegativeInt | None = None
+    weekly_limit_micro: StrictNonNegativeInt | None = None
     concurrency_limit: StrictNonNegativeInt | None = None
     max_overdraft_micro: StrictNonNegativeInt = 0
     allowed_model_profiles: tuple[str, ...] = ()
@@ -178,7 +178,7 @@ class UsageSnapshotQuery(QuotaFrozenModel):
 
     user_id: str = Field(min_length=1)
     workspace_id: str | None = None
-    window: UsageWindow = "30d"
+    window: UsageWindow = "day"
     at: datetime
 
     @field_validator("at")

@@ -201,14 +201,31 @@ class QuotaPolicyBody(StrictModel):
     name: str = Field(min_length=1, max_length=255)
     request_limit_micro: StrictInt | None = Field(default=None, ge=0)
     daily_limit_micro: StrictInt | None = Field(default=None, ge=0)
-    monthly_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    weekly_limit_micro: StrictInt | None = Field(default=None, ge=0)
     concurrency_limit: StrictInt | None = Field(default=None, ge=0)
     max_overdraft_micro: StrictInt = Field(default=0, ge=0)
     allowed_model_profiles: list[str] = Field(default_factory=list, max_length=128)
     unlimited: bool = False
     effective_from: datetime
     effective_until: datetime | None = None
-    status: Literal["draft", "active"] = "draft"
+    # Publishing is a separate audited action.  Accepting ``active`` here
+    # would let a caller bypass the publish workflow and its validation.
+    status: Literal["draft"] = "draft"
+
+
+class QuotaPolicyUpdateBody(StrictModel):
+    code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
+    version: str | None = Field(default=None, min_length=1, max_length=64)
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    request_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    daily_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    weekly_limit_micro: StrictInt | None = Field(default=None, ge=0)
+    concurrency_limit: StrictInt | None = Field(default=None, ge=0)
+    max_overdraft_micro: StrictInt | None = Field(default=None, ge=0)
+    allowed_model_profiles: list[str] | None = Field(default=None, max_length=128)
+    unlimited: bool | None = None
+    effective_from: datetime | None = None
+    effective_until: datetime | None = None
 
 
 class QuotaBindingBody(StrictModel):
@@ -223,7 +240,7 @@ class QuotaBindingBody(StrictModel):
 class QuotaGrantBody(StrictModel):
     owner_type: Literal["user", "workspace", "classroom"]
     owner_id: str = Field(min_length=1, max_length=128)
-    bucket_type: Literal["daily", "monthly"]
+    bucket_type: Literal["daily", "weekly"]
     period_start: datetime
     period_end: datetime
     allocated_micro: StrictInt = Field(ge=0)
@@ -238,7 +255,7 @@ class QuotaGrantBody(StrictModel):
 class QuotaAdjustmentBody(StrictModel):
     owner_type: Literal["user", "workspace", "classroom"]
     owner_id: str = Field(min_length=1, max_length=128)
-    bucket_type: Literal["daily", "monthly"]
+    bucket_type: Literal["daily", "weekly"]
     period_start: datetime
     period_end: datetime
     amount_micro: StrictInt
@@ -267,7 +284,19 @@ class QuotaBillingReconcileBody(StrictModel):
 class QuotaCreditOperationBody(StrictModel):
     owner_type: Literal["user", "workspace", "classroom"]
     owner_id: str = Field(min_length=1, max_length=128)
-    bucket_type: Literal["daily", "monthly"]
+    bucket_type: Literal["daily", "weekly"]
+    period_start: datetime
+    period_end: datetime
+    amount_micro: StrictInt = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=255)
+    effective_from: datetime
+    expires_at: datetime | None = None
+
+
+class QuotaRoleCreditOperationBody(StrictModel):
+    role_code: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,63}$")
+    bucket_type: Literal["daily", "weekly"]
     period_start: datetime
     period_end: datetime
     amount_micro: StrictInt = Field(ge=0)

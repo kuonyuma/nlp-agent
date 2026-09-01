@@ -212,9 +212,12 @@ describe("SettingsDialog", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "额度与用量" }));
 
-    expect(await screen.findByRole("heading", { name: "额度与用量" })).toBeVisible();
+    expect(await screen.findByText("Token 活动")).toBeVisible();
+    expect(screen.queryByText("查看当前账号在不同工作空间中的额度、用量与账务状态。")).not.toBeInTheDocument();
     await waitFor(() => expect(getQuotaMock).toHaveBeenCalledWith("workspace-a"));
-    expect(getUsageMock).toHaveBeenCalledWith(30, "workspace-a");
+    expect(getUsageMock).toHaveBeenCalledWith(7, "workspace-a", "day");
+    expect(getUsageMock).toHaveBeenCalledWith(182, "workspace-a", "day");
+    expect(getUsageMock).toHaveBeenCalledWith(182, "workspace-a", "week");
   });
 
   it("shows personal quota inside settings for developers", () => {
@@ -225,6 +228,12 @@ describe("SettingsDialog", () => {
 
   it("shows personal quota inside settings for guests", () => {
     render(<SettingsDialog {...baseProps} roles={["guest"]} />);
+
+    expect(screen.getByRole("button", { name: "额度与用量" })).toBeVisible();
+  });
+
+  it("treats an empty compatibility permission list as the built-in role package", () => {
+    render(<SettingsDialog {...baseProps} roles={["student"]} permissions={[]} />);
 
     expect(screen.getByRole("button", { name: "额度与用量" })).toBeVisible();
   });
