@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import io
 import json
+import time
 import zipfile
 
 import pytest
@@ -267,6 +268,37 @@ def test_quota_me_reports_database_schema_upgrade_instead_of_internal_error(web_
 
     assert response.status_code == 503
     assert response.json()["code"] == "quota_schema_outdated"
+
+
+def test_login_sets_httponly_cookie_reports_expiry_and_refreshes_on_activity(web_app):
+    """The real login link: response body, Set-Cookie attributes and the
+    sliding-cookie refresh that keeps a TTL increase from stranding existing
+    sessions."""
+    app, _engine = web_app
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"username": "nova", "password": "test-password"},
+            headers={"Origin": "http://testserver"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["csrf_token"]
+        assert body["expires_at"] > time.time()
+
+        set_cookie = response.headers.get("set-cookie", "")
+        assert set_cookie.startswith("nlp_session=")
+        assert "HttpOnly" in set_cookie
+        assert "Max-Age=86400" in set_cookie
+        assert "SameSite=lax" in set_cookie
+
+        # The issued cookie authenticates a follow-up request, and that request
+        # re-issues the cookie with the current Max-Age (sliding session).
+        refreshed = client.get("/api/v1/auth/session")
+        assert refreshed.status_code == 200
+        assert refreshed.json()["user_id"] == "nova"
+        refreshed_cookie = refreshed.headers.get("set-cookie", "")
+        assert "Max-Age=86400" in refreshed_cookie
 
 
 def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app):

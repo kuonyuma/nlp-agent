@@ -102,6 +102,20 @@ export interface TeachingGoals {
   target_level: "beginner" | "intermediate" | "advanced";
 }
 
+export interface TeacherAnalysisAnnotations {
+  workspace_id: string;
+  focused: string[];
+  ignored: string[];
+  notes: Record<string, string>;
+}
+
+export interface TeacherDataCompleteness {
+  complete: boolean;
+  evidence_truncated: boolean;
+  criterion_truncated: boolean;
+  message: string | null;
+}
+
 export type AvailabilityStatus = "enabled" | "disabled";
 export const DEFAULT_QUESTION_TYPES = ["简答", "选择题", "判断题", "填空题", "编程题", "代码阅读题", "计算题", "论述题"] as const;
 export type BlueprintStatus = "draft" | AvailabilityStatus;
@@ -256,6 +270,8 @@ export interface LearningAnalysisDiagnosis {
   attempt_count: number;
   correct_count: number;
   mastery_rate: number | null;
+  /** Granularity of mastery_rate/average_score: currently exercise-level (整题级). */
+  mastery_basis?: "exercise";
   previous_mastery_rate: number | null;
   trend: LearningAnalysisTrend;
   problem_type: LearningAnalysisProblemType;
@@ -326,6 +342,7 @@ export interface TeacherOverview {
   workspace_id: string;
   period_days: number;
   goals: TeachingGoals;
+  annotations: TeacherAnalysisAnnotations;
   revision: number;
   updated_at: string | null;
   summary: {
@@ -356,6 +373,8 @@ export interface TeacherOverview {
   weak_topics: WeakTopic[];
   knowledge_point_stats: KnowledgePointStat[];
   learning_analysis?: TeacherLearningAnalysis;
+  truncated?: boolean;
+  data_completeness?: TeacherDataCompleteness;
 }
 
 export interface SessionSummary {
@@ -365,6 +384,8 @@ export interface SessionSummary {
   channel: string;
   created_at?: string | number;
   last_active?: string | number;
+  title?: string;
+  title_is_manual?: boolean;
 }
 
 export interface SessionListResponse {

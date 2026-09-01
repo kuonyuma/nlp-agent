@@ -54,8 +54,10 @@ from server.quota.notifications import (
 )
 from server.quota.operations import QuotaOperationsService
 from server.quota.service import QuotaService
+from server.session.summary import summary_sweep_loop
 from server.web.contracts import (
     CreateSessionBody,
+    RenameSessionBody,
     LoginBody,
     ReplaceUserRolesBody,
     ReplaceRolePermissionsBody,
@@ -120,7 +122,9 @@ from server.teacher.models import (
     ReviewBlueprint,
     TeacherBookImportApplyRequest,
     TeacherBookImportPreviewRequest,
+    TeacherAnalysisAnnotations,
     TeacherAIAnalysisRequest,
+    UpdateTeacherAnalysisAnnotations,
     UpdateTeacherBookPage,
     UpdateTeacherCatalog,
     UpdateTeachingGoals,
@@ -534,9 +538,22 @@ def create_app(
             asyncio.create_task(reconcile_sandbox_leases(), name="sandbox-lease-reconciler")
             if gateway.authorization_session_factory is not None else None
         )
+
+        async def run_summary_sweep() -> None:
+            # Durable backfill for titles lost to a restart; the lease claim in
+            # ``generate_and_store_summary`` deduplicates it against the Worker.
+            await summary_sweep_loop(gateway.authorization_session_factory)
+
+        summary_sweeper = (
+            asyncio.create_task(run_summary_sweep(), name="session-summary-sweep")
+            if gateway.authorization_session_factory is not None else None
+        )
         try:
             yield
         finally:
+            if summary_sweeper is not None:
+                summary_sweeper.cancel()
+                await asyncio.gather(summary_sweeper, return_exceptions=True)
             if sandbox_reconciler is not None:
                 sandbox_reconciler.cancel()
                 await asyncio.gather(sandbox_reconciler, return_exceptions=True)
@@ -647,6 +664,29 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Cache-Control"] = "no-store"
+
+        # Sliding session cookie: keep the browser cookie's Max-Age in step with
+        # the server-side sliding expiry so a TTL increase also extends cookies
+        # issued under the previous TTL.  Skip when the endpoint already touched
+        # the cookie (login/guest set it, logout deletes it).
+        active_auth = auth if request.app.state.auth_injected else database_auth
+        claims = getattr(request.state, "auth_claims", None)
+        cookie_already_set = any(
+            header.split("=", 1)[0].strip().lower() == active_auth.cookie_name.lower()
+            for header in response.headers.getlist("set-cookie")
+        )
+        if claims is not None and not cookie_already_set:
+            token = request.cookies.get(active_auth.cookie_name)
+            if token:
+                response.set_cookie(
+                    active_auth.cookie_name,
+                    token,
+                    max_age=active_auth.ttl_s,
+                    httponly=True,
+                    secure=cookie_secure,
+                    samesite="lax",
+                    path="/",
+                )
         return response
 
     async def current_claims(
@@ -2316,6 +2356,27 @@ def create_app(
         context = await request.app.state.gateway.sessions.resolve(principal, session_id)
         return context.model_dump(mode="json")
 
+    @app.patch("/api/v1/sessions/{session_id}", tags=["sessions"])
+    async def rename_session(
+        session_id: str,
+        body: RenameSessionBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        result = await request.app.state.gateway.sessions.rename(
+            principal, session_id, body.title
+        )
+        await hub.broadcast(
+            control_event(
+                "session.updated",
+                session_id=session_id,
+                payload={"scope": "title"},
+            ),
+            user_id=principal.user_id,
+        )
+        return result
+
     @app.get("/api/v1/sessions/{session_id}/messages", tags=["sessions"])
     async def get_messages(session_id: str, request: Request, principal: Principal):
         authorization_service.require(principal, Permission.AGENT_SESSION_READ)
@@ -2828,7 +2889,10 @@ def create_app(
         goals = await teacher_service.goals(
             principal, request.app.state.gateway, workspace_id
         )
-        return {**analytics, **goals}
+        annotations = await teacher_service.analysis_annotations(
+            principal, request.app.state.gateway, workspace_id
+        )
+        return {**analytics, **goals, **annotations}
 
     @app.post("/api/v1/teacher/reports/ai-analysis", tags=["teacher"])
     async def teacher_ai_analysis(
@@ -2857,6 +2921,24 @@ def create_app(
         _claims: WriteClaims,
     ):
         return await teacher_service.update_goals(
+            principal, request.app.state.gateway, workspace_id, body
+        )
+
+    @app.get("/api/v1/teacher/analysis-annotations/{workspace_id}", tags=["teacher"])
+    async def get_teacher_analysis_annotations(workspace_id: str, request: Request, principal: Principal):
+        return await teacher_service.analysis_annotations(
+            principal, request.app.state.gateway, workspace_id
+        )
+
+    @app.put("/api/v1/teacher/analysis-annotations/{workspace_id}", tags=["teacher"])
+    async def put_teacher_analysis_annotations(
+        workspace_id: str,
+        body: UpdateTeacherAnalysisAnnotations,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        return await teacher_service.update_analysis_annotations(
             principal, request.app.state.gateway, workspace_id, body
         )
 

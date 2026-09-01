@@ -17,6 +17,7 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Connection
 
 from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
+from gateway.analytics_time import localize_turn_time
 from gateway.contracts import (
     GatewayEvent,
     GatewayEventType,
@@ -250,7 +251,7 @@ class MySQLGatewayRepository:
             rows = c.execute(text("SELECT * FROM nlp_turns WHERE conversation_id=:s ORDER BY created_at DESC LIMIT :limit"), {"s": session_id, "limit": min(max(1, limit), 500)}).mappings().all()
         return [self._record(dict(r)) for r in rows]
 
-    def list_question_turns(self, *, workspace_id: str, since: str) -> list[dict[str, Any]]:
+    def list_question_turns(self, *, workspace_id: str, since: str, timezone_name: str = "UTC") -> list[dict[str, Any]]:
         """Teacher read model: structured question rows for analytics.
 
         Deliberately omits ``input_text`` so teacher analytics can only report
@@ -297,7 +298,7 @@ class MySQLGatewayRepository:
         for row in rows:
             context = (self._json(row["learning_state_json"] or {}) or {}).get("context") or {}
             created = row["created_at"]
-            day = created.strftime("%Y-%m-%d") if hasattr(created, "strftime") else str(created)[:10]
+            day, hour, weekday = localize_turn_time(created, timezone_name)
             profile = profiles.get(str(row["user_id"]), {})
             result.append(
                 {
@@ -311,8 +312,8 @@ class MySQLGatewayRepository:
                     "level": context.get("level"),
                     "mode": context.get("mode"),
                     "day": day,
-                    "hour": created.hour if hasattr(created, "hour") else None,
-                    "weekday": created.weekday() if hasattr(created, "weekday") else None,
+                    "hour": hour,
+                    "weekday": weekday,
                 }
             )
         return result
@@ -333,8 +334,13 @@ class MySQLGatewayRepository:
             ).all()
         return {str(row[0]) for row in rows}
 
-    def exercise_evidence_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 10_000) -> list[dict[str, Any]]:
-        """Teacher read model: one row per graded exercise item with topic/knowledge-point refs."""
+    def exercise_evidence_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 10_000) -> tuple[list[dict[str, Any]], bool]:
+        """Teacher read model: one row per graded exercise item with topic/knowledge-point refs.
+
+        Returns ``(rows, truncated)``; ``truncated`` is True when more than
+        ``limit`` rows matched and only the newest ``limit`` are returned.
+        """
+        cap = min(max(1, limit), 10_000)
         with self._engine.connect() as c:
             rows = c.execute(
                 text(
@@ -350,8 +356,10 @@ class MySQLGatewayRepository:
                     "AND (ur.expires_at IS NULL OR ur.expires_at>UTC_TIMESTAMP())) "
                     "ORDER BY s.completed_at DESC LIMIT :limit"
                 ),
-                {"w": workspace_id, "since": since, "until": until, "limit": min(max(1, limit), 10_000)},
+                {"w": workspace_id, "since": since, "until": until, "limit": cap + 1},
             ).mappings().all()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             blueprint = self._json(row["blueprint_snapshot_json"] or {})
@@ -368,10 +376,15 @@ class MySQLGatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
-    def exercise_criterion_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 20_000) -> list[dict[str, Any]]:
-        """Teacher read model: per-attempt rubric matches for criterion hit-rate aggregation."""
+    def exercise_criterion_stats(self, *, workspace_id: str, since: str, until: str | None = None, limit: int = 20_000) -> tuple[list[dict[str, Any]], bool]:
+        """Teacher read model: per-attempt rubric matches for criterion hit-rate aggregation.
+
+        Returns ``(rows, truncated)``; ``truncated`` is True when more than
+        ``limit`` rows matched and only the newest ``limit`` are returned.
+        """
+        cap = min(max(1, limit), 50_000)
         with self._engine.connect() as c:
             rows = c.execute(
                 text(
@@ -387,8 +400,10 @@ class MySQLGatewayRepository:
                     "AND (ur.expires_at IS NULL OR ur.expires_at>UTC_TIMESTAMP())) "
                     "ORDER BY s.completed_at DESC LIMIT :limit"
                 ),
-                {"w": workspace_id, "since": since, "until": until, "limit": min(max(1, limit), 50_000)},
+                {"w": workspace_id, "since": since, "until": until, "limit": cap + 1},
             ).mappings().all()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             blueprint = self._json(row["blueprint_snapshot_json"] or {})
@@ -402,7 +417,7 @@ class MySQLGatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
     def guided_session_stats(self, *, workspace_id: str, since: str, limit: int = 10_000) -> list[dict[str, Any]]:
         """Teacher read model: misconception counts per guided session (active + recent completed)."""

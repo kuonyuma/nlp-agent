@@ -8,6 +8,7 @@ import json
 import re
 import uuid
 from collections import defaultdict
+from functools import partial
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,7 @@ from server.quota.contracts import AdmitTurn, QuotaProblem
 from server.quota.errors import QuotaErrorCode, QuotaRejectedError
 from server.quota.operations import QuotaOperationsService
 from server.quota.reaper import QuotaReservationReaper
+from server.session.summary import schedule_summary
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_UPLOADS_ROOT = _PROJECT_ROOT / ".data" / "uploads"
@@ -182,7 +184,14 @@ class BackendGateway:
             )
         else:
             executor = InProcessTurnExecutor(
-                self.engine, self.repository, self._emit_from_engine
+                self.engine,
+                self.repository,
+                self._emit_from_engine,
+                on_turn_completed=(
+                    partial(schedule_summary, self._database_runtime.session_factory)
+                    if self._database_runtime is not None
+                    else None
+                ),
             )
             self.dispatcher = dispatcher or InProcessTurnDispatcher(executor.run)
         self._session_turn_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
