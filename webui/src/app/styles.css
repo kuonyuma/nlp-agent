@@ -2482,3 +2482,167 @@ button { color: inherit; }
   .developer-quota-page .quota-route-panel > .quota-route-content { display:block; overflow:visible; }
   .developer-quota-page .quota-route-content .quota-table-wrap,.developer-quota-page .quota-route-content .quota-alert-list { flex:none; overflow-x:auto; overflow-y:visible; }
 }
+
+/* The developer control plane follows the same white workspace as the rest of
+   the product. Keep its routes edge-to-edge so each page owns the available
+   viewport instead of being boxed inside a dark showcase card. */
+.developer-shell {
+  color-scheme: light;
+  --bg: #fff;
+  --muted-bg: #f4f4f5;
+  --soft-bg: #fafafa;
+  --fg: #27272a;
+  --muted: #71717a;
+  --border: #e4e4e7;
+  --accent: #4f46e5;
+  --accent-soft: #eef2ff;
+  --sidebar: #f6f6f7;
+  --danger: #dc2626;
+  --dev-bg: #fafafa;
+  --dev-panel: #fff;
+  --dev-soft: #f8f8fa;
+  --dev-border: #e4e4e7;
+  --dev-muted: #71717a;
+  --dev-accent: #4f46e5;
+  background: #fafafa;
+  color: #27272a;
+}
+.developer-main { min-height: 100vh; background: #fafafa; }
+.developer-nav { background: #f6f6f7; border-color: #e4e4e7; }
+.developer-brand { border-color: #e4e4e7; color: #4f46e5; }
+.developer-brand strong { color: #27272a; }
+.developer-brand small { color: #71717a; }
+.developer-nav nav button,.developer-nav > a { color: #71717a; }
+.developer-nav nav button:hover,.developer-nav nav button.active,.developer-nav > a:hover { background: #eef2ff; color: #27272a; }
+.developer-nav nav button.active { box-shadow: inset 3px 0 #4f46e5; color: #4f46e5; }
+.developer-topbar { background: rgb(255 255 255 / 92%); border-color: #e4e4e7; }
+.developer-topbar div { color: #71717a; }
+.developer-topbar div small { color: #71717a; }
+.developer-topbar button { background: #fff; border-color: #e4e4e7; color: #27272a; }
+.developer-topbar button:hover:not(:disabled) { border-color: #4f46e5; color: #4f46e5; }
+.developer-content { width: 100%; max-width: none; min-height: calc(100vh - 64px); margin: 0; box-sizing: border-box; padding: 32px clamp(22px, 3vw, 48px) 48px; }
+.developer-page-grid { width: 100%; }
+.developer-sessions-page { width: 100%; }
+.developer-page-grid { gap: 20px; }
+.developer-hero { min-height: 220px; border-color: #e4e4e7; background: radial-gradient(circle at 88% 12%, #eef2ff, transparent 34%), linear-gradient(135deg, #fff, #fafafa); color: #27272a; box-shadow: 0 8px 24px rgb(15 23 42 / 5%); }
+.developer-hero h1 { color: #27272a; }
+.developer-hero p { color: #71717a; }
+.developer-hero-mark { border-color: #c7d2fe; background: #eef2ff; color: #4f46e5; }
+.developer-hero-mark small { color: #71717a; }
+.developer-hero-actions a { background: #4f46e5; color: #fff; }
+.developer-hero-actions > span { color: #71717a; }
+.developer-live-dot { background: #a1a1aa; }
+.developer-live-dot.on { background: #16a34a; box-shadow: 0 0 0 4px rgb(22 163 74 / 12%); }
+.developer-kpis article { border-color: #e4e4e7; background: #fff; box-shadow: 0 4px 14px rgb(15 23 42 / 4%); }
+.developer-kpis svg { color: #4f46e5; }
+.developer-kpis span,.developer-kpis small { color: #71717a; }
+.developer-kpis strong { color: #27272a; }
+.developer-section { border-color: #e4e4e7; background: #fff; box-shadow: 0 6px 20px rgb(15 23 42 / 5%); }
+.developer-section h2 { color: #27272a; }
+.developer-section header p { color: #71717a; }
+.developer-section-kicker { color: #71717a; }
+.developer-card { border-color: #e4e4e7; background: #f8f8fa; }
+.developer-card strong { color: #27272a; }
+.developer-card svg { color: #4f46e5; }
+.developer-card p { color: #71717a; }
+.developer-card-link { color: #4f46e5; }
+.developer-status { border-color: #fed7aa; background: #fff7ed; color: #b45309; }
+.developer-status.ok { border-color: #bbf7d0; background: #ecfdf3; color: #16803f; }
+.developer-monitor-link { border-color: #c7d2fe; background: #eef2ff; color: #4f46e5; }
+.developer-monitor-link strong { color: #27272a; }
+.developer-monitor-link small { color: #71717a; }
+.developer-json { border-color: #e4e4e7; background: #f8fafc; color: #334155; }
+.developer-table-wrap th { border-color: #e4e4e7; color: #71717a; }
+.developer-table-wrap td { border-color: #e4e4e7; color: #27272a; }
+.developer-table-wrap td small { color: #71717a; }
+.developer-list article { border-color: #e4e4e7; background: #f8f8fa; }
+.developer-list article > svg { color: #4f46e5; }
+.developer-list article strong { color: #27272a; }
+.developer-list article small { color: #71717a; }
+.developer-empty,.developer-error,.developer-loading { color: #71717a; }
+.developer-empty strong,.developer-error strong { color: #27272a; }
+.developer-callout { border-color: #bbf7d0; background: #f0fdf4; color: #16803f; }
+.developer-form-message { color: #16803f; }
+.developer-editor,.developer-managed-card { border-color: #e4e4e7; background: #f8f8fa; }
+.developer-editor textarea,.developer-editor input,.developer-inline-form input { border-color: #e4e4e7; background: #fff; color: #27272a; }
+.developer-editor button,.developer-inline-form button,.developer-list article button,.developer-managed-card button { border-color: #e4e4e7; background: #fff; color: #27272a; }
+.developer-editor button:hover,.developer-inline-form button:hover,.developer-list article button:hover,.developer-managed-card button:hover { border-color: #4f46e5; color: #4f46e5; }
+.developer-editor small { color: #71717a; }
+.developer-managed-card > .danger,.developer-list .danger { color: #b42318; }
+.developer-release-editor { border-color: #e4e4e7; background: #f8fafc; }
+.developer-release-editor-heading h3 { color: #27272a; }
+.developer-release-fields label,.developer-release-notes-field { color: #71717a; }
+.developer-release-fields input,.developer-release-fields select,.developer-release-notes-field textarea,.developer-session-actions input { border-color: #e4e4e7; background: #fff; color: #27272a; }
+.developer-release-notes-field span small { color: #71717a; }
+.developer-release-actions button,.developer-release-card-actions button,.developer-session-actions button,.developer-session-more button { border-color: #4f46e5; background: #4f46e5; color: #fff; }
+.developer-release-actions button.secondary,.developer-release-card-actions button,.developer-session-actions button.secondary { border-color: #e4e4e7; background: #fff; color: #27272a; }
+.developer-release-card { border-color: #e4e4e7; background: #f8f8fa; }
+.developer-release-version { color: #27272a; }
+.developer-release-version svg { color: #4f46e5; }
+.developer-release-card-top small,.developer-release-card ul { color: #4b5563; }
+.developer-release-card-actions { border-top-color: #e4e4e7; }
+.developer-release-card-actions .danger,.developer-session-actions .danger { border-color: #fecaca; color: #b42318; }
+.developer-page-heading h1 { color: #27272a; }
+.developer-page-heading p { color: #71717a; }
+.developer-page-badge { border-color: #bbf7d0; background: #ecfdf3; color: #16803f; }
+.developer-session-stats article { border-color: #e4e4e7; background: #fff; }
+.developer-session-stats span,.developer-session-stats small { color: #71717a; }
+.developer-session-stats strong { color: #27272a; }
+.developer-sessions-layout { width: 100%; align-items: stretch; }
+.developer-session-list-panel,.developer-session-detail { height: 100%; }
+.developer-session-card { border-color: #e4e4e7; background: #f8f8fa; }
+.developer-session-card.selected { border-color: #818cf8; box-shadow: 0 0 0 1px rgb(79 70 229 / 14%); }
+.developer-session-icon { background: #eef2ff; color: #4f46e5; }
+.developer-session-copy strong { color: #27272a; }
+.developer-session-copy small { color: #71717a; }
+.developer-session-manage { border-color: #e4e4e7; color: #71717a; }
+.developer-session-manage:hover,.developer-session-manage.active { border-color: #4f46e5; color: #4f46e5; }
+.developer-session-actions { border-top-color: #e4e4e7; }
+.developer-session-actions label { color: #71717a; }
+.developer-session-more { color: #71717a; }
+.developer-session-purpose { border-color: #c7d2fe; background: #eef2ff; }
+.developer-session-purpose strong { color: #27272a; }
+.developer-session-purpose p { color: #4b5563; }
+.developer-session-purpose code { color: #4f46e5; }
+.developer-turn-list article { border-color: #e4e4e7; background: #f8f8fa; }
+.developer-turn-list article strong { color: #27272a; }
+.developer-turn-list article span { color: #4f46e5; }
+.developer-turn-list article small,.developer-session-hint { color: #71717a; }
+.developer-session-empty { border-color: #d4d4d8; }
+.developer-sessions-message { border-color: #bbf7d0; background: #f0fdf4; }
+.developer-feedback { width: 100%; max-width: none; min-height: calc(100vh - 260px); max-height: none; }
+.developer-shell button:focus-visible,.developer-shell a:focus-visible,.developer-shell input:focus-visible,.developer-shell select:focus-visible,.developer-shell textarea:focus-visible { outline-color: #4f46e5; }
+
+@media (max-width: 1040px) {
+  .developer-content { padding: 26px 24px 42px; }
+  .developer-hero { padding: 30px; }
+}
+
+@media (max-width: 760px) {
+  .developer-shell { display: block; overflow: visible; }
+  .developer-nav { position: relative; width: 100%; height: auto; flex-basis: auto; border-right: 0; border-bottom: 1px solid #e4e4e7; }
+  .developer-brand { height: 62px; }
+  .developer-nav nav { display: flex; gap: 6px; overflow-x: auto; padding: 10px 12px 12px; }
+  .developer-nav-group { display: flex; flex: 0 0 auto; gap: 4px; }
+  .developer-nav-group-label { display: none; }
+  .developer-nav nav button { min-height: 34px; white-space: nowrap; }
+  .developer-nav > a { display: none; }
+  .developer-topbar { padding: 0 16px; }
+  .developer-content { min-height: 0; padding: 20px 14px 30px; }
+  .developer-hero { min-height: 0; padding: 24px 20px; }
+  .developer-hero-mark { display: none; }
+  .developer-kpis,.developer-session-stats { grid-template-columns: repeat(2, 1fr); }
+  .developer-release-fields { grid-template-columns: 1fr; }
+  .developer-page-heading { display: grid; align-items: start; }
+  .developer-page-heading h1 { font-size: 26px; }
+  .developer-feedback { min-height: 520px; }
+}
+
+@media (max-width: 480px) {
+  .developer-kpis,.developer-session-stats { grid-template-columns: 1fr; }
+  .developer-section { padding: 16px; }
+  .developer-release-card-top { display: grid; }
+  .developer-hero-actions { align-items: stretch; flex-direction: column; }
+  .developer-hero-actions a,.developer-hero-actions > span { justify-content: center; }
+  .developer-topbar div small { display: none; }
+}

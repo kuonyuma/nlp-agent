@@ -3,6 +3,24 @@ import { readFileSync } from "node:fs";
 const stylesheet = readFileSync("src/app/styles.css", "utf8");
 
 describe("sandbox titlebar layout", () => {
+  it("keeps the developer control plane white and full-width", () => {
+    const compact = (value: string) => value.replace(/\s+/g, "");
+    const matchingRule = (pattern: RegExp, fragment: string) => [...stylesheet.matchAll(pattern)]
+      .map((match) => compact(match[1]))
+      .find((rule) => rule.includes(fragment)) ?? "";
+    const shellRule = matchingRule(/\.developer-shell\s*\{([^}]*)\}/g, "background:#fafafa");
+    const contentRule = matchingRule(/\.developer-content\s*\{([^}]*)\}/g, "width:100%");
+    const pageRule = matchingRule(/\.developer-page-grid\s*\{([^}]*)\}/g, "width:100%");
+
+    expect(shellRule).toContain("--bg:#fff");
+    expect(shellRule).toContain("--dev-panel:#fff");
+    expect(shellRule).toContain("color:#27272a");
+    expect(contentRule).toContain("width:100%");
+    expect(contentRule).toContain("max-width:none");
+    expect(contentRule).toContain("box-sizing:border-box");
+    expect(pageRule).toContain("width:100%");
+  });
+
   it("fills the dock and clips trailing actions instead of letting them overlap the file tab", () => {
     const workbenchRule = stylesheet.match(/\.sandbox-workbench\s*\{([^}]*)\}/)?.[1] ?? "";
     const titlebarRule = stylesheet.match(/\.sandbox-workbench-titlebar\s*\{([^}]*)\}/)?.[1] ?? "";
