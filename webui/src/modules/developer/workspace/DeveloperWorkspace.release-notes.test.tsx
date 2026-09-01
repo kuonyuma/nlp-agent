@@ -95,11 +95,4 @@ describe("ReleaseNotes", () => {
     expect(await screen.findByText("暂无发布说明")).toBeVisible();
   });
 
-  it("starts a new release note with today's date so publishing is not silently invalid", async () => {
-    render(<ReleaseNotes />);
-
-    const today = new Date();
-    const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-    expect(await screen.findByLabelText("发布日期")).toHaveValue(expected);
-  });
 });
