@@ -2,7 +2,7 @@ import {
   Activity, AppWindow, Bot, Box, ChevronLeft, ChevronRight, Clock3, Code2, Database,
   ExternalLink, FileKey2, Gauge, Globe2, KeyRound, Mail, MailOpen, Newspaper, PlugZap,
   Inbox, MessageCircle, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, User, Wrench,
-  Users, LayoutList, ScrollText, MessageSquare,
+  Users, LayoutList, ScrollText, MessageSquare, WalletCards,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -15,8 +15,9 @@ import { AuditLogPageV2 } from "@/modules/admin/AuditLogPageV2";
 import { AgentSessionListPageV2 } from "@/modules/admin/AgentSessionListPageV2";
 import { monitorUrl } from "@/monitor/monitor-helpers";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
+import { QuotaManagementPage } from "@/modules/quota/QuotaManagementPage";
 
-export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "feedback" | "settings" | "users" | "roles" | "menus" | "audit" | "sessions";
+export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "feedback" | "settings" | "users" | "roles" | "menus" | "audit" | "sessions" | "quotas";
 
 const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge }> = [
   { page: "overview", label: "工作台", icon: Gauge },
@@ -34,6 +35,7 @@ const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge }> = [
   { page: "menus", label: "菜单管理", icon: LayoutList },
   { page: "audit", label: "审计日志", icon: ScrollText },
   { page: "sessions", label: "Agent 会话", icon: MessageSquare },
+  { page: "quotas", label: "额度管理", icon: WalletCards },
 ];
 
 function currentPage(): DeveloperPage {
@@ -621,6 +623,7 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
     if (page === "menus") return <MenuManagementPageV2 />;
     if (page === "audit") return <AuditLogPageV2 />;
     if (page === "sessions") return <AgentSessionListPageV2 />;
+    if (page === "quotas") return <QuotaManagementPage />;
     if (!snapshot) return <div className="developer-error"><ShieldCheck /><strong>无法读取运行时快照</strong><p>{snapshotError || "当前身份可能缺少运行时检查权限；其余页面不受影响。"}</p></div>;
     if (page === "agents") return <Agents snapshot={snapshot} refresh={load} />;
     if (page === "tools") return <Tools snapshot={snapshot} refresh={load} />;
