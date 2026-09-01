@@ -30,6 +30,36 @@ _CHECK_NAMES = {
 }
 
 
+def _check_constraints(bind, table_name: str) -> list[dict]:
+    return sa.inspect(bind).get_check_constraints(table_name)
+
+
+def _is_bucket_type_constraint(constraint: dict, period: str) -> bool:
+    sqltext = (constraint.get("sqltext") or "").lower().replace(" ", "")
+    return "bucket_typein" in sqltext and f"'{period}'" in sqltext
+
+
+def _drop_bucket_type_constraints(bind, table_name: str) -> None:
+    constraints = [
+        constraint
+        for constraint in _check_constraints(bind, table_name)
+        if constraint.get("name")
+        and "bucket_type" in (constraint.get("sqltext") or "").lower()
+    ]
+    if bind.dialect.name == "mysql":
+        for constraint in constraints:
+            op.execute(
+                sa.text(
+                    f"ALTER TABLE {table_name} DROP CHECK "
+                    f"`{constraint['name']}`"
+                )
+            )
+    elif constraints:
+        with op.batch_alter_table(table_name) as batch_op:
+            for constraint in constraints:
+                batch_op.drop_constraint(constraint["name"], type_="check")
+
+
 def upgrade() -> None:
     columns = {
         column["name"]
@@ -52,32 +82,42 @@ def upgrade() -> None:
             )
         )
         constraint_name = _CHECK_NAMES[table_name]
-        existing_constraints = {
-            constraint.get("name")
-            for constraint in sa.inspect(op.get_bind()).get_check_constraints(
-                table_name
-            )
-        }
-        if constraint_name not in existing_constraints:
-            with op.batch_alter_table(table_name) as batch_op:
-                batch_op.create_check_constraint(
-                    constraint_name,
-                    "bucket_type IN ('daily', 'weekly')",
+        bind = op.get_bind()
+        existing_constraints = _check_constraints(bind, table_name)
+        if not any(
+            _is_bucket_type_constraint(constraint, "weekly")
+            and _is_bucket_type_constraint(constraint, "daily")
+            for constraint in existing_constraints
+        ):
+            _drop_bucket_type_constraints(bind, table_name)
+            if bind.dialect.name == "mysql":
+                op.execute(
+                    sa.text(
+                        f"ALTER TABLE {table_name} ADD CONSTRAINT "
+                        f"`{constraint_name}` CHECK "
+                        "(bucket_type IN ('daily', 'weekly'))"
+                    )
                 )
+            else:
+                with op.batch_alter_table(table_name) as batch_op:
+                    batch_op.create_check_constraint(
+                        constraint_name,
+                        "bucket_type IN ('daily', 'weekly')",
+                    )
 
 
 def downgrade() -> None:
     for table_name in _BUCKET_TABLES:
         constraint_name = _CHECK_NAMES[table_name]
-        existing_constraints = {
-            constraint.get("name")
-            for constraint in sa.inspect(op.get_bind()).get_check_constraints(
-                table_name
-            )
-        }
-        if constraint_name in existing_constraints:
-            with op.batch_alter_table(table_name) as batch_op:
-                batch_op.drop_constraint(constraint_name, type_="check")
+        bind = op.get_bind()
+        existing_constraints = _check_constraints(bind, table_name)
+        weekly_constraints = [
+            constraint
+            for constraint in existing_constraints
+            if _is_bucket_type_constraint(constraint, "weekly")
+        ]
+        if weekly_constraints:
+            _drop_bucket_type_constraints(bind, table_name)
         op.execute(
             sa.text(
                 f"UPDATE {table_name} "
@@ -85,6 +125,20 @@ def downgrade() -> None:
                 "WHERE bucket_type = 'weekly'"
             )
         )
+        if bind.dialect.name == "mysql":
+            op.execute(
+                sa.text(
+                    f"ALTER TABLE {table_name} ADD CONSTRAINT "
+                    f"`{constraint_name}` CHECK "
+                    "(bucket_type IN ('daily', 'monthly'))"
+                )
+            )
+        else:
+            with op.batch_alter_table(table_name) as batch_op:
+                batch_op.create_check_constraint(
+                    constraint_name,
+                    "bucket_type IN ('daily', 'monthly')",
+                )
     columns = {
         column["name"]
         for column in sa.inspect(op.get_bind()).get_columns("nlp_quota_policies")
