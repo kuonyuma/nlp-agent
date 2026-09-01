@@ -31,7 +31,7 @@ const menu = (routePath: string | null) => ({
   status: "active",
 });
 
-const ALL_ROUTES = ["/developer", "/developer/agents", "/developer/tools", "/developer/models", "/developer/mcp", "/developer/skills", "/developer/release-notes", "/developer/automations", "/developer/feedback", "/developer/settings", "/developer/users", "/developer/roles", "/developer/menus", "/developer/audit", "/developer/sessions"];
+const ALL_ROUTES = ["/developer", "/developer/agents", "/developer/tools", "/developer/models", "/developer/mcp", "/developer/skills", "/developer/release-notes", "/developer/automations", "/developer/feedback", "/developer/settings", "/developer/users", "/developer/roles", "/developer/menus", "/developer/sessions"];
 
 const snapshot = {
   runtime: { status: "ok", active_turns: 0, durable_events: 0 },
@@ -94,6 +94,18 @@ describe("DeveloperWorkspace shell access", () => {
     expect(await screen.findByText("后端基础工作台")).toBeVisible();
     expect(await waitFor(() => screen.getByRole("button", { name: "意见反馈" }))).toBeVisible();
     expect(getDeveloperSnapshotMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps authorization audit out of the developer control-plane navigation", async () => {
+    // A stale server-side menu row must not resurrect audit inside the
+    // developer shell while the migration is rolling out.
+    listVisibleMenusMock.mockResolvedValue({ items: [...ALL_ROUTES.map((route) => menu(route)), menu("/developer/audit")] });
+    getDeveloperSnapshotMock.mockResolvedValue(snapshot);
+
+    render(<DeveloperWorkspace />);
+
+    expect(await screen.findByText("后端基础工作台")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "审计日志" })).not.toBeInTheDocument();
   });
 
   it("keeps data-owned pages usable when the snapshot is denied", async () => {

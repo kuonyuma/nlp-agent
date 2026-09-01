@@ -83,6 +83,22 @@ describe("SettingsDialog", () => {
     expect(screen.queryByText("暂无已发布的更新说明。")).not.toBeInTheDocument();
   });
 
+  it("refreshes published release notes when the settings dialog is opened again", async () => {
+    listPublishedReleaseNotesMock
+      .mockResolvedValueOnce({ items: [{ id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["第一版"], status: "published" }] })
+      .mockResolvedValueOnce({ items: [{ id: "n2", version: "1.1.0", released_at: "2026-08-13T00:00:00", notes: ["第二版"], status: "published" }] });
+    const { rerender } = render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+    expect(await screen.findByText("第一版")).toBeVisible();
+
+    rerender(<SettingsDialog {...baseProps} open={false} />);
+    rerender(<SettingsDialog {...baseProps} open />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("第二版")).toBeVisible();
+    expect(listPublishedReleaseNotesMock).toHaveBeenCalledTimes(2);
+  });
+
   it("retries loading release notes after the failure recovers", async () => {
     listPublishedReleaseNotesMock
       .mockRejectedValueOnce(new Error("network"))

@@ -64,11 +64,14 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
     ? permissions.includes("learning:feedback:submit")
     : ["student", "teacher", "developer"].some((role) => roles.includes(role));
   useEffect(() => {
-    if (!open || section !== "updates" || releaseNotes !== null) return;
+    if (!open || section !== "updates") return;
+    let active = true;
+    queueMicrotask(() => { if (active) { setReleaseNotes(null); setReleaseNotesError(false); } });
     api.listPublishedReleaseNotes()
-      .then(({ items }) => { setReleaseNotesError(false); setReleaseNotes(items); })
-      .catch(() => setReleaseNotesError(true));
-  }, [open, section, releaseNotes, releaseNotesAttempt]);
+      .then(({ items }) => { if (active) setReleaseNotes(items); })
+      .catch(() => { if (active) setReleaseNotesError(true); });
+    return () => { active = false; };
+  }, [open, section, releaseNotesAttempt]);
   useEffect(() => {
     if (!open || section !== "feedback" || !canSubmitFeedback) return;
     void api.getFeedbackDailyState().then(setFeedbackDaily).catch(() => setFeedbackDaily(null));

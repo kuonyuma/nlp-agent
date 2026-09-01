@@ -6,6 +6,13 @@ import { NotFoundPage } from "@/app/NotFoundPage";
 import { AdminLayout } from "./AdminLayout";
 import { WorkspaceListPage } from "./WorkspaceListPage";
 import { ClassroomManagementPage } from "./ClassroomManagementPage";
+import { monitorUrl } from "@/monitor/monitor-helpers";
+
+function AuditRedirect() {
+  const target = `${monitorUrl(location)}?page=audit`;
+  useEffect(() => { window.location.assign(target); }, [target]);
+  return <div className="p-6 text-sm text-gray-600"><p>审计日志已迁移到监控平台。</p><a href={target}>打开监控平台审计日志</a></div>;
+}
 
 function AdminOverview() {
   const [stats, setStats] = useState<{ users: number | null; workspaces: number | null; sessions: number | null }>({
@@ -66,7 +73,7 @@ export function AdminRoutes() {
         <Route path="users" element={<Navigate to="/developer/users" replace />} />
         <Route path="roles" element={<Navigate to="/developer/roles" replace />} />
         <Route path="menus" element={<Navigate to="/developer/menus" replace />} />
-        <Route path="audit" element={<Navigate to="/developer/audit" replace />} />
+        <Route path="audit" element={<AuditRedirect />} />
         <Route path="sessions" element={<Navigate to="/developer/sessions" replace />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
