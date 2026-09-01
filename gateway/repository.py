@@ -24,6 +24,7 @@ from gateway.contracts import (
     TurnStatus,
 )
 from core.learning import ExerciseState, LearningContext, LearningProgress, knowledge_point_ids
+from gateway.analytics_time import localize_turn_time
 
 
 def _now() -> str:
@@ -602,6 +603,7 @@ class GatewayRepository:
         *,
         workspace_id: str,
         since: str,
+        timezone_name: str = "UTC",
     ) -> list[dict[str, Any]]:
         """Teacher read model: structured question rows (no question text).
 
@@ -622,6 +624,10 @@ class GatewayRepository:
                 created_at = datetime.fromisoformat(created.replace("Z", "+00:00"))
             except ValueError:
                 created_at = None
+            if created_at is None:
+                day, hour, weekday = created[:10], None, None
+            else:
+                day, hour, weekday = localize_turn_time(created_at, timezone_name)
             result.append(
                 {
                     "session_id": row["session_id"],
@@ -633,9 +639,9 @@ class GatewayRepository:
                     "topic_id": context.get("topic_id"),
                     "level": context.get("level"),
                     "mode": context.get("mode"),
-                    "day": created[:10],
-                    "hour": created_at.hour if created_at else None,
-                    "weekday": created_at.weekday() if created_at else None,
+                    "day": day,
+                    "hour": hour,
+                    "weekday": weekday,
                 }
             )
         return result
@@ -657,7 +663,8 @@ class GatewayRepository:
         since: str,
         until: str | None = None,
         limit: int = 10_000,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
+        cap = min(max(1, limit), 10_000)
         with self._lock:
             rows = self._conn.execute(
                 """SELECT e.normalized_score,e.passed,e.knowledge_point_ids_json,e.blueprint_snapshot_json,q.id AS question_id,q.question,s.user_id,s.topic_id,s.mode,s.completed_at
@@ -666,8 +673,10 @@ class GatewayRepository:
                    JOIN gateway_exercise_sessions s ON s.id=e.exercise_session_id
                    WHERE s.workspace_id=? AND s.completed_at>=? AND (? IS NULL OR s.completed_at<?)
                    ORDER BY s.completed_at DESC LIMIT ?""",
-                (workspace_id, since, until, until, min(max(1, limit), 10_000)),
+                (workspace_id, since, until, until, cap + 1),
             ).fetchall()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             kp_ids = json.loads(row["knowledge_point_ids_json"] or "[]") if row["knowledge_point_ids_json"] else []
@@ -687,7 +696,7 @@ class GatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
     def exercise_criterion_stats(
         self,
@@ -696,7 +705,8 @@ class GatewayRepository:
         since: str,
         until: str | None = None,
         limit: int = 20_000,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
+        cap = min(max(1, limit), 50_000)
         with self._lock:
             rows = self._conn.execute(
                 """SELECT a.rubric_matches_json,s.user_id,s.topic_id,s.blueprint_snapshot_json,s.completed_at
@@ -705,8 +715,10 @@ class GatewayRepository:
                    JOIN gateway_exercise_sessions s ON s.id=q.exercise_session_id
                    WHERE s.workspace_id=? AND s.completed_at>=? AND (? IS NULL OR s.completed_at<?)
                    ORDER BY s.completed_at DESC LIMIT ?""",
-                (workspace_id, since, until, until, min(max(1, limit), 50_000)),
+                (workspace_id, since, until, until, cap + 1),
             ).fetchall()
+        truncated = len(rows) > cap
+        rows = rows[:cap]
         result: list[dict[str, Any]] = []
         for row in rows:
             blueprint = json.loads(row["blueprint_snapshot_json"] or "{}") if row["blueprint_snapshot_json"] else {}
@@ -720,7 +732,7 @@ class GatewayRepository:
                     "completed_at": row["completed_at"],
                 }
             )
-        return result
+        return result, truncated
 
     def guided_session_stats(
         self,
