@@ -359,6 +359,18 @@ class QuotaService:
                 remaining_micro=request_limit,
             )
 
+        if policy.concurrency_limit is not None:
+            # Materialize and lock the per-user serialization row before any
+            # period Bucket can be initialized.  Without this ordering, a
+            # burst of first-time requests can concurrently upsert several
+            # Bucket unique indexes and MySQL may choose one as a deadlock
+            # victim before the concurrency counter is reached.
+            self._get_or_create_concurrency_lock(
+                connection,
+                user_id=command.user_id,
+                now=at,
+            )
+
         self._expire_stale_in_transaction(connection, at)
 
         buckets: list[dict[str, Any]] = []
