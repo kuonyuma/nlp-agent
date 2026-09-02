@@ -55,6 +55,14 @@ function BucketSummary({ bucket }: { bucket: QuotaBucketSnapshot }) {
   </article>;
 }
 
+function UnconfiguredBucketSummary({ bucketType }: { bucketType: "daily" | "weekly" }) {
+  return <article className="quota-balance-row is-unconfigured">
+    <div className="quota-balance-row-heading"><span>个人 · {periodLabel(bucketType)}</span><strong>未单独设置</strong></div>
+    <div className="quota-progress is-empty" aria-hidden="true"><i /></div>
+    <div className="quota-balance-row-meta"><span>该周期没有单独配置额度</span></div>
+  </article>;
+}
+
 function ActivityHeatmap({ breakdown, dailyBreakdown, granularity, onGranularityChange }: { breakdown: QuotaUsageBreakdown[]; dailyBreakdown: QuotaUsageBreakdown[]; granularity: "day" | "week"; onGranularityChange: (value: "day" | "week") => void }) {
   const tokensByPeriod = useMemo(() => {
     const values = new Map<string, number>();
@@ -227,6 +235,7 @@ export function QuotaUsagePage({ embedded = false, userId, workspaceIds: provide
   }, [hasAuthContext, load]);
   const buckets = useMemo(() => quota?.buckets ?? [], [quota]);
   const personalBuckets = useMemo(() => buckets.filter((item) => item.owner_type === "user"), [buckets]);
+  const personalBucketsByPeriod = useMemo(() => new Map(personalBuckets.map((bucket) => [bucket.bucket_type, bucket])), [personalBuckets]);
   // Admission applies every returned constraint at the same time. The
   // displayed balance must therefore be the smallest remaining bucket, even
   // though the compact detail list only shows personal daily/weekly rows.
@@ -241,7 +250,7 @@ export function QuotaUsagePage({ embedded = false, userId, workspaceIds: provide
     {error && <div className="quota-error" role="alert"><CircleAlert size={17} /><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
     <section className="quota-stat-strip"><div><strong>{effectiveRemainingLabel}</strong><span>当前可用</span></div><div><strong>{Number(recentUsage?.events ?? 0).toLocaleString("zh-CN")}</strong><span>近 7 天请求</span></div><div><strong>{totalTokens.toLocaleString("zh-CN")}</strong><span>近 7 天 Token</span></div><div><strong>{recentUsage?.credits_complete ? "正常" : "待处理"}</strong><span>账务状态</span></div></section>
     <UsageSummary breakdown={activityUsage?.breakdown ?? []} granularity={activityGranularity} />
-    <section className="quota-panel quota-balances-panel"><div className="quota-panel-heading"><h2>额度</h2><span>{personalBuckets.length ? `${personalBuckets.length} 项周期额度` : "暂无额度"}</span></div><div className="quota-balance-list">{personalBuckets.map((bucket) => <BucketSummary bucket={bucket} key={`${bucket.owner_type}-${bucket.owner_id}-${bucket.bucket_type}`} />)}{personalBuckets.length === 0 && <div className="quota-empty quota-empty-compact"><Coins size={18} /><span>当前周期暂无可用额度。</span></div>}</div></section>
+    <section className="quota-panel quota-balances-panel"><div className="quota-panel-heading"><h2>额度</h2><span>{personalBuckets.length ? "日 / 周" : "暂无额度"}</span></div><div className="quota-balance-list">{personalBuckets.length > 0 && (["daily", "weekly"] as const).map((bucketType) => personalBucketsByPeriod.get(bucketType) ? <BucketSummary bucket={personalBucketsByPeriod.get(bucketType)!} key={`user-${bucketType}`} /> : <UnconfiguredBucketSummary bucketType={bucketType} key={`user-${bucketType}`} />)}{personalBuckets.length === 0 && <div className="quota-empty quota-empty-compact"><Coins size={18} /><span>当前周期暂无可用额度。</span></div>}</div></section>
     <ActivityHeatmap breakdown={activityUsage?.breakdown ?? []} dailyBreakdown={dailyUsage?.breakdown ?? []} granularity={activityGranularity} onGranularityChange={setActivityGranularity} />
   </main>;
 }
