@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 _GLOBAL_QUOTA_LOCK = threading.RLock()
 _ACTIVE_RESERVATION_STATUSES = ("reserved", "running", "settling")
 _RETRYABLE_MYSQL_TRANSACTION_ERRORS = frozenset({1205, 1213})
-_MYSQL_TRANSACTION_ATTEMPTS = 3
+_MYSQL_TRANSACTION_ATTEMPTS = 6
 _MYSQL_TRANSACTION_RETRY_BASE_S = 0.02
 _TransactionResult = TypeVar("_TransactionResult")
 
