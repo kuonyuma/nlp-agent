@@ -2006,43 +2006,52 @@ class QuotaService:
         Reservations after a normal SELECT is not an atomic admission check
         when multiple Web/Worker processes share MySQL.
         """
-        row = connection.execute(
-            select(QuotaConcurrencyLockModel)
-            .where(QuotaConcurrencyLockModel.user_id == user_id)
-            .with_for_update()
-        ).mappings().first()
-        if row is None:
-            values = {
-                "user_id": user_id,
-                "active_units": 0,
-                "version": 1,
-                "updated_at": _db_time(now),
-            }
-            if connection.dialect.name == "mysql":
-                connection.execute(
-                    mysql_insert(QuotaConcurrencyLockModel.__table__)
-                    .values(**values)
-                    .on_duplicate_key_update(
-                        user_id=QuotaConcurrencyLockModel.__table__.c.user_id
-                    )
+        values = {
+            "user_id": user_id,
+            "active_units": 0,
+            "version": 1,
+            "updated_at": _db_time(now),
+        }
+        if connection.dialect.name == "mysql":
+            # Materialize the row before locking it.  A probe-then-insert
+            # sequence takes an InnoDB gap lock when the user is new; twenty
+            # first requests can then deadlock while each waits to insert the
+            # same unique key.  The atomic upsert lets MySQL arbitrate that
+            # unique scope first, after which this transaction locks exactly
+            # one existing row.
+            connection.execute(
+                mysql_insert(QuotaConcurrencyLockModel.__table__)
+                .values(**values)
+                .on_duplicate_key_update(
+                    user_id=QuotaConcurrencyLockModel.__table__.c.user_id
                 )
-            elif connection.dialect.name == "sqlite":
-                connection.execute(
-                    insert(QuotaConcurrencyLockModel)
-                    .prefix_with("OR IGNORE")
-                    .values(**values)
-                )
-            else:
-                try:
-                    with connection.begin_nested():
-                        connection.execute(insert(QuotaConcurrencyLockModel).values(**values))
-                except IntegrityError:
-                    pass
+            )
+        else:
             row = connection.execute(
                 select(QuotaConcurrencyLockModel)
                 .where(QuotaConcurrencyLockModel.user_id == user_id)
                 .with_for_update()
-            ).mappings().one()
+            ).mappings().first()
+            if row is None:
+                if connection.dialect.name == "sqlite":
+                    connection.execute(
+                        insert(QuotaConcurrencyLockModel)
+                        .prefix_with("OR IGNORE")
+                        .values(**values)
+                    )
+                else:
+                    try:
+                        with connection.begin_nested():
+                            connection.execute(
+                                insert(QuotaConcurrencyLockModel).values(**values)
+                            )
+                    except IntegrityError:
+                        pass
+        row = connection.execute(
+            select(QuotaConcurrencyLockModel)
+            .where(QuotaConcurrencyLockModel.user_id == user_id)
+            .with_for_update()
+        ).mappings().one()
         return dict(row)
 
     @classmethod
