@@ -1,5 +1,5 @@
 import {
-  Activity, AppWindow, Bot, Box, ChevronLeft, ChevronRight, Clock3, Code2, Database,
+  Activity, AppWindow, Bot, Box, ChevronDown, ChevronLeft, ChevronRight, Clock3, Code2, Database,
   ExternalLink, FileKey2, Gauge, Globe2, KeyRound, Mail, MailOpen, Newspaper, PlugZap,
   Inbox, MessageCircle, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, User, Wrench,
   Users, LayoutList, MessageSquare, WalletCards,
@@ -486,7 +486,13 @@ export function ReleaseNotes() {
       <label className="developer-release-notes-field"><span>更新与修复说明 <small>每行一条，学生端按原顺序展示</small></span><textarea value={notes} onChange={(event) => setNotes(event.target.value)} spellCheck={false} placeholder="每行一条更新与修复说明" /></label>
       <div className="developer-release-actions"><button type="button" onClick={() => void save()} disabled={!version.trim() || !releasedAt || !notes.trim()}>{editingId ? "保存修改" : "新建发布说明"}</button>{editingId && <button className="secondary" type="button" onClick={resetForm}>取消编辑</button>}{message && <small className="developer-form-message">{message}</small>}</div>
     </div>
-    <div className="developer-release-list">{(items ?? []).map((item) => <article className="developer-release-card" key={item.id}><div className="developer-release-card-top"><div><span className="developer-release-version"><Newspaper size={17} />v{item.version} · {item.released_at.slice(0, 10)}</span><small>{item.status === "published" ? "这条说明会出现在学生端设置中的“版本与更新”" : "草稿仅开发者可见，发布后才会同步"}</small></div><StatusPill ok={item.status === "published"}>{item.status === "published" ? "已发布" : "草稿"}</StatusPill></div><ul>{item.notes.map((note) => <li key={note}>{note}</li>)}</ul><div className="developer-release-card-actions"><button type="button" onClick={() => startEdit(item)}>编辑</button><button className="danger" type="button" onClick={() => void remove(item)}>删除</button></div></article>)}</div>
+    <div className="developer-release-list">{(items ?? []).map((item, index) => <details className="developer-release-card" key={item.id} open={index === 0}>
+      <summary className="developer-release-summary">
+        <span className="developer-release-summary-main"><span className="developer-release-version"><Newspaper size={17} /><strong>v{item.version}</strong><small>发布日期 · {item.released_at.slice(0, 10)}</small></span><small>{item.status === "published" ? "这条说明会出现在学生端设置中的“版本与更新”" : "草稿仅开发者可见，发布后才会同步"}</small></span>
+        <span className="developer-release-summary-meta"><StatusPill ok={item.status === "published"}>{item.status === "published" ? "已发布" : "草稿"}</StatusPill><ChevronDown className="developer-release-chevron" size={17} aria-hidden="true" /></span>
+      </summary>
+      <div className="developer-release-card-body"><ul>{item.notes.map((note) => <li key={note}>{note}</li>)}</ul><div className="developer-release-card-actions"><button type="button" onClick={() => startEdit(item)}>编辑</button><button className="danger" type="button" onClick={() => void remove(item)}>删除</button></div></div>
+    </details>)}</div>
     {items && items.length === 0 && <div className="developer-empty"><Newspaper /><strong>暂无发布说明</strong><p>新建一条记录，学生端即可在「版本与更新」中看到。</p></div>}
   </Section></>;
 }

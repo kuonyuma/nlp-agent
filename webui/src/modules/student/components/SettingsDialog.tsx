@@ -8,7 +8,7 @@ import type { FeedbackCategory, FeedbackThread, LearningContext, ReleaseNoteEntr
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { supportedLocales } from "@/shared/i18n/config";
 import { saveFeedback } from "@/shared/utils/feedback";
-import { APP_NAME, APP_VERSION } from "@/shared/version";
+import { APP_NAME } from "@/shared/version";
 
 type SettingsSection = "general" | "appearance" | "chat" | "learning" | "data" | "quota" | "feedback" | "updates";
 
@@ -28,6 +28,35 @@ const modeLabel: Record<LearningContext["mode"], string> = { explain: "讲解", 
 const FEEDBACK_DISABLED_HINT = "当前身份不支持提交反馈";
 const feedbackStatusLabel: Record<string, string> = { open: "待处理", under_review: "审视中", planned: "已规划", in_progress: "进行中", complete: "已完成", closed: "已关闭" };
 const feedbackCategoryLabel: Record<string, string> = { feature: "功能建议", ux: "体验问题", bug: "Bug", other: "其他" };
+
+function versionParts(version: string): number[] {
+  return version.split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function latestReleaseNote(items: ReleaseNoteEntry[]): ReleaseNoteEntry | null {
+  return [...items]
+    .filter((item) => item.status === "published")
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.released_at);
+      const rightTime = Date.parse(right.released_at);
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && rightTime !== leftTime) return rightTime - leftTime;
+      if (Number.isFinite(rightTime) && !Number.isFinite(leftTime)) return 1;
+      if (Number.isFinite(leftTime) && !Number.isFinite(rightTime)) return -1;
+
+      const leftParts = versionParts(left.version);
+      const rightParts = versionParts(right.version);
+      for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+        const delta = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
+        if (delta !== 0) return delta;
+      }
+      return 0;
+    })[0] ?? null;
+}
+
+function releaseDateLabel(value: string): string {
+  const date = value.slice(0, 10);
+  return date ? `发布日期 · ${date}` : "发布日期待补充";
+}
 
 export function SettingsDialog({ open, settings, learningContext, roles = [], permissions, userId, workspaceIds, onClose, onChange, onReset, onLearningContextChange, onOpenDeveloper, onOpenTeacher }: {
   open: boolean;
@@ -127,6 +156,7 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
   };
   if (!open) return null;
   const updateLearning = (patch: Partial<LearningContext>) => onLearningContextChange({ ...learningContext, ...patch });
+  const currentRelease = releaseNotes ? latestReleaseNote(releaseNotes) : null;
 
   return <>
     <div className="dialog-backdrop settings-backdrop" role="presentation" onMouseDown={onClose}>
@@ -239,7 +269,14 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
                 {!feedbackHistory || feedbackHistory.messages.length === 0 ? <div className="settings-note">暂无历史反馈，提交后可在此查看时间线。</div> : <div className="feedback-history-collapsible"><button type="button" className="feedback-history-toggle" aria-label={feedbackHistoryOpen ? "收起消息" : "展开消息"} aria-expanded={feedbackHistoryOpen} onClick={() => void toggleFeedbackHistory()}><span><strong>消息记录</strong><small>{feedbackHistory.message_total ?? feedbackHistory.messages.length} 条消息</small></span><span>{(feedbackHistory.student_unread_count ?? 0) > 0 && <b className="feedback-history-unread">未读消息</b>}<em>{feedbackHistoryOpen ? "收起消息" : "展开消息"}</em><ChevronDown size={15} className={feedbackHistoryOpen ? "is-open" : ""} /></span></button>{feedbackHistoryOpen && <div className="feedback-history">{feedbackHistory.message_has_more && <button className="feedback-history-load-more" type="button" disabled={feedbackHistoryLoadingMore} onClick={() => void loadOlderFeedbackHistory()}>{feedbackHistoryLoadingMore ? "正在加载更早消息…" : "加载更早反馈"}</button>}{feedbackHistory.messages.map((message) => <article key={message.id} className={`feedback-history-message ${message.sender_type}`}><div><strong>{message.sender_type === "student" ? "我" : "开发者"}</strong><time><Clock3 size={10} />{new Date(message.created_at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</time></div><p>{message.body}</p></article>)}</div>}</div>}
               </SettingGroup>
             </> : <SettingGroup title="意见反馈" description="意见会发送到开发者工作台，并按你的账号归档为一条独立会话。"><div className="settings-note">{FEEDBACK_DISABLED_HINT}</div></SettingGroup>)}
-            {section === "updates" && <><SettingGroup title="当前版本" description={`${APP_NAME} v${APP_VERSION}`}><div className="settings-note"><b>版本号随构建自动同步</b><br />来自当前发布构建，无需手动维护。</div></SettingGroup><SettingGroup title="本次更新与修复" description={releaseNotesError ? "无法读取更新说明，请稍后重试。" : releaseNotes && releaseNotes.length > 0 ? "由开发者工作台维护，学生端实时同步。" : "暂无已发布的更新说明。"}>{releaseNotesError ? <button className="settings-link-button" type="button" onClick={() => setReleaseNotesAttempt((current) => current + 1)}>重新加载 <ChevronRight size={15} /></button> : releaseNotes === null ? <div className="settings-note">正在读取…</div> : releaseNotes.length > 0 && <div className="release-notes-list">{releaseNotes.map((note) => <article className="release-note" key={note.id}><h3>v{note.version}<small>{note.released_at.slice(0, 10)}</small></h3><ul className="release-notes">{note.notes.map((item) => <li key={item}>{item}</li>)}</ul></article>)}</div>}</SettingGroup></>}
+            {section === "updates" && <>
+              <SettingGroup title="当前版本" description={releaseNotesError ? "无法读取当前版本，请稍后重试。" : releaseNotes === null ? "正在读取最近一次发布。" : currentRelease ? "最近一次已发布版本，学生端当前生效。" : "还没有已发布版本。"}>
+                {releaseNotesError ? <div className="settings-note settings-release-error">无法读取当前版本，请稍后重试。</div> : releaseNotes === null ? <div className="settings-note">正在读取…</div> : currentRelease ? <div className="release-current-version"><div><span>{APP_NAME}</span><strong>v{currentRelease.version}</strong></div><time dateTime={currentRelease.released_at}>{releaseDateLabel(currentRelease.released_at)}</time></div> : <div className="settings-note">暂无已发布的更新说明。</div>}
+              </SettingGroup>
+              <SettingGroup title="本次更新与修复" description={releaseNotesError ? "无法读取更新说明，请稍后重试。" : currentRelease ? "展示最近一次发布的更新内容，历史版本不会挤在当前页面。" : "暂无已发布的更新说明。"}>
+                {releaseNotesError ? <button className="settings-link-button" type="button" onClick={() => setReleaseNotesAttempt((current) => current + 1)}>重新加载 <ChevronRight size={15} /></button> : releaseNotes === null ? <div className="settings-note">正在读取…</div> : currentRelease ? <div className="release-notes-list" aria-label={`v${currentRelease.version} 更新说明`}><ul className="release-notes">{currentRelease.notes.map((item) => <li key={item}>{item}</li>)}</ul></div> : <div className="settings-note">暂无已发布的更新说明。</div>}
+              </SettingGroup>
+            </>}
           </div>
         </div>
       </section>

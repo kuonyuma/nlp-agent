@@ -2646,3 +2646,38 @@ button { color: inherit; }
   .developer-hero-actions a,.developer-hero-actions > span { justify-content: center; }
   .developer-topbar div small { display: none; }
 }
+
+/* Release notes stay compact and content-first in both planes. */
+.developer-release-card { display: block; overflow: hidden; padding: 0; }
+.developer-release-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; cursor: pointer; list-style: none; }
+.developer-release-summary::-webkit-details-marker { display: none; }
+.developer-release-summary::marker { content: ""; }
+.developer-release-summary-main { display: grid; min-width: 0; gap: 6px; }
+.developer-release-summary-meta { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+.developer-release-summary .developer-release-version { gap: 8px; }
+.developer-release-summary .developer-release-version small { color: #71717a; font-size: 11px; font-weight: 500; }
+.developer-release-summary-main > small { color: #71717a; font-size: 12px; }
+.developer-release-chevron { color: #71717a; transition: transform .2s ease; }
+.developer-release-card[open] .developer-release-chevron { transform: rotate(180deg); }
+.developer-release-card[open] .developer-release-summary { border-bottom: 1px solid #e4e4e7; }
+.developer-release-card-body { display: grid; gap: 14px; padding: 16px 18px 18px; }
+.developer-release-card-body > ul { margin: 0; padding: 0 0 0 20px; color: #4b5563; font-size: 13px; line-height: 1.65; }
+.developer-release-card-body .developer-release-card-actions { padding-top: 12px; }
+.release-current-version { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 4px 0 6px; }
+.release-current-version > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 14px; }
+.release-current-version span { color: var(--muted); font-size: 14px; }
+.release-current-version strong { color: var(--fg); font-size: 28px; font-weight: 650; letter-spacing: -.03em; }
+.release-current-version time { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.release-notes-list { height: 300px; max-height: 300px; overflow-y: auto; border: 0; background: transparent; padding: 0 12px 0 0; scrollbar-width: thin; }
+.release-notes-list .release-notes { padding-left: 20px; }
+.release-notes-list::-webkit-scrollbar { width: 6px; }
+.release-notes-list::-webkit-scrollbar-thumb { border-radius: 99px; background: color-mix(in srgb, var(--muted) 28%, transparent); }
+
+@media (max-width: 640px) {
+  .developer-release-summary { align-items: flex-start; padding: 14px; }
+  .developer-release-summary-meta { align-items: flex-start; }
+  .developer-release-summary .developer-status { white-space: nowrap; }
+  .developer-release-card-body { padding: 14px; }
+  .release-current-version { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .release-current-version strong { font-size: 24px; }
+}

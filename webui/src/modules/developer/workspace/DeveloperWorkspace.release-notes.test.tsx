@@ -37,11 +37,25 @@ describe("ReleaseNotes", () => {
   it("lists published and draft release notes", async () => {
     render(<ReleaseNotes />);
 
-    expect(await screen.findByText("v1.0.0 · 2026-08-01")).toBeVisible();
-    expect(screen.getByText("v1.1.0 · 2026-08-13")).toBeVisible();
+    expect(await screen.findByText("v1.0.0")).toBeVisible();
+    expect(screen.getByText("v1.1.0")).toBeVisible();
     expect(screen.getAllByText("已发布").length).toBeGreaterThan(0);
     expect(screen.getAllByText("草稿").length).toBeGreaterThan(0);
     expect(listMock).toHaveBeenCalledOnce();
+  });
+
+  it("collapses release history into accessible expandable entries", async () => {
+    render(<ReleaseNotes />);
+
+    await screen.findByText("v1.0.0");
+    const entries = document.querySelectorAll("details.developer-release-card");
+
+    expect(entries).toHaveLength(2);
+    expect((entries[0] as HTMLDetailsElement).open).toBe(true);
+    expect((entries[1] as HTMLDetailsElement).open).toBe(false);
+
+    fireEvent.click(entries[0].querySelector("summary") as HTMLElement);
+    expect((entries[0] as HTMLDetailsElement).open).toBe(false);
   });
 
   it("starts a new release note with today's date", async () => {
@@ -54,7 +68,7 @@ describe("ReleaseNotes", () => {
 
   it("creates a note from the form, trimming blank lines", async () => {
     render(<ReleaseNotes />);
-    await screen.findByText("v1.0.0 · 2026-08-01");
+    await screen.findByText("v1.0.0");
 
     fireEvent.change(screen.getByPlaceholderText("版本，例如 1.0.0"), { target: { value: "2.0.0" } });
     fireEvent.change(screen.getByLabelText("发布日期"), { target: { value: "2026-08-13" } });
@@ -72,7 +86,7 @@ describe("ReleaseNotes", () => {
 
   it("starts editing an existing note and saves through update", async () => {
     render(<ReleaseNotes />);
-    await screen.findByText("v1.0.0 · 2026-08-01");
+    await screen.findByText("v1.0.0");
 
     fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
     fireEvent.change(screen.getByPlaceholderText("每行一条更新与修复说明"), { target: { value: "改过的说明" } });
@@ -88,7 +102,7 @@ describe("ReleaseNotes", () => {
 
   it("deletes a note after confirmation", async () => {
     render(<ReleaseNotes />);
-    await screen.findByText("v1.0.0 · 2026-08-01");
+    await screen.findByText("v1.0.0");
 
     fireEvent.click(screen.getAllByRole("button", { name: "删除" })[0]);
 

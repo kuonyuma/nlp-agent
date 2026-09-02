@@ -3,6 +3,15 @@ import { readFileSync } from "node:fs";
 const stylesheet = readFileSync("src/app/styles.css", "utf8");
 
 describe("sandbox titlebar layout", () => {
+  it("keeps long student release notes in a borderless fixed-height scroller", () => {
+    const releaseRule = [...stylesheet.matchAll(/\.release-notes-list\s*\{([^}]*)\}/g)].at(-1)?.[1] ?? "";
+
+    expect(releaseRule).toContain("max-height: 300px");
+    expect(releaseRule).toContain("overflow-y: auto");
+    expect(releaseRule).toContain("border: 0");
+    expect(releaseRule).toContain("background: transparent");
+  });
+
   it("keeps the developer control plane white and full-width", () => {
     const compact = (value: string) => value.replace(/\s+/g, "");
     const matchingRule = (pattern: RegExp, fragment: string) => [...stylesheet.matchAll(pattern)]
