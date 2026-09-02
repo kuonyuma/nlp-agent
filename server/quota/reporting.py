@@ -262,9 +262,14 @@ class DurableModelUsageReporter(ModelUsageReporter):
             "interrupted",
         }:
             return None, None, "pending"
-        with self._engine.connect() as connection:
-            catalog = PricingCatalog(self._pricing_rules(connection, invocation))
         try:
+            # Load retired rules as well: a pending event may have completed
+            # under a historical version after that version was retired.
+            # A legacy overlap is a configuration error, but it must fail
+            # closed as pending rather than turning a usage report into 500
+            # or silently pricing the call as free.
+            with self._engine.connect() as connection:
+                catalog = PricingCatalog(self._pricing_rules(connection, invocation))
             priced = catalog.price(
                 invocation,
                 usage,
@@ -275,6 +280,7 @@ class DurableModelUsageReporter(ModelUsageReporter):
             EstimatedUsageCannotBePricedError,
             UnknownUsageCannotBePricedError,
             UnknownPricingKeyError,
+            ValueError,
         ):
             # Missing price configuration remains pending and is never
             # silently converted to zero credits.
@@ -292,7 +298,6 @@ class DurableModelUsageReporter(ModelUsageReporter):
         rows = connection.execute(
             select(PricingRuleModel.__table__).where(
                 PricingRuleModel.pricing_key == invocation.identity.pricing_key,
-                PricingRuleModel.status == "active",
             )
         ).mappings()
         return [

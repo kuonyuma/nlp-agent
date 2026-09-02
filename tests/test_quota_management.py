@@ -462,6 +462,78 @@ def test_policy_and_binding_lifecycle_has_safe_crud_semantics(quota_engine):
     assert management.retire_binding(binding["binding_id"], actor_user_id="developer-2")["status"] == "retired"
 
 
+def test_retiring_replacement_binding_restores_previous_effective_policy(quota_engine):
+    management = QuotaManagementService(quota_engine)
+    previous = management.create_policy(
+        code="binding-previous",
+        version="1",
+        name="Previous policy",
+        daily_limit_micro=100,
+        weekly_limit_micro=None,
+        request_limit_micro=100,
+        concurrency_limit=2,
+        created_by="developer-1",
+        effective_from=NOW,
+        status="active",
+    )
+    replacement = management.create_policy(
+        code="binding-replacement",
+        version="1",
+        name="Replacement policy",
+        daily_limit_micro=200,
+        weekly_limit_micro=None,
+        request_limit_micro=200,
+        concurrency_limit=2,
+        created_by="developer-1",
+        effective_from=NOW,
+        status="active",
+    )
+    management.bind_policy(
+        subject_type="user",
+        subject_id="user-1",
+        policy_id=previous["policy_id"],
+        effective_from=NOW,
+    )
+    current = management.bind_policy(
+        subject_type="user",
+        subject_id="user-1",
+        policy_id=replacement["policy_id"],
+        effective_from=NOW,
+    )
+
+    management.retire_binding(current["binding_id"], actor_user_id="developer-1")
+
+    explanation = management.explain_policy(
+        user_id="user-1",
+        workspace_id=None,
+        role_codes=(),
+        at=NOW,
+    )
+    assert explanation["base"]["policy_id"] == previous["policy_id"]
+
+
+def test_pricing_rule_management_preserves_versioned_lifecycle(quota_engine):
+    management = QuotaManagementService(quota_engine)
+    rule = management.create_pricing_rule(
+        pricing_key="deepseek/deepseek-v4-pro",
+        version="2026-09-02",
+        effective_from=NOW,
+        effective_until=None,
+        ordinary_input_credits_micro_per_million_tokens=1_000_000,
+        cached_input_credits_micro_per_million_tokens=250_000,
+        cache_write_credits_micro_per_million_tokens=500_000,
+        output_credits_micro_per_million_tokens=2_000_000,
+        reasoning_output_credits_micro_per_million_tokens=3_000_000,
+        created_by="developer-1",
+    )
+
+    assert management.get_pricing_rule(rule["pricing_rule_id"])["pricing_key"] == "deepseek/deepseek-v4-pro"
+    assert management.list_pricing_rules(pricing_key="deepseek/deepseek-v4-pro")[0]["version"] == "2026-09-02"
+
+    retired = management.retire_pricing_rule(rule["pricing_rule_id"], actor_user_id="developer-1")
+    assert retired["status"] == "retired"
+
+
 def test_policy_version_and_manual_adjustment_are_recorded_without_mutating_history(quota_engine):
     old_id = _policy(quota_engine, code="student", version="1", daily=100)
     _bind(quota_engine, subject_type="role", subject_id="student", policy_id=old_id)

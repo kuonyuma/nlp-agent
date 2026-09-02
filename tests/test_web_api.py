@@ -270,6 +270,38 @@ def test_quota_me_reports_database_schema_upgrade_instead_of_internal_error(web_
     assert response.json()["code"] == "quota_schema_outdated"
 
 
+def test_developer_quota_grant_supports_rest_revoke_route(web_app):
+    app, _engine = web_app
+
+    routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/grants/{grant_id}"
+    ]
+
+    assert any("DELETE" in getattr(route, "methods", set()) for route in routes)
+
+
+def test_developer_quota_pricing_rule_management_routes_are_exposed(web_app):
+    app, _engine = web_app
+
+    collection_methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/pricing-rules"
+        for method in getattr(route, "methods", set())
+    }
+    item_methods = {
+        method
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/v1/developer/quota/pricing-rules/{pricing_rule_id}"
+        for method in getattr(route, "methods", set())
+    }
+
+    assert {"GET", "POST"}.issubset(collection_methods)
+    assert {"GET", "DELETE"}.issubset(item_methods)
+
+
 def test_login_sets_httponly_cookie_reports_expiry_and_refreshes_on_activity(web_app):
     """The real login link: response body, Set-Cookie attributes and the
     sliding-cookie refresh that keeps a TTL increase from stranding existing

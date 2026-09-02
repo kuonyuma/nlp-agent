@@ -284,6 +284,37 @@ def test_mysql_bucket_initialization_uses_atomic_upsert():
     )
 
 
+def test_mysql_concurrency_lock_initialization_uses_atomic_upsert():
+    statements = []
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return {
+                "user_id": "user-upsert",
+                "active_units": 0,
+                "version": 1,
+            }
+
+    class Connection:
+        dialect = SimpleNamespace(name="mysql")
+
+        def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+    lock = QuotaService._get_or_create_concurrency_lock(
+        Connection(), user_id="user-upsert", now=NOW
+    )
+
+    assert lock["user_id"] == "user-upsert"
+    assert "ON DUPLICATE KEY UPDATE" in str(
+        statements[0].compile(dialect=mysql_dialect())
+    )
+
+
 def test_turn_idempotency_replays_one_reservation_and_one_reserve_ledger(quota_engine):
     _policy(quota_engine)
     service = QuotaService(quota_engine)
