@@ -18,8 +18,10 @@ from server.quota.models import (
     QuotaGrantModel,
     QuotaLedgerEntryModel,
     QuotaPolicyModel,
+    PricingRuleModel,
 )
 from server.quota.policy import resolve_effective_policy
+from server.quota.pricing import PricingCatalog, PricingRule
 
 
 UTC = timezone.utc
@@ -349,6 +351,176 @@ class QuotaManagementService:
                 statement = statement.where(QuotaPolicyModel.code == code)
             return [self._policy_payload(row) for row in connection.execute(statement).mappings()]
 
+    def create_pricing_rule(
+        self,
+        *,
+        pricing_key: str,
+        version: str,
+        effective_from: datetime,
+        effective_until: datetime | None,
+        ordinary_input_credits_micro_per_million_tokens: int,
+        cached_input_credits_micro_per_million_tokens: int,
+        cache_write_credits_micro_per_million_tokens: int,
+        output_credits_micro_per_million_tokens: int,
+        reasoning_output_credits_micro_per_million_tokens: int | None,
+        created_by: str,
+    ) -> dict[str, Any]:
+        """Create one active, immutable pricing version.
+
+        Pricing is deliberately explicit configuration.  A missing rule must
+        remain pending rather than becoming a free call, while overlapping
+        version windows are rejected before they can make pricing ambiguous.
+        """
+        candidate = PricingRule(
+            pricing_key=pricing_key,
+            version=version,
+            effective_from=_utc(effective_from),
+            effective_until=_utc(effective_until) if effective_until else None,
+            ordinary_input_credits_micro_per_million_tokens=(
+                ordinary_input_credits_micro_per_million_tokens
+            ),
+            cached_input_credits_micro_per_million_tokens=(
+                cached_input_credits_micro_per_million_tokens
+            ),
+            cache_write_credits_micro_per_million_tokens=(
+                cache_write_credits_micro_per_million_tokens
+            ),
+            output_credits_micro_per_million_tokens=output_credits_micro_per_million_tokens,
+            reasoning_output_credits_micro_per_million_tokens=(
+                reasoning_output_credits_micro_per_million_tokens
+            ),
+        )
+        with self._engine.begin() as connection:
+            existing = connection.execute(
+                select(PricingRuleModel)
+                .where(
+                    PricingRuleModel.pricing_key == candidate.pricing_key,
+                    PricingRuleModel.version == candidate.version,
+                )
+                .with_for_update()
+            ).mappings().first()
+            if existing is not None:
+                raise QuotaDomainError(
+                    QuotaErrorCode.PRICING_RULE_CONFLICT,
+                    "Pricing rule key and version already exist",
+                )
+            existing_rows = connection.execute(
+                select(PricingRuleModel)
+                .where(PricingRuleModel.pricing_key == candidate.pricing_key)
+                .with_for_update()
+            ).mappings().all()
+            try:
+                PricingCatalog(
+                    [self._pricing_rule_from_row(row) for row in existing_rows]
+                    + [candidate]
+                )
+            except ValueError as error:
+                raise QuotaDomainError(
+                    QuotaErrorCode.PRICING_RULE_CONFLICT,
+                    str(error),
+                ) from error
+
+            rule_id = str(uuid.uuid4())
+            try:
+                connection.execute(
+                    insert(PricingRuleModel).values(
+                        id=rule_id,
+                        pricing_key=candidate.pricing_key,
+                        version=candidate.version,
+                        effective_from=_db_time(candidate.effective_from),
+                        effective_until=(
+                            _db_time(candidate.effective_until)
+                            if candidate.effective_until
+                            else None
+                        ),
+                        ordinary_input_credits_micro_per_million_tokens=(
+                            candidate.ordinary_input_credits_micro_per_million_tokens
+                        ),
+                        cached_input_credits_micro_per_million_tokens=(
+                            candidate.cached_input_credits_micro_per_million_tokens
+                        ),
+                        cache_write_credits_micro_per_million_tokens=(
+                            candidate.cache_write_credits_micro_per_million_tokens
+                        ),
+                        output_credits_micro_per_million_tokens=(
+                            candidate.output_credits_micro_per_million_tokens
+                        ),
+                        reasoning_output_credits_micro_per_million_tokens=(
+                            candidate.reasoning_output_credits_micro_per_million_tokens
+                        ),
+                        status="active",
+                        created_by=created_by,
+                    )
+                )
+            except IntegrityError as error:
+                raise QuotaDomainError(
+                    QuotaErrorCode.PRICING_RULE_CONFLICT,
+                    "Pricing rule key and version already exist",
+                ) from error
+            row = connection.execute(
+                select(PricingRuleModel).where(PricingRuleModel.id == rule_id)
+            ).mappings().one()
+        return self._pricing_rule_payload(row)
+
+    def get_pricing_rule(self, pricing_rule_id: str) -> dict[str, Any]:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(PricingRuleModel).where(PricingRuleModel.id == pricing_rule_id)
+            ).mappings().first()
+        if row is None:
+            raise QuotaDomainError(
+                QuotaErrorCode.PRICING_RULE_CONFLICT,
+                "Pricing rule does not exist",
+            )
+        return self._pricing_rule_payload(row)
+
+    def list_pricing_rules(self, *, pricing_key: str | None = None) -> list[dict[str, Any]]:
+        with self._engine.connect() as connection:
+            statement = select(PricingRuleModel).order_by(
+                PricingRuleModel.pricing_key,
+                PricingRuleModel.effective_from.desc(),
+                PricingRuleModel.version,
+            )
+            if pricing_key:
+                statement = statement.where(PricingRuleModel.pricing_key == pricing_key)
+            return [
+                self._pricing_rule_payload(row)
+                for row in connection.execute(statement).mappings()
+            ]
+
+    def retire_pricing_rule(
+        self, pricing_rule_id: str, *, actor_user_id: str
+    ) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(PricingRuleModel)
+                .where(PricingRuleModel.id == pricing_rule_id)
+                .with_for_update()
+            ).mappings().first()
+            if row is None:
+                raise QuotaDomainError(
+                    QuotaErrorCode.PRICING_RULE_CONFLICT,
+                    "Pricing rule does not exist",
+                )
+            if row["status"] == "active":
+                now = datetime.now(UTC)
+                effective_until = row["effective_until"]
+                stored_now = _db_time(now)
+                if (
+                    row["effective_from"] <= stored_now
+                    and (effective_until is None or effective_until > stored_now)
+                ):
+                    effective_until = stored_now
+                connection.execute(
+                    update(PricingRuleModel)
+                    .where(PricingRuleModel.id == pricing_rule_id)
+                    .values(status="retired", effective_until=effective_until)
+                )
+            updated = connection.execute(
+                select(PricingRuleModel).where(PricingRuleModel.id == pricing_rule_id)
+            ).mappings().one()
+        return {**self._pricing_rule_payload(updated), "retired_by": actor_user_id}
+
     def bind_policy(
         self,
         *,
@@ -467,6 +639,29 @@ class QuotaManagementService:
                     .where(PolicyBindingModel.id == binding_id)
                     .values(status="retired", updated_at=_db_time(datetime.now(UTC)))
                 )
+                # bind_policy closes the predecessor at the replacement's
+                # start.  If the replacement is retired, reopen that exact
+                # predecessor so a failed rollout cannot leave a policy gap.
+                predecessor = connection.execute(
+                    select(PolicyBindingModel)
+                    .where(
+                        PolicyBindingModel.subject_type == row["subject_type"],
+                        PolicyBindingModel.subject_id == row["subject_id"],
+                        PolicyBindingModel.status == "active",
+                        PolicyBindingModel.effective_until == row["effective_from"],
+                    )
+                    .order_by(PolicyBindingModel.effective_from.desc())
+                    .with_for_update()
+                ).mappings().first()
+                if predecessor is not None:
+                    connection.execute(
+                        update(PolicyBindingModel)
+                        .where(PolicyBindingModel.id == predecessor["id"])
+                        .values(
+                            effective_until=row["effective_until"],
+                            updated_at=_db_time(datetime.now(UTC)),
+                        )
+                    )
             updated = connection.execute(
                 select(
                     *PolicyBindingModel.__table__.c,
@@ -914,6 +1109,71 @@ class QuotaManagementService:
             "created_by": row["created_by"],
             "created_at": _iso(row["created_at"]),
             "updated_at": _iso(row["updated_at"]),
+        }
+
+    @staticmethod
+    def _pricing_rule_from_row(row: Any) -> PricingRule:
+        return PricingRule(
+            pricing_key=row["pricing_key"],
+            version=row["version"],
+            effective_from=(
+                row["effective_from"].replace(tzinfo=UTC)
+                if row["effective_from"].tzinfo is None
+                else row["effective_from"]
+            ),
+            effective_until=(
+                row["effective_until"].replace(tzinfo=UTC)
+                if row["effective_until"] is not None
+                and row["effective_until"].tzinfo is None
+                else row["effective_until"]
+            ),
+            ordinary_input_credits_micro_per_million_tokens=int(
+                row["ordinary_input_credits_micro_per_million_tokens"]
+            ),
+            cached_input_credits_micro_per_million_tokens=int(
+                row["cached_input_credits_micro_per_million_tokens"]
+            ),
+            cache_write_credits_micro_per_million_tokens=int(
+                row["cache_write_credits_micro_per_million_tokens"]
+            ),
+            output_credits_micro_per_million_tokens=int(
+                row["output_credits_micro_per_million_tokens"]
+            ),
+            reasoning_output_credits_micro_per_million_tokens=(
+                int(row["reasoning_output_credits_micro_per_million_tokens"])
+                if row["reasoning_output_credits_micro_per_million_tokens"] is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _pricing_rule_payload(row: Any) -> dict[str, Any]:
+        return {
+            "pricing_rule_id": row["id"],
+            "pricing_key": row["pricing_key"],
+            "version": row["version"],
+            "effective_from": _iso(row["effective_from"]),
+            "effective_until": _iso(row["effective_until"]),
+            "ordinary_input_credits_micro_per_million_tokens": int(
+                row["ordinary_input_credits_micro_per_million_tokens"]
+            ),
+            "cached_input_credits_micro_per_million_tokens": int(
+                row["cached_input_credits_micro_per_million_tokens"]
+            ),
+            "cache_write_credits_micro_per_million_tokens": int(
+                row["cache_write_credits_micro_per_million_tokens"]
+            ),
+            "output_credits_micro_per_million_tokens": int(
+                row["output_credits_micro_per_million_tokens"]
+            ),
+            "reasoning_output_credits_micro_per_million_tokens": (
+                int(row["reasoning_output_credits_micro_per_million_tokens"])
+                if row["reasoning_output_credits_micro_per_million_tokens"] is not None
+                else None
+            ),
+            "status": row["status"],
+            "created_by": row["created_by"],
+            "created_at": _iso(row["created_at"]),
         }
 
     @staticmethod

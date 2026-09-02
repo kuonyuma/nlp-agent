@@ -31,6 +31,7 @@ class QuotaErrorCode(StrEnum):
     ADJUSTMENT_CONFLICT = "quota_adjustment_conflict"
     BINDING_CONFLICT = "quota_binding_conflict"
     INVALID_GRANT = "quota_invalid_grant"
+    PRICING_RULE_CONFLICT = "quota_pricing_rule_conflict"
 
 
 class QuotaDomainError(RuntimeError):

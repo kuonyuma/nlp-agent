@@ -93,6 +93,7 @@ from server.web.contracts import (
     QuotaRoleCreditOperationBody,
     QuotaGrantBody,
     QuotaGrantRevokeBody,
+    QuotaPricingRuleBody,
     QuotaPolicyBody,
     QuotaPolicyUpdateBody,
     QuotaUsageArchiveBody,
@@ -1302,6 +1303,103 @@ def create_app(
         authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
         return {"items": await asyncio.to_thread(quota_management_for(request).list_policies, code=code)}
 
+    @app.get("/api/v1/developer/quota/pricing-rules", tags=["quota"])
+    async def list_quota_pricing_rules(
+        request: Request,
+        principal: Principal,
+        pricing_key: str | None = Query(default=None, max_length=255),
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
+        return {"items": await asyncio.to_thread(
+            quota_management_for(request).list_pricing_rules,
+            pricing_key=pricing_key,
+        )}
+
+    @app.get("/api/v1/developer/quota/pricing-rules/{pricing_rule_id}", tags=["quota"])
+    async def get_quota_pricing_rule(
+        pricing_rule_id: str,
+        request: Request,
+        principal: Principal,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
+        try:
+            return await asyncio.to_thread(
+                quota_management_for(request).get_pricing_rule,
+                pricing_rule_id,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+
+    @app.post(
+        "/api/v1/developer/quota/pricing-rules",
+        status_code=status.HTTP_201_CREATED,
+        tags=["quota"],
+    )
+    async def create_quota_pricing_rule(
+        body: QuotaPricingRuleBody,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).create_pricing_rule,
+                **body.model_dump(),
+                created_by=principal.user_id,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        except ValueError as error:
+            return _problem(
+                request,
+                status_code=422,
+                code="quota_pricing_rule_invalid",
+                title="价格规则创建失败",
+                detail=str(error),
+            )
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_pricing_rule_created",
+            resource_type="quota_pricing_rule",
+            resource_id=row["pricing_rule_id"],
+            detail={
+                "pricing_key": row["pricing_key"],
+                "version": row["version"],
+            },
+        )
+        return row
+
+    @app.delete("/api/v1/developer/quota/pricing-rules/{pricing_rule_id}", tags=["quota"])
+    async def retire_quota_pricing_rule(
+        pricing_rule_id: str,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).retire_pricing_rule,
+                pricing_rule_id,
+                actor_user_id=principal.user_id,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_pricing_rule_retired",
+            resource_type="quota_pricing_rule",
+            resource_id=pricing_rule_id,
+            detail={
+                "pricing_key": row["pricing_key"],
+                "version": row["version"],
+            },
+        )
+        return row
+
     @app.get("/api/v1/developer/quota/policies/{policy_id}", tags=["quota"])
     async def get_quota_policy(policy_id: str, request: Request, principal: Principal):
         authorization_service.require(principal, Permission.SYSTEM_QUOTA_READ)
@@ -1565,6 +1663,46 @@ def create_app(
             detail={"owner_type": row["owner_type"], "owner_id": row["owner_id"], "allocated_micro": row["allocated_micro"]},
         )
         await emit_quota_snapshot(owner_type=row["owner_type"], owner_id=row["owner_id"])
+        return row
+
+    @app.post("/api/v1/developer/quota/grants/{grant_id}/revoke", tags=["quota"])
+    @app.delete("/api/v1/developer/quota/grants/{grant_id}", tags=["quota"])
+    async def revoke_quota_grant(
+        grant_id: str,
+        request: Request,
+        principal: Principal,
+        _claims: WriteClaims,
+        body: QuotaGrantRevokeBody | None = None,
+        idempotency_header: str | None = Header(
+            default=None, alias="Idempotency-Key"
+        ),
+    ):
+        authorization_service.require(principal, Permission.SYSTEM_QUOTA_MANAGE)
+        idempotency_key = (
+            body.idempotency_key
+            if body is not None
+            else idempotency_header or f"delete:{grant_id}"
+        )
+        try:
+            row = await asyncio.to_thread(
+                quota_management_for(request).revoke_grant,
+                grant_id,
+                actor_user_id=principal.user_id,
+                idempotency_key=idempotency_key,
+            )
+        except QuotaDomainError as error:
+            return quota_domain_problem(request, error)
+        await audit_quota_change(
+            request,
+            principal,
+            reason_code="quota_grant_revoked",
+            resource_type="quota_grant",
+            resource_id=grant_id,
+            detail={"owner_type": row["owner_type"], "owner_id": row["owner_id"]},
+        )
+        await emit_quota_snapshot(
+            owner_type=row["owner_type"], owner_id=row["owner_id"]
+        )
         return row
 
     @app.get("/api/v1/developer/quota/adjustments", tags=["quota"])

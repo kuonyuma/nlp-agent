@@ -4,6 +4,7 @@ import { QuotaManagementPage } from "./QuotaManagementPage";
 
 const methods = vi.hoisted(() => ({
   listQuotaPolicies: vi.fn(),
+  listQuotaPricingRules: vi.fn(),
   listQuotaBindings: vi.fn(),
   listQuotaGrants: vi.fn(),
   listQuotaAdjustments: vi.fn(),
@@ -15,8 +16,10 @@ const methods = vi.hoisted(() => ({
   listQuotaArchiveBatches: vi.fn(),
   purgeQuotaUsage: vi.fn(),
   createQuotaPolicy: vi.fn(),
+  createQuotaPricingRule: vi.fn(),
   updateQuotaPolicy: vi.fn(),
   archiveQuotaPolicy: vi.fn(),
+  retireQuotaPricingRule: vi.fn(),
   publishQuotaPolicy: vi.fn(),
   bindQuotaPolicy: vi.fn(),
   retireQuotaBinding: vi.fn(),
@@ -38,6 +41,7 @@ describe("QuotaManagementPage", () => {
   beforeEach(() => {
     Object.values(methods).forEach((method) => method.mockReset());
     methods.listQuotaPolicies.mockResolvedValue({ items: [] });
+    methods.listQuotaPricingRules.mockResolvedValue({ items: [] });
     methods.listQuotaBindings.mockResolvedValue({ items: [] });
     methods.listQuotaGrants.mockResolvedValue({ items: [] });
     methods.listQuotaAdjustments.mockResolvedValue({ items: [] });
@@ -49,8 +53,10 @@ describe("QuotaManagementPage", () => {
     methods.listQuotaArchiveBatches.mockResolvedValue({ items: [] });
     methods.purgeQuotaUsage.mockResolvedValue({ purged_events: 2, deleted_events: 2, cutoff_at: "2026-08-01T00:00:00Z" });
     methods.createQuotaPolicy.mockResolvedValue({});
+    methods.createQuotaPricingRule.mockResolvedValue({});
     methods.updateQuotaPolicy.mockResolvedValue({});
     methods.archiveQuotaPolicy.mockResolvedValue({});
+    methods.retireQuotaPricingRule.mockResolvedValue({});
     methods.publishQuotaPolicy.mockResolvedValue({});
     methods.bindQuotaPolicy.mockResolvedValue({});
     methods.retireQuotaBinding.mockResolvedValue({});
@@ -114,6 +120,17 @@ describe("QuotaManagementPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "手工调整" }));
     expect(screen.getByRole("heading", { name: "手工调整" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Quota Grant 分配" })).not.toBeInTheDocument();
+  });
+
+  it("exposes versioned pricing rules in the developer control plane", async () => {
+    render(<QuotaManagementPage />);
+
+    await waitFor(() => expect(methods.listQuotaPricingRules).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "价格规则" }));
+
+    expect(screen.getByRole("heading", { name: "价格规则" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("deepseek/deepseek-v4-pro")).toBeInTheDocument();
+    expect(screen.getByText(/缺少规则的调用会保持待处理/)).toBeInTheDocument();
   });
 
   it("offers role gifting and submits one batch operation for the selected role", async () => {

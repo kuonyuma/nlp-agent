@@ -271,6 +271,20 @@ class QuotaGrantRevokeBody(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=255)
 
 
+class QuotaPricingRuleBody(StrictModel):
+    pricing_key: str = Field(min_length=1, max_length=255)
+    version: str = Field(min_length=1, max_length=64)
+    effective_from: datetime
+    effective_until: datetime | None = None
+    ordinary_input_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    cached_input_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    cache_write_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    output_credits_micro_per_million_tokens: StrictInt = Field(ge=0)
+    reasoning_output_credits_micro_per_million_tokens: StrictInt | None = Field(
+        default=None, ge=0
+    )
+
+
 class QuotaBillingStatementBody(StrictModel):
     provider: str = Field(min_length=1, max_length=128)
     statement_id: str = Field(min_length=1, max_length=255)
