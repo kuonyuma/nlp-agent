@@ -95,3 +95,44 @@ async def test_developer_ui_cannot_mutate_reserved_web_profiles(operation):
         developer_runtime.DeveloperConfigurationError, match="reserved by the runtime"
     ):
         await call
+
+
+@pytest.mark.asyncio
+async def test_mcp_update_without_credentials_preserves_existing_secret_config(monkeypatch):
+    from server.web import developer_runtime
+
+    existing = {
+        "tools": {
+            "mcp_servers": {
+                "github": {
+                    "transport": "stdio",
+                    "command": "python",
+                    "env": {"GITHUB_TOKEN": "secret"},
+                    "headers": {"X-Api-Key": "secret-header"},
+                }
+            }
+        }
+    }
+    saved: dict[str, object] = {}
+    monkeypatch.setattr(developer_runtime, "load_runtime_overrides", lambda: existing)
+    monkeypatch.setattr(developer_runtime, "save_runtime_overrides", lambda value: saved.update(value))
+    monkeypatch.setattr(developer_runtime, "test_mcp_server", lambda _name, _config: _connected())
+    monkeypatch.setattr(developer_runtime, "reload_runtime", lambda **_kwargs: _reloaded())
+
+    result = await developer_runtime.upsert_mcp_server(
+        "github", {"transport": "stdio", "command": "uv", "args": ["run", "server.py"]}
+    )
+
+    config = saved["tools"]["mcp_servers"]["github"]  # type: ignore[index]
+    assert config["env"] == {"GITHUB_TOKEN": "secret"}  # type: ignore[index]
+    assert config["headers"] == {"X-Api-Key": "secret-header"}  # type: ignore[index]
+    assert config["command"] == "uv"  # type: ignore[index]
+    assert result["server"] == "github"
+
+
+async def _connected() -> dict[str, object]:
+    return {"ok": True, "server": "github", "tools": []}
+
+
+async def _reloaded() -> dict[str, object]:
+    return {"restart_required": False}

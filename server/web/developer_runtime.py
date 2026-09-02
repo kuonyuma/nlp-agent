@@ -82,9 +82,20 @@ async def update_custom_tools(custom: dict[str, Any]) -> dict[str, Any]:
 
 async def upsert_mcp_server(name: str, config: dict[str, Any]) -> dict[str, Any]:
     name = _require_name(name, "MCP server name")
-    validated = MCPServerConfig.model_validate(config)
-    await test_mcp_server(name, validated.model_dump(mode="json"))
     overrides = _section("tools")
+    stored_tools = overrides.get("tools")
+    stored_servers = stored_tools.get("mcp_servers") if isinstance(stored_tools, dict) else None
+    stored = stored_servers.get(name) if isinstance(stored_servers, dict) else None
+    candidate = dict(config)
+    if isinstance(stored, dict):
+        # Secret values are intentionally omitted from the browser snapshot.
+        # Preserve them during ordinary edits unless the caller explicitly
+        # sends an env/headers field (including an explicit empty mapping).
+        for key in ("env", "headers"):
+            if key not in candidate and isinstance(stored.get(key), dict):
+                candidate[key] = stored[key]
+    validated = MCPServerConfig.model_validate(candidate)
+    await test_mcp_server(name, validated.model_dump(mode="json"))
     servers = overrides["tools"].setdefault("mcp_servers", {})
     servers[name] = validated.model_dump(mode="json")
     save_runtime_overrides(overrides)

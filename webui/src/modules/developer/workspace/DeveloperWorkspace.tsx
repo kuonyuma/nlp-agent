@@ -12,6 +12,7 @@ import { UserManagementPage } from "@/modules/admin/UserManagementPage";
 import { RoleManagementPageV2 } from "@/modules/admin/RoleManagementPageV2";
 import { MenuManagementPageV2 } from "@/modules/admin/MenuManagementPageV2";
 import { AgentSessionListPageV2 } from "@/modules/admin/AgentSessionListPageV2";
+import { MarkdownContent } from "@/modules/student/components/MarkdownContent";
 import { monitorUrl } from "@/monitor/monitor-helpers";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { QuotaManagementPage } from "@/modules/quota/QuotaManagementPage";
@@ -112,20 +113,208 @@ function Models({ snapshot }: { snapshot: DeveloperSnapshot }) {
   return <><Section title="Provider / API Key" hint="密钥值永远不会发送到浏览器。"><div className="developer-card-grid">{Object.entries(snapshot.models.providers).map(([name, provider]) => <article className="developer-card" key={name}><div><KeyRound size={18} /><strong>{name}</strong></div><StatusPill ok={Boolean(provider.api_key_configured)}>{provider.api_key_configured ? "密钥已配置" : "缺少密钥"}</StatusPill><p>{String(provider.base_url ?? "")}</p></article>)}</div></Section><Section title="模型路由与故障转移"><JsonBlock value={{ defaults: snapshot.models.defaults, routes: snapshot.models.routes }} /></Section><Section title="思考、生成、超时与重试预设"><JsonBlock value={snapshot.models.presets} /></Section></>;
 }
 
-function Mcp({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
+type McpTransport = "stdio" | "sse" | "streamable_http";
+type McpDraft = {
+  transport: McpTransport;
+  command: string;
+  args: string[];
+  url: string;
+  cwd: string;
+  enabled_tools: string[];
+  scopes: string[];
+  timeout_s: number;
+  max_concurrency: number;
+  allow_private_network: boolean;
+};
+
+const MCP_ADVANCED_KEYS = ["env", "headers", "read_only_tools", "idempotent_tools", "high_risk_tools", "session_exclusive_tools", "global_exclusive_tools"] as const;
+const MCP_DEFAULT_ADVANCED = { read_only_tools: [], idempotent_tools: [], high_risk_tools: [], session_exclusive_tools: [], global_exclusive_tools: [] };
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function asStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function commaList(value: string): string[] {
+  return value.split(/[,\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function newMcpDraft(value: Record<string, unknown> = {}): McpDraft {
+  const transport = value.transport === "sse" || value.transport === "streamable_http" ? value.transport : "stdio";
+  return {
+    transport,
+    command: String(value.command ?? ""),
+    args: asStringList(value.args),
+    url: String(value.url ?? ""),
+    cwd: String(value.cwd ?? ""),
+    enabled_tools: asStringList(value.enabled_tools).length ? asStringList(value.enabled_tools) : ["*"],
+    scopes: asStringList(value.scopes).length ? asStringList(value.scopes) : ["worker"],
+    timeout_s: Number(value.timeout_s ?? 30),
+    max_concurrency: Number(value.max_concurrency ?? 1),
+    allow_private_network: Boolean(value.allow_private_network),
+  };
+}
+
+function advancedMcpText(value: Record<string, unknown> = {}): string {
+  const advanced = Object.fromEntries(MCP_ADVANCED_KEYS.filter((key) => key in value).map((key) => [key, value[key]]));
+  return JSON.stringify(Object.keys(advanced).length ? advanced : MCP_DEFAULT_ADVANCED, null, 2);
+}
+
+function buildMcpConfig(draft: McpDraft, advancedText: string): Record<string, unknown> {
+  const advanced = asRecord(JSON.parse(advancedText));
+  return {
+    ...advanced,
+    transport: draft.transport,
+    command: draft.command.trim(),
+    args: draft.args,
+    url: draft.url.trim(),
+    cwd: draft.cwd.trim(),
+    enabled_tools: draft.enabled_tools,
+    scopes: draft.scopes,
+    timeout_s: Number.isFinite(draft.timeout_s) ? draft.timeout_s : 30,
+    max_concurrency: Number.isFinite(draft.max_concurrency) ? draft.max_concurrency : 1,
+    allow_private_network: draft.allow_private_network,
+  };
+}
+
+function skillBody(content: string): string {
+  return content.replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*/, "").trim();
+}
+
+function replaceSkillName(content: string, name: string): string {
+  return content.replace(/^(---\s*\r?\nname:\s*)[^\r\n]*/i, `$1${name || "example"}`);
+}
+
+function profileConsumers(snapshot: DeveloperSnapshot, skillName: string): string[] {
+  const profiles = asRecord(snapshot.agents.profiles);
+  return Object.entries(profiles).filter(([, value]) => asStringList(asRecord(value).skills).includes(skillName)).map(([name]) => name);
+}
+
+export function Mcp({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
   const entries = Object.entries(snapshot.tools.mcp_servers);
-  const [name, setName] = useState(""); const [config, setConfig] = useState('{\n  "transport": "stdio",\n  "command": "",\n  "args": [],\n  "enabled_tools": ["*"],\n  "scopes": ["worker"]\n}'); const [result, setResult] = useState("");
-  const parsed = () => JSON.parse(config) as Record<string, unknown>;
-  return <><Section title="MCP Servers" hint="保存会持久化并热重连；测试使用隔离 Catalog，不会把试连工具泄漏到运行时。"><div className="developer-editor"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="server 名称" /><textarea value={config} onChange={(event) => setConfig(event.target.value)} spellCheck={false} /><div><button type="button" onClick={() => { try { void api.testMcp(name, parsed()).then((value) => setResult(`连接成功：${value.tools.join(", ") || "未发现工具"}`)).catch((error) => setResult(error.message)); } catch (error) { setResult(String(error)); } }}>测试连接</button><button type="button" onClick={() => { try { void api.saveMcp(name, parsed()).then(async () => { setResult("已保存并热重连"); await refresh(); }).catch((error) => setResult(error.message)); } catch (error) { setResult(String(error)); } }}>保存 MCP</button>{result && <small>{result}</small>}</div></div>{entries.map(([serverName, serverConfig]) => <div className="developer-managed-card" key={serverName}><strong>{serverName}</strong><JsonBlock value={serverConfig} /><button className="danger" type="button" onClick={() => { if (confirm(`删除 MCP ${serverName}？`)) void api.deleteMcp(serverName).then(refresh); }}>删除</button></div>)}</Section></>;
+  const [name, setName] = useState("");
+  const [draft, setDraft] = useState<McpDraft>(() => newMcpDraft());
+  const [advancedText, setAdvancedText] = useState(() => advancedMcpText());
+  const [result, setResult] = useState("");
+  const [busy, setBusy] = useState<"test" | "save" | null>(null);
+  const updateDraft = <K extends keyof McpDraft>(key: K, value: McpDraft[K]) => setDraft((current) => ({ ...current, [key]: value }));
+  const selectServer = (serverName: string, value: Record<string, unknown>) => {
+    setName(serverName);
+    setDraft(newMcpDraft(value));
+    setAdvancedText(advancedMcpText(value));
+    setResult("");
+  };
+  const reset = () => {
+    setName("");
+    setDraft(newMcpDraft());
+    setAdvancedText(advancedMcpText());
+    setResult("");
+  };
+  const submit = async (action: "test" | "save") => {
+    if (!name.trim()) { setResult("请先填写连接名称"); return; }
+    setBusy(action);
+    try {
+      const config = buildMcpConfig(draft, advancedText);
+      if (action === "test") {
+        const value = await api.testMcp(name.trim(), config);
+        setResult(`连接成功：${value.tools.join(", ") || "未发现工具"}`);
+      } else {
+        await api.saveMcp(name.trim(), config);
+        setResult("已保存并热重连");
+        await refresh();
+      }
+    } catch (error) {
+      setResult(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return <div className="developer-integrations-page">
+    <div className="developer-integrations-heading"><div><span className="developer-eyebrow">MODEL CONTEXT PROTOCOL</span><h1>MCP 连接</h1><p>把外部 MCP Server 接入统一工具目录。先测试发现工具，再保存并热重连到 Gateway。</p></div><button type="button" className="developer-integration-secondary" onClick={reset}><PlugZap size={15} />新建连接</button></div>
+    <div className="developer-mcp-layout">
+      <section className="developer-integration-form"><div className="developer-integration-section-heading"><div><h2>{name ? `编辑 ${name}` : "新建 MCP 连接"}</h2><p>凭据不会从服务端回显；已有凭据在不填写时会保留。</p></div><span className="developer-integration-kicker">SAFE CONNECT</span></div>
+        <div className="developer-mcp-field-grid">
+          <label>MCP 名称<input aria-label="MCP 名称" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如 knowledge-server" /></label>
+          <label>传输方式<select aria-label="传输方式" value={draft.transport} onChange={(event) => updateDraft("transport", event.target.value as McpTransport)}><option value="stdio">stdio · 本地进程</option><option value="streamable_http">Streamable HTTP · 远程</option><option value="sse">SSE · 远程</option></select></label>
+          {draft.transport === "stdio" ? <label>stdio 命令<input aria-label="stdio 命令" value={draft.command} onChange={(event) => updateDraft("command", event.target.value)} placeholder="例如 python" /></label> : <label>服务 URL<input aria-label="服务 URL" value={draft.url} onChange={(event) => updateDraft("url", event.target.value)} placeholder="https://example.com/mcp" /></label>}
+          <label>{draft.transport === "stdio" ? "启动参数" : "工作目录"}<input aria-label={draft.transport === "stdio" ? "启动参数" : "工作目录"} value={draft.transport === "stdio" ? draft.args.join(" ") : draft.cwd} onChange={(event) => updateDraft(draft.transport === "stdio" ? "args" : "cwd", draft.transport === "stdio" ? event.target.value.trim().split(/\s+/).filter(Boolean) : event.target.value)} placeholder={draft.transport === "stdio" ? "server.py --stdio" : "可选"} /></label>
+          <label>可用工具<input aria-label="可用工具" value={draft.enabled_tools.join(", ")} onChange={(event) => updateDraft("enabled_tools", commaList(event.target.value))} placeholder="* 或 search, fetch" /></label>
+          <label>超时（秒）<input aria-label="超时（秒）" type="number" min="1" max="1800" value={draft.timeout_s} onChange={(event) => updateDraft("timeout_s", Number(event.target.value))} /></label>
+          <label>并发上限<input aria-label="并发上限" type="number" min="1" max="100" value={draft.max_concurrency} onChange={(event) => updateDraft("max_concurrency", Number(event.target.value))} /></label>
+        </div>
+        <div className="developer-mcp-options"><span>允许作用域</span><label><input type="checkbox" checked={draft.scopes.includes("worker")} onChange={(event) => updateDraft("scopes", event.target.checked ? [...new Set([...draft.scopes, "worker"])] : draft.scopes.filter((scope) => scope !== "worker"))} />Worker</label><label><input type="checkbox" checked={draft.scopes.includes("coordinator")} onChange={(event) => updateDraft("scopes", event.target.checked ? [...new Set([...draft.scopes, "coordinator"])] : draft.scopes.filter((scope) => scope !== "coordinator"))} />Coordinator</label><label><input type="checkbox" checked={draft.allow_private_network} onChange={(event) => updateDraft("allow_private_network", event.target.checked)} />允许私有网络（仅可信环境）</label></div>
+        <details className="developer-integration-advanced"><summary>凭据与安全标签 <ChevronDown size={15} /></summary><p>可在这里填写 env、headers 以及工具安全分类；服务端不会把它们回显到快照。</p><textarea aria-label="高级 MCP 配置 JSON" value={advancedText} onChange={(event) => setAdvancedText(event.target.value)} spellCheck={false} /></details>
+        <div className="developer-integration-actions"><button type="button" onClick={() => void submit("test")} disabled={busy !== null}><Activity size={15} />{busy === "test" ? "测试中…" : "测试连接"}</button><button className="primary" type="button" onClick={() => void submit("save")} disabled={busy !== null}><PlugZap size={15} />{busy === "save" ? "保存中…" : "保存连接"}</button>{result && <small className={result.startsWith("连接成功") || result.startsWith("已保存") ? "success" : "error"} role="status">{result}</small>}</div>
+      </section>
+      <aside className="developer-integration-list"><div className="developer-integration-section-heading"><div><h2>已配置连接</h2><p>{entries.length ? `${entries.length} 个 MCP Server` : "还没有连接"}</p></div></div>{entries.length ? entries.map(([serverName, serverConfig]) => { const tools = snapshot.tools.items.filter((item) => String(item.source) === "mcp" && String(item.provider) === serverName).map((item) => String(item.name)); const uniqueTools = [...new Set(tools)]; return <article className="developer-mcp-card" key={serverName}><div className="developer-mcp-card-top"><div className="developer-mcp-card-title"><PlugZap size={17} /><span><strong>{serverName}</strong><small>{String(serverConfig.transport ?? "自动识别")} · {serverConfig.credentials_configured ? "凭据已配置" : "无额外凭据"}</small></span></div><StatusPill ok={uniqueTools.length > 0}>{uniqueTools.length > 0 ? "已连接" : "已配置"}</StatusPill></div><p>{uniqueTools.length ? `已发现 ${uniqueTools.length} 个工具` : "保存后会尝试连接并发现工具"}</p>{uniqueTools.length > 0 && <div className="developer-mcp-tools">{uniqueTools.slice(0, 6).map((tool) => <code key={tool}>{tool}</code>)}{uniqueTools.length > 6 && <small>+{uniqueTools.length - 6} 个</small>}</div>}<div className="developer-mcp-card-actions"><button type="button" onClick={() => selectServer(serverName, serverConfig)}>编辑 {serverName}</button><button className="danger" type="button" onClick={() => { if (confirm(`删除 MCP ${serverName}？`)) void api.deleteMcp(serverName).then(refresh); }}>删除</button></div></article>; }) : <div className="developer-integration-empty"><PlugZap size={21} /><strong>从一个 MCP Server 开始</strong><p>连接成功后，发现的工具会进入统一工具目录，并按作用域交给 Agent 使用。</p></div>}</aside>
+    </div>
+  </div>;
 }
 
-function Skills({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
-  const [name, setName] = useState(""); const [content, setContent] = useState("---\nname: example\ndescription: 用途说明\nallowed_tools: []\ncapabilities: []\n---\n\n写入该 Skill 的操作流程。"); const [message, setMessage] = useState("");
-  return <Section title="Skills" hint="保存到 .data/skills/<name>/SKILL.md，并立即重新加载。项目内 Skill 只读；同名工作区 Skill 会覆盖它。"><div className="developer-editor"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Skill 名称" /><textarea value={content} onChange={(event) => setContent(event.target.value)} spellCheck={false} /><div><button type="button" onClick={() => void api.saveSkill(name, content).then(async () => { setMessage("已保存并重载"); await refresh(); }).catch((error) => setMessage(error.message))}>保存 Skill</button>{message && <small>{message}</small>}</div></div><div className="developer-list">{snapshot.skills.map((skill) => <article key={skill.path}><FileKey2 size={18} /><span><strong>{skill.name}</strong><small>{skill.description} · {skill.source} · {skill.path}</small></span><StatusPill ok={skill.available}>{skill.available ? "可用" : "缺少依赖"}</StatusPill><button type="button" onClick={() => void api.getSkill(skill.name).then((value) => { setName(value.name); setContent(value.content); })}>编辑</button>{skill.source === "workspace" && <button className="danger" type="button" onClick={() => { if (confirm(`删除 Skill ${skill.name}？`)) void api.deleteSkill(skill.name).then(refresh); }}>删除</button>}</article>)}</div></Section>;
+export function Skills({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
+  const [selectedName, setSelectedName] = useState("");
+  const [name, setName] = useState("");
+  const [content, setContent] = useState("---\nname: example\ndescription: 用途说明\nallowed_tools: []\ncapabilities: []\n---\n\n写入该 Skill 的操作流程。");
+  const [isNew, setIsNew] = useState(true);
+  const [mode, setMode] = useState<"edit" | "preview">("edit");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const selectedSkill = snapshot.skills.find((skill) => skill.name === selectedName);
+  const consumers = selectedName ? profileConsumers(snapshot, selectedName) : [];
+  const selectSkill = async (skill: DeveloperSnapshot["skills"][number]) => {
+    setSelectedName(skill.name);
+    setName(skill.name);
+    setIsNew(false);
+    setMode("edit");
+    setMessage("读取 Skill…");
+    try {
+      const value = await api.getSkill(skill.name);
+      setName(value.name);
+      setContent(value.content);
+      setMessage("");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const createSkill = () => {
+    setSelectedName("");
+    setName("");
+    setContent("---\nname: example\ndescription: 用途说明\nallowed_tools: []\ncapabilities: []\n---\n\n写入该 Skill 的操作流程。");
+    setIsNew(true);
+    setMode("edit");
+    setMessage("");
+  };
+  const save = async () => {
+    if (!name.trim()) { setMessage("请先填写 Skill 名称"); return; }
+    setBusy(true);
+    try {
+      await api.saveSkill(name.trim(), replaceSkillName(content, name.trim()));
+      setSelectedName(name.trim());
+      setIsNew(false);
+      setMessage("已保存并重载，新的 Worker 会话即可使用");
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <div className="developer-integrations-page">
+    <div className="developer-integrations-heading"><div><span className="developer-eyebrow">WORKER BEHAVIOR</span><h1>Skills</h1><p>用 Markdown 定义 Agent 的工作流程、工具边界和能力要求；保存后会立即重新加载 Skill。</p></div><button type="button" className="developer-integration-secondary" onClick={createSkill}><FileKey2 size={15} />新建 Skill</button></div>
+    <div className="developer-skills-layout">
+      <aside className="developer-skill-directory"><div className="developer-integration-section-heading"><div><h2>Skill 目录</h2><p>{snapshot.skills.length ? `${snapshot.skills.length} 个已发现` : "还没有 Skill"}</p></div></div>{snapshot.skills.length ? snapshot.skills.map((skill) => <button type="button" className={`developer-skill-item ${skill.name === selectedName ? "active" : ""}`} aria-pressed={skill.name === selectedName} key={skill.path} onClick={() => void selectSkill(skill)}><span className="developer-skill-item-icon"><FileKey2 size={16} /></span><span><strong>{skill.name}</strong><small>{skill.description}</small><em>{skill.source === "workspace" ? "工作区" : "项目内"}</em>{skill.missing_requirements.length > 0 && <em className="developer-skill-item-warning">缺少依赖：{skill.missing_requirements.join("、")}</em>}</span><StatusPill ok={skill.available}>{skill.available ? "可用" : "缺少依赖"}</StatusPill></button>) : <div className="developer-integration-empty"><FileKey2 size={21} /><strong>还没有 Skill</strong><p>新建一个 Skill，把可复用的工作方法交给 Worker。</p></div>}</aside>
+      <section className="developer-skill-editor"><div className="developer-integration-section-heading"><div><h2>{isNew ? "新建 Skill" : name || "Skill"}</h2><p>{selectedSkill?.source === "project" ? "项目内 Skill 只读；保存会创建同名的工作区覆盖。" : "工作区 Skill 可编辑、可删除，并会参与 Worker Profile 解析。"}</p></div>{selectedSkill && <StatusPill ok={selectedSkill.available}>{selectedSkill.available ? "可用" : "缺少依赖"}</StatusPill>}</div>{selectedSkill && <div className="developer-skill-meta"><span><strong>来源</strong>{selectedSkill.source === "workspace" ? "工作区" : "项目内"}</span><span><strong>文件</strong>{selectedSkill.path}</span><span><strong>使用</strong>{consumers.length ? consumers.join("、") : "尚未绑定 Worker Profile"}</span></div>}{selectedSkill && !selectedSkill.available && <div className="developer-skill-warning"><ShieldCheck size={16} /><span>缺少依赖：{selectedSkill.missing_requirements.join("、") || "请检查 Skill 配置"}。当前不会被标记为可用。</span></div>}<label className="developer-skill-name-field">Skill 名称<input aria-label="Skill 名称" value={name} onChange={(event) => { const next = event.target.value; setName(next); if (isNew) setContent((current) => replaceSkillName(current, next)); }} placeholder="例如 research" /></label><div className="developer-skill-tabs"><button type="button" aria-pressed={mode === "edit"} onClick={() => setMode("edit")}>编辑</button><button type="button" aria-pressed={mode === "preview"} onClick={() => setMode("preview")}>预览</button></div>{mode === "edit" ? <textarea className="developer-skill-textarea" aria-label="Skill Markdown" value={content} onChange={(event) => setContent(event.target.value)} spellCheck={false} /> : <div className="developer-skill-preview"><MarkdownContent>{skillBody(content) || "暂无 SOP 内容"}</MarkdownContent></div>}<div className="developer-integration-actions"><button type="button" onClick={() => void save()} disabled={busy}>{busy ? "保存中…" : selectedSkill?.source === "project" ? "创建工作区覆盖" : isNew ? "保存 Skill" : "保存修改"}</button>{!isNew && selectedSkill?.source === "workspace" && <button className="danger" type="button" onClick={() => { if (confirm(`删除 Skill ${name}？`)) void api.deleteSkill(name).then(async () => { createSkill(); await refresh(); }); }}>删除 Skill</button>}{message && <small className={message.startsWith("已保存") ? "success" : message === "读取 Skill…" ? "pending" : "error"} role="status">{message}</small>}</div></section>
+    </div>
+  </div>;
 }
 
-function Automations({ snapshot }: { snapshot: DeveloperSnapshot }) {
-  return <><Section title="Apps"><div className="developer-empty"><Box /><strong>Apps Registry 未启用</strong><p>{snapshot.features.apps.reason}</p></div></Section><Section title="Automations / Cron"><div className="developer-empty"><Clock3 /><strong>Cron Runtime 未启用</strong><p>{snapshot.features.automations.reason}</p></div></Section></>;
+export function Automations({ snapshot }: { snapshot: DeveloperSnapshot }) {
+  const apps = snapshot.features.apps ?? { available: false, reason: "" };
+  const automations = snapshot.features.automations ?? { available: false, reason: "" };
+  return <div className="developer-integrations-page"><div className="developer-integrations-heading"><div><span className="developer-eyebrow">EXTENSIONS ROADMAP</span><h1>Apps 与自动化</h1><p>这里负责外部应用连接和定时任务。目前版本尚未接入运行时，先把边界说清楚，避免把空页面误认为可配置功能。</p></div></div><div className="developer-apps-grid"><article className="developer-app-roadmap-card"><div className="developer-app-roadmap-icon"><Box size={20} /></div><div className="developer-app-roadmap-top"><div><span>EXTERNAL APPS</span><h2>Apps 注册表</h2></div><StatusPill ok={apps.available}>{apps.available ? "已启用" : "规划中"}</StatusPill></div><p>未来用于管理 OAuth、外部服务授权和应用级连接。当前版本尚未提供 App Registry 或对应的连接接口。</p><small>需要后端注册表、授权生命周期和按工作区隔离后，才会开放配置。</small></article><article className="developer-app-roadmap-card"><div className="developer-app-roadmap-icon"><Clock3 size={20} /></div><div className="developer-app-roadmap-top"><div><span>SCHEDULED WORK</span><h2>自动化任务</h2></div><StatusPill ok={automations.available}>{automations.available ? "已启用" : "规划中"}</StatusPill></div><p>未来用于创建、暂停和追踪 Cron/定时工作流。当前没有 Cron Runtime，不会伪造任务入口。</p><small>接入后会在这里展示任务状态、最近运行和失败原因。</small></article></div><section className="developer-apps-now"><Sparkles size={18} /><div><strong>现在可用的扩展方式</strong><p>MCP 负责连接外部工具，Skills 负责定义 Worker 行为。它们已经有独立的管理台；Apps 和自动化将在具备运行时后再接入。</p></div></section></div>;
 }
 
 const FEEDBACK_PAGE_SIZE = 20;
