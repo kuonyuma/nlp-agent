@@ -134,3 +134,12 @@ async def developer_snapshot(
             "protocol": {"http": "/api/v1", "websocket": "/ws/v1"},
         },
     }
+
+
+async def developer_health(
+    principal: AuthenticatedPrincipal, gateway: Any
+) -> dict[str, Any]:
+    """Return the lightweight live health payload used by runtime diagnostics."""
+    authorization_service.require(principal, Permission.SYSTEM_RUNTIME_INSPECT)
+    health = await gateway.health()
+    return health.model_dump(mode="json")

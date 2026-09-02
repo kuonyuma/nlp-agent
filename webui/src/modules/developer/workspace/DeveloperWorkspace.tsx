@@ -7,7 +7,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, ensureAuth } from "@/platform/http/api";
-import type { DeveloperSnapshot, FeedbackCategory, FeedbackPriority, FeedbackStatus, FeedbackThread, FeedbackThreadSummary, ReleaseNoteEntry } from "@/shared/types";
+import type { DeveloperRuntimeHealth, DeveloperSnapshot, FeedbackCategory, FeedbackPriority, FeedbackStatus, FeedbackThread, FeedbackThreadSummary, ReleaseNoteEntry } from "@/shared/types";
 import { UserManagementPage } from "@/modules/admin/UserManagementPage";
 import { RoleManagementPageV2 } from "@/modules/admin/RoleManagementPageV2";
 import { MenuManagementPageV2 } from "@/modules/admin/MenuManagementPageV2";
@@ -31,7 +31,7 @@ const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge; group
   { page: "feedback", label: "意见反馈", icon: Mail, group: "operations" },
   { page: "sessions", label: "Agent 会话", icon: MessageSquare, group: "operations" },
   { page: "quotas", label: "额度管理", icon: WalletCards, group: "operations" },
-  { page: "settings", label: "运行时设置", icon: Settings2, group: "operations" },
+  { page: "settings", label: "运行诊断", icon: Settings2, group: "operations" },
   { page: "users", label: "用户管理", icon: Users, group: "operations" },
   { page: "roles", label: "角色权限", icon: ShieldCheck, group: "operations" },
   { page: "menus", label: "菜单管理", icon: LayoutList, group: "operations" },
@@ -436,8 +436,90 @@ export function Feedback({
   </Section>;
 }
 
-function RuntimeSettings({ snapshot }: { snapshot: DeveloperSnapshot }) {
-  return <><Section title="网络与协议"><JsonBlock value={snapshot.web} /></Section><Section title="Workspace 本地数据权限"><div className="developer-list">{snapshot.workspace.roots.map((root) => <article key={root.name}><Database size={18} /><span><strong>{root.name}</strong><small>{root.path}</small></span><StatusPill ok={root.exists}>{root.exists ? "可用" : "未创建"}</StatusPill></article>)}</div></Section><Section title="敏感配置规则" hint="浏览器只能读取脱敏快照。"><div className="developer-callout"><ShieldCheck /><p>Provider 密钥、MCP headers/env、Cookie secret 和 Authorization 字段不会通过开发者 API 返回。配置写入继续由本地 YAML/.env 管理。</p></div></Section></>;
+function runtimeNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function storageState(root: DeveloperSnapshot["workspace"]["roots"][number]): { label: string; tone: "ready" | "pending" | "blocked"; description: string } {
+  if (!root.exists) return { label: "按需创建", tone: "pending", description: "尚未产生对应数据，首次使用时会创建。" };
+  if (!root.writable) return { label: "不可写", tone: "blocked", description: "目录已存在，但当前进程没有写入权限。" };
+  return { label: "可写", tone: "ready", description: "目录已创建，当前进程可以写入。" };
+}
+
+export function RuntimeSettings({ snapshot }: { snapshot: DeveloperSnapshot }) {
+  const [runtime, setRuntime] = useState<DeveloperSnapshot["runtime"] | DeveloperRuntimeHealth>(snapshot.runtime);
+  const [checkedAt, setCheckedAt] = useState(() => Date.now());
+  const [checking, setChecking] = useState(false);
+  const [healthError, setHealthError] = useState("");
+
+  const checkHealth = useCallback(async () => {
+    setChecking(true);
+    try {
+      setRuntime(await api.getDeveloperHealth());
+      setCheckedAt(Date.now());
+      setHealthError("");
+    } catch (reason) {
+      setHealthError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setRuntime(snapshot.runtime);
+      setCheckedAt(Date.now());
+      setHealthError("");
+    });
+    return () => { active = false; };
+  }, [snapshot.runtime]);
+  useEffect(() => {
+    const timer = window.setInterval(() => void checkHealth(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [checkHealth]);
+
+  const web = snapshot.web;
+  const protocol = (web.protocol ?? {}) as Record<string, unknown>;
+  const host = String(web.host ?? "unknown");
+  const port = web.port == null ? "" : `:${String(web.port)}`;
+  const endpoint = `${host}${port}`;
+  const runtimeStatus = String(runtime.status ?? "unknown");
+  const healthy = runtimeStatus === "ok" && runtime.started !== false;
+  const accepting = runtime.accepting_turns === true;
+  const statusLabel = healthy ? "Runtime 正常" : runtimeStatus === "stopped" ? "Runtime 已停止" : "Runtime 需检查";
+  const checkedLabel = new Date(checkedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  return <div className="developer-runtime-page">
+    <div className="developer-runtime-heading"><div><span className="developer-eyebrow">RUNTIME DIAGNOSTICS</span><h1>运行诊断</h1><p>实时确认 Gateway 是否在工作、能否接收请求，以及数据目录是否具备写入条件。</p></div><button className="developer-runtime-refresh" type="button" onClick={() => void checkHealth()} disabled={checking}><RefreshCw size={15} className={checking ? "spin" : ""} />{checking ? "检查中…" : "重新检查"}</button></div>
+    {healthError && <div className="developer-runtime-error" role="alert"><ShieldCheck size={17} /><span>实时检查失败：{healthError}。仍显示上一次结果。</span></div>}
+    <section className={`developer-runtime-health ${healthy ? "ready" : "blocked"}`}>
+      <div className="developer-runtime-health-primary"><span className="developer-runtime-health-dot" /><div><strong>{statusLabel}</strong><small>{accepting ? "正在接收请求" : "暂停接收请求"} · 最近检查 {checkedLabel}</small></div></div>
+      <div className="developer-runtime-health-actions"><span>{runtime.started === false ? "进程未启动" : accepting ? "Gateway 可用" : "Gateway 未接受新请求"}</span></div>
+    </section>
+    <div className="developer-runtime-metrics">
+      <article><span>接收状态</span><strong>{accepting ? "运行中" : "已暂停"}</strong><small>{accepting ? "允许新的 Turn 进入" : "不会接收新的 Turn"}</small></article>
+      <article><span>当前活跃 Turn</span><strong>{runtimeNumber(runtime.active_turns).toLocaleString()}</strong><small>正在处理的请求上下文</small></article>
+      <article><span>持久事件</span><strong>{runtimeNumber(runtime.durable_events).toLocaleString()}</strong><small>已写入 Gateway 存储</small></article>
+      <article><span>订阅连接</span><strong>{runtimeNumber(runtime.subscribers).toLocaleString()}</strong><small>当前事件订阅者</small></article>
+    </div>
+    <Section title="服务入口" hint="这些是当前控制面实例实际使用的入口，不是可编辑配置。">
+      <div className="developer-runtime-endpoints">
+        <article><Globe2 size={17} /><div><span>监听地址</span><strong>{endpoint}</strong><small>控制面 HTTP 服务</small></div></article>
+        <article><Activity size={17} /><div><span>HTTP API</span><strong>{String(protocol.http ?? "/api/v1")}</strong><small>浏览器与服务端请求</small></div></article>
+        <article><Activity size={17} /><div><span>WebSocket</span><strong>{String(protocol.websocket ?? "/ws/v1")}</strong><small>实时流式事件</small></div></article>
+        <article><Database size={17} /><div><span>Gateway 数据库</span><strong>{String(runtime.database ?? "未上报")}</strong><small>会话与运行事件的持久化位置</small></div></article>
+      </div>
+    </Section>
+    <Section title="数据目录" hint="目录不存在不代表故障：sessions、memory 等目录会按需创建；只有已存在但不可写才需要处理。">
+      <div className="developer-runtime-storage-list">{snapshot.workspace.roots.map((root) => { const state = storageState(root); return <article key={root.name}><div className="developer-runtime-storage-copy"><Database size={17} /><span><strong>{root.name}</strong><small>{root.path}</small></span></div><div className={`developer-runtime-storage-state ${state.tone}`}><strong>{state.label}</strong><small>{state.description}</small></div></article>; })}</div>
+    </Section>
+    <Section title="配置边界" hint="运行诊断只读，不会把敏感配置暴露给浏览器。">
+      <div className="developer-runtime-callout"><ShieldCheck size={18} /><div><strong>安全配置仍由服务端管理</strong><p>Provider 密钥、MCP headers/env、Cookie secret 和 Authorization 字段不会通过开发者 API 返回。配置写入继续由本地 YAML/.env 管理；模型、工具、MCP 和 Skill 的可修改项在各自页面处理。</p></div></div>
+    </Section>
+    <details className="developer-runtime-raw"><summary>查看原始快照 <ChevronDown size={15} aria-hidden="true" /></summary><JsonBlock value={{ runtime, web: snapshot.web, workspace: snapshot.workspace }} /></details>
+  </div>;
 }
 
 export function ReleaseNotes() {

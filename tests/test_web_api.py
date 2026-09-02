@@ -308,12 +308,15 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
 
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         developer = client.get("/api/v1/developer/snapshot")
+        developer_health = client.get("/api/v1/developer/health")
         release_notes = client.get("/api/v1/developer/release-notes")
 
         assert teacher.status_code == 403
         assert teacher.json()["code"] == "forbidden"
         assert developer.status_code == 403
         assert developer.json()["code"] == "forbidden"
+        assert developer_health.status_code == 403
+        assert developer_health.json()["code"] == "forbidden"
         assert release_notes.status_code == 403
         assert release_notes.json()["code"] == "forbidden"
         assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
@@ -417,6 +420,10 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
         assert developer.status_code == 200
         assert developer.json()["runtime"]["status"] == "ok"
         assert "tools" in developer.json()
+        developer_health = client.get("/api/v1/developer/health")
+        assert developer_health.status_code == 200
+        assert developer_health.json()["status"] == "ok"
+        assert developer_health.json()["active_turns"] == 0
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         assert teacher.status_code == 200
         assert teacher.json()["summary"]["questions"] == 0

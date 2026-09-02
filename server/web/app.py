@@ -99,7 +99,7 @@ from server.web.contracts import (
     QuotaAlertStatusBody,
 )
 from server.web.protocol import control_event
-from server.web.developer import developer_snapshot
+from server.web.developer import developer_health, developer_snapshot
 from server.web.developer_runtime import (
     DeveloperConfigurationError,
     delete_mcp_server,
@@ -2707,6 +2707,10 @@ def create_app(
     @app.get("/api/v1/developer/snapshot", tags=["developer"])
     async def get_developer_snapshot(request: Request, principal: Principal):
         return await developer_snapshot(principal, request.app.state.gateway)
+
+    @app.get("/api/v1/developer/health", tags=["developer"])
+    async def get_developer_health(request: Request, principal: Principal):
+        return await developer_health(principal, request.app.state.gateway)
 
     @app.put("/api/v1/developer/tools/policies", tags=["developer"])
     async def put_tool_policies(body: UpdateToolPoliciesBody, principal: Principal, _claims: WriteClaims):

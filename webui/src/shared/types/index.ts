@@ -40,6 +40,16 @@ export interface DeveloperSnapshot {
   web: Record<string, unknown>;
 }
 
+export interface DeveloperRuntimeHealth {
+  status: string;
+  started: boolean;
+  accepting_turns: boolean;
+  active_turns: number;
+  subscribers: number;
+  database: string;
+  durable_events: number;
+}
+
 export interface FeedbackMessage {
   id: string;
   sender_type: "student" | "developer";
