@@ -44,6 +44,14 @@ describe("ReleaseNotes", () => {
     expect(listMock).toHaveBeenCalledOnce();
   });
 
+  it("starts a new release note with today's date", async () => {
+    render(<ReleaseNotes />);
+
+    const today = new Date();
+    const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+    expect(await screen.findByLabelText("发布日期")).toHaveValue(expected);
+  });
+
   it("creates a note from the form, trimming blank lines", async () => {
     render(<ReleaseNotes />);
     await screen.findByText("v1.0.0 · 2026-08-01");

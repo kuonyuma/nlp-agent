@@ -34,7 +34,7 @@ MENU_CATALOG = (
     ("developer.roles", "角色权限", "/developer/roles", "roles", Permission.SYSTEM_ROLE_MANAGE, 110),
     ("developer.menus", "菜单管理", "/developer/menus", "menus", Permission.SYSTEM_ROLE_MANAGE, 120),
     ("developer.quotas", "额度管理", "/developer/quotas", "quotas", Permission.SYSTEM_QUOTA_MANAGE, 125),
-    ("developer.audit", "审计日志", "/developer/audit", "audit", Permission.SYSTEM_AUDIT_READ, 130),
+    ("monitor.audit", "审计日志", "/monitor?page=audit", "audit", Permission.SYSTEM_AUDIT_READ, 35, "monitor"),
     ("developer.sessions", "Agent 会话", "/developer/sessions", "sessions", Permission.AGENT_SESSION_READ, 140),
 )
 
@@ -137,8 +137,9 @@ def menu_id(key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"pro-nlp/rbac/menu/{key}"))
 
 
-def menu_row(item: tuple[str, str, str, str, Permission, int]) -> dict[str, str | int | bool | None]:
-    key, name, route_path, component_key, permission, sort_order = item
+def menu_row(item: tuple[str, str, str, str, Permission, int] | tuple[str, str, str, str, Permission, int, str]) -> dict[str, str | int | bool | None]:
+    key, name, route_path, component_key, permission, sort_order = item[:6]
+    client_scope = item[6] if len(item) > 6 else "developer"
     return {
         "id": menu_id(key),
         "parent_id": None,
@@ -147,7 +148,7 @@ def menu_row(item: tuple[str, str, str, str, Permission, int]) -> dict[str, str 
         "route_path": route_path,
         "component_key": component_key,
         "permission_id": permission_id(permission),
-        "client_scope": "developer",
+        "client_scope": client_scope,
         "sort_order": sort_order,
         "visible": True,
         "status": "active",
