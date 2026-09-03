@@ -14,6 +14,11 @@ from core.learning import ExerciseState, LearningContext, LearningProgress, Teac
 from core.task_manager import global_task_manager
 from core.model_runtime.selection import bind_model_profile, current_model_profile
 from core.worker_events import global_worker_event_bus
+from server.agent.compression.internal_context import (
+    looks_like_internal_output,
+    public_transcript_messages,
+    sanitize_public_output,
+)
 from gateway.contracts import GatewayEventType
 
 
@@ -123,19 +128,44 @@ class LangGraphAgentEngine:
         active_tool_node = False
         observed_tool_events = False
         active_tools: dict[str, str] = {}
+        suppressed_model_runs: set[str] = set()
+        anonymous_suppressed_model_stream = False
         async for event in self._app.astream_events(
             {"messages": messages}, config=config, version="v2"
         ):
             metadata = event.get("metadata", {})
             node = metadata.get("langgraph_node")
             event_name = event.get("event")
+            if event_name == "on_chat_model_start" and node == "coordinator":
+                anonymous_suppressed_model_stream = False
+                continue
+            if event_name == "on_chat_model_end" and node == "coordinator":
+                anonymous_suppressed_model_stream = False
+                continue
             if event_name == "on_chat_model_stream" and node == "coordinator":
                 if background:
                     continue
                 chunk = event.get("data", {}).get("chunk")
                 if not isinstance(chunk, AIMessageChunk):
                     continue
+                run_id = str(event.get("run_id") or "")
+                if run_id in suppressed_model_runs or (
+                    not run_id and anonymous_suppressed_model_stream
+                ):
+                    continue
+                if _is_internal_model_event(metadata):
+                    if run_id:
+                        suppressed_model_runs.add(run_id)
+                    else:
+                        anonymous_suppressed_model_stream = True
+                    continue
                 if chunk.content:
+                    if looks_like_internal_output(chunk.content):
+                        if run_id:
+                            suppressed_model_runs.add(run_id)
+                        else:
+                            anonymous_suppressed_model_stream = True
+                        continue
                     await self._emit(
                         turn_id,
                         context.session_id,
@@ -143,7 +173,7 @@ class LangGraphAgentEngine:
                         {"delta": chunk.content, "background": background},
                     )
                 reasoning = chunk.additional_kwargs.get("reasoning_content")
-                if reasoning:
+                if reasoning and not looks_like_internal_output(reasoning):
                     await self._emit(
                         turn_id,
                         context.session_id,
@@ -239,13 +269,13 @@ class LangGraphAgentEngine:
 
         await record_transcript(
             context.session_id,
-            state_messages,
+            public_transcript_messages(state_messages),
             user_id=context.user_id,
             workspace_id=context.workspace_id,
         )
         for item in reversed(state_messages):
             if isinstance(item, AIMessage) and item.content:
-                return str(item.content)
+                return sanitize_public_output(item.content)
         return ""
 
     async def inject(self, context: SessionContext, content: str) -> str | None:
@@ -326,3 +356,12 @@ class LangGraphAgentEngine:
         self._app = None
         self._connection = None
         self._started = False
+
+
+def _is_internal_model_event(metadata: dict) -> bool:
+    """Keep compaction/model-maintenance streams out of the public chat."""
+    return bool(
+        metadata.get("compression_internal") is True
+        or metadata.get("model_role") in {"compression", "utility_compact"}
+        or metadata.get("usage_purpose") == "compact"
+    )
