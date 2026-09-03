@@ -2,7 +2,7 @@ import {
   Activity, AppWindow, Bot, Box, ChevronDown, ChevronLeft, ChevronRight, Clock3, Code2, Database,
   ExternalLink, FileKey2, Gauge, Globe2, Mail, MailOpen, Newspaper, PlugZap,
   Inbox, MessageCircle, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, User, Wrench,
-  Users, LayoutList, MessageSquare, WalletCards,
+  Users, LayoutList, WalletCards,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -11,13 +11,12 @@ import type { DeveloperRuntimeHealth, DeveloperSnapshot, FeedbackCategory, Feedb
 import { UserManagementPage } from "@/modules/admin/UserManagementPage";
 import { RoleManagementPageV2 } from "@/modules/admin/RoleManagementPageV2";
 import { MenuManagementPageV2 } from "@/modules/admin/MenuManagementPageV2";
-import { AgentSessionListPageV2 } from "@/modules/admin/AgentSessionListPageV2";
 import { MarkdownContent } from "@/modules/student/components/MarkdownContent";
 import { monitorUrl } from "@/monitor/monitor-helpers";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
 import { QuotaManagementPage } from "@/modules/quota/QuotaManagementPage";
 
-export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "feedback" | "settings" | "users" | "roles" | "menus" | "sessions" | "quotas";
+export type DeveloperPage = "overview" | "agents" | "tools" | "models" | "mcp" | "skills" | "release-notes" | "automations" | "feedback" | "settings" | "users" | "roles" | "menus" | "quotas";
 
 type NavGroup = "control" | "integrations" | "operations";
 const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge; group: NavGroup }> = [
@@ -30,7 +29,6 @@ const NAV: Array<{ page: DeveloperPage; label: string; icon: typeof Gauge; group
   { page: "automations", label: "Apps 与自动化", icon: Clock3, group: "integrations" },
   { page: "release-notes", label: "发布说明", icon: Newspaper, group: "operations" },
   { page: "feedback", label: "意见反馈", icon: Mail, group: "operations" },
-  { page: "sessions", label: "Agent 会话", icon: MessageSquare, group: "operations" },
   { page: "quotas", label: "额度管理", icon: WalletCards, group: "operations" },
   { page: "settings", label: "运行诊断", icon: Settings2, group: "operations" },
   { page: "users", label: "用户管理", icon: Users, group: "operations" },
@@ -1100,7 +1098,6 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
     if (page === "users") return <UserManagementPage />;
     if (page === "roles") return <RoleManagementPageV2 />;
     if (page === "menus") return <MenuManagementPageV2 />;
-    if (page === "sessions") return <AgentSessionListPageV2 />;
     if (page === "quotas") return <QuotaManagementPage />;
     if (!snapshot) return <div className="developer-error"><ShieldCheck /><strong>无法读取运行时快照</strong><p>{snapshotError || "当前身份可能缺少运行时检查权限；其余页面不受影响。"}</p></div>;
     if (page === "agents") return <Agents snapshot={snapshot} refresh={load} />;

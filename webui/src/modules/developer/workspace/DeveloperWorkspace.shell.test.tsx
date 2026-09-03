@@ -31,7 +31,7 @@ const menu = (routePath: string | null) => ({
   status: "active",
 });
 
-const ALL_ROUTES = ["/developer", "/developer/agents", "/developer/tools", "/developer/models", "/developer/mcp", "/developer/skills", "/developer/release-notes", "/developer/automations", "/developer/feedback", "/developer/settings", "/developer/users", "/developer/roles", "/developer/menus", "/developer/sessions"];
+const ALL_ROUTES = ["/developer", "/developer/agents", "/developer/tools", "/developer/models", "/developer/mcp", "/developer/skills", "/developer/release-notes", "/developer/automations", "/developer/feedback", "/developer/settings", "/developer/users", "/developer/roles", "/developer/menus"];
 
 const snapshot = {
   runtime: { status: "ok", active_turns: 0, durable_events: 0 },
@@ -76,13 +76,14 @@ describe("DeveloperWorkspace shell access", () => {
     expect(getDeveloperSnapshotMock).not.toHaveBeenCalled();
   });
 
-  it("blocks direct navigation to a menu the role does not have", async () => {
-    listVisibleMenusMock.mockResolvedValue({ items: [menu("/developer/feedback")] });
-    getDeveloperSnapshotMock.mockRejectedValue(new Error("HTTP 403"));
+  it("does not expose Agent session management even when a stale menu row remains", async () => {
+    listVisibleMenusMock.mockResolvedValue({ items: [...ALL_ROUTES.map((route) => menu(route)), menu("/developer/sessions")] });
+    getDeveloperSnapshotMock.mockResolvedValue(snapshot);
 
-    render(<DeveloperWorkspace page="sessions" />);
+    render(<DeveloperWorkspace />);
 
-    expect(await screen.findByText("无权访问该页面")).toBeVisible();
+    expect(await screen.findByText("后端基础工作台")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Agent 会话" })).not.toBeInTheDocument();
   });
 
   it("renders the overview for a fully provisioned developer with snapshot data", async () => {

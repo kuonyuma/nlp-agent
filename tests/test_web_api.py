@@ -187,6 +187,14 @@ def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_
         assert client.get("/api/v1/sessions").status_code == 401
 
 
+def test_developer_session_management_stats_endpoint_is_not_exposed(web_app):
+    app, _engine = web_app
+
+    assert "/api/v1/sessions/stats" not in {
+        route.path for route in app.routes if hasattr(route, "path")
+    }
+
+
 def test_guest_session_has_only_guest_capabilities(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
@@ -1141,7 +1149,7 @@ async def test_websocket_hub_broadcast_targets_workspace_members():
     assert delivered == {"alice": 1, "developer": 1}
 
 
-def test_session_list_exposes_page_metadata_and_usage_stats(web_app):
+def test_session_list_exposes_page_metadata(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
         csrf = authenticate(client)
@@ -1159,7 +1167,3 @@ def test_session_list_exposes_page_metadata_and_usage_stats(web_app):
         assert page.json()["offset"] == 1
         assert len(page.json()["items"]) == 1
         assert page.json()["has_more"] is False
-
-        stats = client.get("/api/v1/sessions/stats")
-        assert stats.status_code == 200
-        assert stats.json()["sessions_total"] == 2

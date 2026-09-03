@@ -408,14 +408,6 @@ export interface SessionListResponse {
   has_more?: boolean;
 }
 
-export interface AgentSessionStats {
-  sessions_total: number;
-  sessions_active: number;
-  turns_total: number | null;
-  turns_last_24h: number | null;
-  last_activity_at: string | number | null;
-}
-
 export interface TurnRecord {
   turn_id: string;
   session_id: string;

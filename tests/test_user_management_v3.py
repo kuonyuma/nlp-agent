@@ -56,6 +56,13 @@ def test_builtin_rbac_and_developer_menu_catalog_are_stable() -> None:
     assert {row["role_id"] for row in role_menu_rows()} == {role_id("developer")}
 
 
+def test_agent_session_management_is_not_in_the_developer_menu_catalog() -> None:
+    from server.rbac.catalog import MENU_CATALOG
+
+    assert not any(item[0] == "developer.sessions" for item in MENU_CATALOG)
+    assert not any(item[2] == "/developer/sessions" for item in MENU_CATALOG)
+
+
 @pytest.fixture
 async def mysql_session_factory():
     database_url = os.getenv("NLP_AGENT_DATABASE_URL")

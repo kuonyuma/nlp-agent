@@ -2263,22 +2263,6 @@ def create_app(
             "has_more": offset + len(page) < len(items),
         }
 
-    @app.get("/api/v1/sessions/stats", tags=["sessions"])
-    async def session_stats(request: Request, principal: Principal):
-        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
-        service = request.app.state.gateway.sessions
-        stats = getattr(service, "stats", None)
-        if stats is not None:
-            return await stats(principal)
-        items = await service.list(principal)
-        return {
-            "sessions_total": len(items),
-            "sessions_active": len(items),
-            "turns_total": None,
-            "turns_last_24h": None,
-            "last_activity_at": None,
-        }
-
     @app.post("/api/v1/sessions", status_code=status.HTTP_201_CREATED, tags=["sessions"])
     async def create_session(
         body: CreateSessionBody,

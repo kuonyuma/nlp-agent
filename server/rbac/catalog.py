@@ -35,7 +35,6 @@ MENU_CATALOG = (
     ("developer.menus", "菜单管理", "/developer/menus", "menus", Permission.SYSTEM_ROLE_MANAGE, 120),
     ("developer.quotas", "额度管理", "/developer/quotas", "quotas", Permission.SYSTEM_QUOTA_MANAGE, 125),
     ("monitor.audit", "审计日志", "/monitor?page=audit", "audit", Permission.SYSTEM_AUDIT_READ, 35, "monitor"),
-    ("developer.sessions", "Agent 会话", "/developer/sessions", "sessions", Permission.AGENT_SESSION_READ, 140),
 )
 
 
