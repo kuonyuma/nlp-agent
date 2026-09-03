@@ -166,6 +166,8 @@ HIGH_RISK_TOOL_PERMISSIONS: Final[dict[str, Permission]] = {
 
 
 def required_permission_for_high_risk_tool(tool_name: str) -> Permission:
+    if tool_name.startswith("mcp_"):
+        return Permission.SYSTEM_TOOL_CONFIG_MANAGE
     try:
         return HIGH_RISK_TOOL_PERMISSIONS[tool_name]
     except KeyError as error:

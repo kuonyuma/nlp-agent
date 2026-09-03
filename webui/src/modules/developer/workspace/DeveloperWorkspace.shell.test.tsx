@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { DeveloperWorkspace } from "./DeveloperWorkspace";
 
@@ -119,5 +119,20 @@ describe("DeveloperWorkspace shell access", () => {
     expect(await waitFor(() => screen.getByRole("button", { name: "工作台" }))).toBeVisible();
     expect(getDeveloperSnapshotMock).toHaveBeenCalledOnce();
     expect(listFeedbackMock).not.toHaveBeenCalled();
+  });
+
+  it("clears the previous runtime snapshot when a refresh loses inspect permission", async () => {
+    listVisibleMenusMock.mockResolvedValue({ items: ALL_ROUTES.map((route) => menu(route)) });
+    getDeveloperSnapshotMock
+      .mockResolvedValueOnce(snapshot)
+      .mockRejectedValueOnce(new Error("HTTP 403"));
+
+    render(<DeveloperWorkspace page="agents" />);
+
+    expect(await screen.findByRole("heading", { name: "Agent 与 Worker" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "刷新数据" }));
+
+    await waitFor(() => expect(getDeveloperSnapshotMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("无法读取运行时快照")).toBeVisible();
   });
 });

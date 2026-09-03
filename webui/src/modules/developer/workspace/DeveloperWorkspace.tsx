@@ -1060,8 +1060,19 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
       // The snapshot is control-plane data (SYSTEM_RUNTIME_INSPECT); pages
       // outside SNAPSHOT_PAGES must keep working without it.
       if (SNAPSHOT_PAGES.some((candidate) => pages.has(candidate))) {
-        try { setSnapshot(await api.getDeveloperSnapshot()); }
-        catch (reason) { setSnapshotError(reason instanceof Error ? reason.message : String(reason)); }
+        setSnapshot(null);
+        setSnapshotError("");
+        try {
+          setSnapshot(await api.getDeveloperSnapshot());
+          setSnapshotError("");
+        }
+        catch (reason) {
+          setSnapshot(null);
+          setSnapshotError(reason instanceof Error ? reason.message : String(reason));
+        }
+      } else {
+        setSnapshot(null);
+        setSnapshotError("");
       }
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }

@@ -1,7 +1,35 @@
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
+import time
+from uuid import uuid4
+
 import pytest
 import yaml
 
 from core import runtime_config
+
+
+def test_runtime_overrides_transaction_serializes_read_modify_write(monkeypatch) -> None:
+    override_path = runtime_config.BASE_DIR / f".runtime-overrides-test-{uuid4().hex}.yaml"
+    lock_path = Path(f"{override_path}.lock")
+    monkeypatch.setattr(runtime_config, "OVERRIDE_PATH", override_path)
+
+    def add_value(key: str) -> None:
+        with runtime_config.runtime_overrides_transaction() as overrides:
+            time.sleep(0.02)
+            overrides[key] = key
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(add_value, ("first", "second")))
+        assert runtime_config.load_runtime_overrides() == {
+            "first": "first",
+            "second": "second",
+        }
+    finally:
+        override_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
 
 
 def test_legacy_overrides_cannot_replace_reserved_web_profiles(monkeypatch, tmp_path):
@@ -115,7 +143,13 @@ async def test_mcp_update_without_credentials_preserves_existing_secret_config(m
     }
     saved: dict[str, object] = {}
     monkeypatch.setattr(developer_runtime, "load_runtime_overrides", lambda: existing)
-    monkeypatch.setattr(developer_runtime, "save_runtime_overrides", lambda value: saved.update(value))
+
+    @contextmanager
+    def transaction():
+        yield existing
+        saved.update(existing)
+
+    monkeypatch.setattr(developer_runtime, "runtime_overrides_transaction", transaction)
     monkeypatch.setattr(developer_runtime, "test_mcp_server", lambda _name, _config: _connected())
     monkeypatch.setattr(developer_runtime, "reload_runtime", lambda **_kwargs: _reloaded())
 
