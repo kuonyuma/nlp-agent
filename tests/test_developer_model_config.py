@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import pytest
 
 
@@ -37,6 +39,16 @@ MODEL_CONFIG = {
 }
 
 
+def capture_transaction(saved: dict[str, object]):
+    @contextmanager
+    def transaction():
+        overrides: dict[str, object] = {}
+        yield overrides
+        saved.update(overrides)
+
+    return transaction
+
+
 @pytest.mark.asyncio
 async def test_model_provider_update_persists_and_reloads(monkeypatch):
     from server.web import developer_runtime
@@ -44,7 +56,7 @@ async def test_model_provider_update_persists_and_reloads(monkeypatch):
     saved: dict[str, object] = {}
     monkeypatch.setattr(developer_runtime, "load_runtime_config", lambda: MODEL_CONFIG)
     monkeypatch.setattr(developer_runtime, "load_runtime_overrides", lambda: {})
-    monkeypatch.setattr(developer_runtime, "save_runtime_overrides", lambda value: saved.update(value))
+    monkeypatch.setattr(developer_runtime, "runtime_overrides_transaction", capture_transaction(saved))
     monkeypatch.setattr(developer_runtime, "reload_runtime", lambda **_kwargs: _reloaded())
 
     result = await developer_runtime.upsert_model_provider(
@@ -68,7 +80,7 @@ async def test_model_preset_update_uses_full_runtime_validation(monkeypatch):
     saved: dict[str, object] = {}
     monkeypatch.setattr(developer_runtime, "load_runtime_config", lambda: MODEL_CONFIG)
     monkeypatch.setattr(developer_runtime, "load_runtime_overrides", lambda: {})
-    monkeypatch.setattr(developer_runtime, "save_runtime_overrides", lambda value: saved.update(value))
+    monkeypatch.setattr(developer_runtime, "runtime_overrides_transaction", capture_transaction(saved))
     monkeypatch.setattr(developer_runtime, "reload_runtime", lambda **_kwargs: _reloaded())
 
     result = await developer_runtime.upsert_model_preset(
@@ -91,7 +103,6 @@ async def test_model_route_update_rejects_unknown_preset_before_persisting(monke
     saved: dict[str, object] = {}
     monkeypatch.setattr(developer_runtime, "load_runtime_config", lambda: MODEL_CONFIG)
     monkeypatch.setattr(developer_runtime, "load_runtime_overrides", lambda: {})
-    monkeypatch.setattr(developer_runtime, "save_runtime_overrides", lambda value: saved.update(value))
 
     with pytest.raises(ValueError, match="unknown presets"):
         await developer_runtime.upsert_model_route(

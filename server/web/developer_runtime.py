@@ -14,7 +14,7 @@ from core.runtime_config import (
     RESERVED_WORKER_PROFILES,
     load_runtime_config,
     load_runtime_overrides,
-    save_runtime_overrides,
+    runtime_overrides_transaction,
 )
 from core.model_runtime.contracts import (
     ModelPresetConfig,
@@ -40,12 +40,11 @@ def _require_name(value: str, label: str) -> str:
     return value
 
 
-def _section(name: str) -> dict[str, Any]:
-    overrides = load_runtime_overrides()
+def _section(overrides: dict[str, Any], name: str) -> dict[str, Any]:
     value = overrides.setdefault(name, {})
     if not isinstance(value, dict):
         raise DeveloperConfigurationError(f"invalid persisted {name} override")
-    return overrides
+    return value
 
 
 def _merge_stored_mcp_credentials(
@@ -121,12 +120,9 @@ def _validated_model_update(section: str, name: str, value: dict[str, Any]) -> d
 
 
 def _persist_model_entry(section: str, name: str, value: dict[str, Any]) -> None:
-    overrides = load_runtime_overrides()
-    values = overrides.setdefault(section, {})
-    if not isinstance(values, dict):
-        raise DeveloperConfigurationError(f"invalid persisted {section} override")
-    values[name] = value
-    save_runtime_overrides(overrides)
+    with runtime_overrides_transaction() as overrides:
+        values = _section(overrides, section)
+        values[name] = value
 
 
 async def upsert_model_provider(name: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -169,41 +165,44 @@ async def upsert_model_profile(name: str, config: dict[str, Any]) -> dict[str, A
 
 async def update_tool_policies(policies: dict[str, Any]) -> dict[str, Any]:
     validated = ToolPoliciesConfig.model_validate(policies)
-    overrides = _section("tools")
-    overrides["tools"]["policies"] = validated.model_dump(mode="json")
-    save_runtime_overrides(overrides)
+    with runtime_overrides_transaction() as overrides:
+        _section(overrides, "tools")["policies"] = validated.model_dump(mode="json")
     return await reload_runtime()
 
 
 async def update_custom_tools(custom: dict[str, Any]) -> dict[str, Any]:
     """Persist extension discovery config; changing Python imports requires a safe restart."""
     validated = CustomToolsConfig.model_validate(custom)
-    overrides = _section("tools")
-    overrides["tools"]["custom"] = validated.model_dump(mode="json")
-    save_runtime_overrides(overrides)
+    with runtime_overrides_transaction() as overrides:
+        _section(overrides, "tools")["custom"] = validated.model_dump(mode="json")
     await reload_runtime()
     return {"restart_required": True, "reason": "custom Python tool modules reload on next runtime start"}
 
 
 async def upsert_mcp_server(name: str, config: dict[str, Any]) -> dict[str, Any]:
     name = _require_name(name, "MCP server name")
-    overrides = _section("tools")
+    overrides = load_runtime_overrides()
     candidate = _merge_stored_mcp_credentials(name, config, overrides=overrides)
     validated = MCPServerConfig.model_validate(candidate)
     await test_mcp_server(name, validated.model_dump(mode="json"))
-    servers = overrides["tools"].setdefault("mcp_servers", {})
-    servers[name] = validated.model_dump(mode="json")
-    save_runtime_overrides(overrides)
+    with runtime_overrides_transaction() as overrides:
+        tools = _section(overrides, "tools")
+        servers = tools.setdefault("mcp_servers", {})
+        if not isinstance(servers, dict):
+            raise DeveloperConfigurationError("invalid persisted MCP server override")
+        servers[name] = validated.model_dump(mode="json")
     result = await reload_runtime(reload_mcp=True)
     return {**result, "server": name}
 
 
 async def delete_mcp_server(name: str) -> dict[str, Any]:
     name = _require_name(name, "MCP server name")
-    overrides = _section("tools")
-    servers = overrides["tools"].setdefault("mcp_servers", {})
-    servers.pop(name, None)
-    save_runtime_overrides(overrides)
+    with runtime_overrides_transaction() as overrides:
+        tools = _section(overrides, "tools")
+        servers = tools.setdefault("mcp_servers", {})
+        if not isinstance(servers, dict):
+            raise DeveloperConfigurationError("invalid persisted MCP server override")
+        servers.pop(name, None)
     result = await reload_runtime(reload_mcp=True)
     return {**result, "server": name}
 
@@ -277,9 +276,10 @@ async def upsert_worker_profile(name: str, profile: dict[str, Any]) -> dict[str,
             f"Worker profile {name!r} is reserved by the runtime"
         )
     validated = WorkerProfileSpec.model_validate({"name": name, **profile})
-    overrides = _section("worker_profiles")
-    overrides["worker_profiles"][name] = validated.model_dump(mode="json", exclude={"name"})
-    save_runtime_overrides(overrides)
+    with runtime_overrides_transaction() as overrides:
+        _section(overrides, "worker_profiles")[name] = validated.model_dump(
+            mode="json", exclude={"name"}
+        )
     return {**await reload_runtime(reload_skills=True), "profile": name}
 
 
@@ -289,7 +289,7 @@ async def delete_worker_profile(name: str) -> dict[str, Any]:
         raise DeveloperConfigurationError(
             f"Worker profile {name!r} is reserved by the runtime"
         )
-    overrides = _section("worker_profiles")
-    overrides["worker_profiles"].pop(name, None)
-    save_runtime_overrides(overrides)
+    with runtime_overrides_transaction() as overrides:
+        profiles = _section(overrides, "worker_profiles")
+        profiles.pop(name, None)
     return {**await reload_runtime(reload_skills=True), "profile": name}
