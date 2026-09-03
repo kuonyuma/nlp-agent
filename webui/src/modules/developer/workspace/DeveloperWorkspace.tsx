@@ -273,7 +273,7 @@ function modelPresetConfig(original: unknown, draft: ModelPresetDraft): Record<s
   return { ...source, model: draft.model, thinking: { ...thinking, enabled: draft.thinking_enabled, effort: draft.thinking_enabled ? draft.thinking_effort : "none" }, generation: { ...generation, max_output_tokens: draft.max_output_tokens, temperature: draft.temperature } };
 }
 
-export function Models({ snapshot }: { snapshot: DeveloperSnapshot }) {
+export function Models({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
   const providerNames = Object.keys(snapshot.models.providers);
   const presetNames = Object.keys(snapshot.models.presets);
   const routeNames = Object.keys(snapshot.models.routes);
@@ -289,9 +289,9 @@ export function Models({ snapshot }: { snapshot: DeveloperSnapshot }) {
   const selectProvider = (name: string) => { setProviderName(name); setProviderDraft(modelProviderDraft(snapshot.models.providers[name])); setMessage(""); };
   const selectPreset = (name: string) => { setPresetName(name); setPresetDraft(modelPresetDraft(snapshot.models.presets[name])); setMessage(""); };
   const selectRoute = (name: string) => { const route = asRecord(snapshot.models.routes[name]); setRouteName(name); setRouteDraft({ primary: String(route.primary ?? ""), fallbacks: asStringList(route.fallbacks) }); setMessage(""); };
-  const saveProvider = async () => { try { await api.saveModelProvider(providerName, providerDraft); setMessage("Provider 已保存，新的模型请求会使用最新连接配置"); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
-  const savePreset = async () => { try { await api.saveModelPreset(presetName, modelPresetConfig(snapshot.models.presets[presetName], presetDraft)); setMessage("模型预设已保存"); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
-  const saveRoute = async () => { try { await api.saveModelRoute(routeName, routeDraft); setMessage("模型路由已保存，后续请求按新的主备链路选择"); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
+  const saveProvider = async () => { try { await api.saveModelProvider(providerName, providerDraft); setMessage("Provider 已保存，新的模型请求会使用最新连接配置"); await refresh(); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
+  const savePreset = async () => { try { await api.saveModelPreset(presetName, modelPresetConfig(snapshot.models.presets[presetName], presetDraft)); setMessage("模型预设已保存"); await refresh(); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
+  const saveRoute = async () => { try { await api.saveModelRoute(routeName, routeDraft); setMessage("模型路由已保存，后续请求按新的主备链路选择"); await refresh(); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
   return <div className="developer-control-page">
     <div className="developer-control-heading"><div><span className="developer-eyebrow">MODEL ROUTING</span><h1>模型与 Provider</h1><p>Provider 是连接和密钥入口，模型是厂商模型目录，预设决定生成参数，路由决定主模型和故障转移顺序。</p></div><div className="developer-model-default"><span>默认模型档案</span><strong>{snapshot.models.default_model_profile || "未指定"}</strong></div></div>
     <div className="developer-control-tabs developer-control-tabs-wide" role="tablist" aria-label="模型配置区块"><button type="button" role="tab" aria-selected={view === "providers"} onClick={() => setView("providers")}>Provider 与模型</button><button type="button" role="tab" aria-selected={view === "presets"} onClick={() => setView("presets")}>模型预设</button><button type="button" role="tab" aria-selected={view === "routes"} onClick={() => setView("routes")}>路由与故障转移</button></div>
@@ -1102,7 +1102,7 @@ export function DeveloperWorkspace({ page: routedPage, onNavigate }: { page?: De
     if (!snapshot) return <div className="developer-error"><ShieldCheck /><strong>无法读取运行时快照</strong><p>{snapshotError || "当前身份可能缺少运行时检查权限；其余页面不受影响。"}</p></div>;
     if (page === "agents") return <Agents snapshot={snapshot} refresh={load} />;
     if (page === "tools") return <Tools snapshot={snapshot} refresh={load} />;
-    if (page === "models") return <Models snapshot={snapshot} />;
+    if (page === "models") return <Models snapshot={snapshot} refresh={load} />;
     if (page === "mcp") return <Mcp snapshot={snapshot} refresh={load} />;
     if (page === "skills") return <Skills snapshot={snapshot} refresh={load} />;
     if (page === "automations") return <Automations snapshot={snapshot} />;

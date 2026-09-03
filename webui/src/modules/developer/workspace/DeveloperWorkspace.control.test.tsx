@@ -174,7 +174,8 @@ describe("developer control-plane configuration", () => {
   });
 
   it("edits a Provider and validates model preset changes from the model page", async () => {
-    render(<Models snapshot={snapshot as never} />);
+    const refresh = vi.fn(async () => undefined);
+    render(<Models snapshot={snapshot as never} refresh={refresh} />);
 
     fireEvent.change(screen.getByLabelText("deepseek 服务地址"), { target: { value: "https://proxy.example/v1" } });
     fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
@@ -182,6 +183,7 @@ describe("developer control-plane configuration", () => {
       "deepseek",
       expect.objectContaining({ base_url: "https://proxy.example/v1" }),
     ));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole("tab", { name: "模型预设" }));
     fireEvent.change(screen.getByLabelText("worker-fast 最大输出 Token"), { target: { value: "16000" } });
@@ -190,10 +192,11 @@ describe("developer control-plane configuration", () => {
       "worker-fast",
       expect.objectContaining({ generation: expect.objectContaining({ max_output_tokens: 16000 }) }),
     ));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
   });
 
   it("saves the selected model route with a primary and fallback chain", async () => {
-    render(<Models snapshot={snapshot as never} />);
+    render(<Models snapshot={snapshot as never} refresh={vi.fn(async () => undefined)} />);
 
     fireEvent.click(screen.getByRole("tab", { name: "路由与故障转移" }));
     fireEvent.change(screen.getByLabelText("worker 主路由预设"), { target: { value: "worker-fast" } });

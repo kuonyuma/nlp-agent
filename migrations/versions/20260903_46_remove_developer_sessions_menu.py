@@ -6,7 +6,7 @@ import sqlalchemy as sa
 from server.rbac.catalog import menu_id
 
 
-revision = "20260903_46_remove_developer_sessions"
+revision = "20260903_46_remove_dev_sessions"
 down_revision = "20260901_45_audit_quota_merge"
 branch_labels = None
 depends_on = None

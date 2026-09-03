@@ -48,6 +48,28 @@ def _section(name: str) -> dict[str, Any]:
     return overrides
 
 
+def _merge_stored_mcp_credentials(
+    name: str,
+    config: dict[str, Any],
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Restore credentials omitted from browser payloads during MCP operations."""
+    persisted = load_runtime_overrides() if overrides is None else overrides
+    stored_tools = persisted.get("tools")
+    stored_servers = stored_tools.get("mcp_servers") if isinstance(stored_tools, dict) else None
+    stored = stored_servers.get(name) if isinstance(stored_servers, dict) else None
+    candidate = dict(config)
+    if isinstance(stored, dict):
+        # Secret values are intentionally omitted from the browser snapshot.
+        # Preserve them during ordinary edits unless the caller explicitly
+        # sends an env/headers field (including an explicit empty mapping).
+        for key in ("env", "headers"):
+            if key not in candidate and isinstance(stored.get(key), dict):
+                candidate[key] = stored[key]
+    return candidate
+
+
 async def reload_runtime(*, reload_mcp: bool = False, reload_skills: bool = False) -> dict[str, Any]:
     """Refresh config consumers. Existing Worker grants intentionally stay immutable."""
     from configs.settings import settings
@@ -166,17 +188,7 @@ async def update_custom_tools(custom: dict[str, Any]) -> dict[str, Any]:
 async def upsert_mcp_server(name: str, config: dict[str, Any]) -> dict[str, Any]:
     name = _require_name(name, "MCP server name")
     overrides = _section("tools")
-    stored_tools = overrides.get("tools")
-    stored_servers = stored_tools.get("mcp_servers") if isinstance(stored_tools, dict) else None
-    stored = stored_servers.get(name) if isinstance(stored_servers, dict) else None
-    candidate = dict(config)
-    if isinstance(stored, dict):
-        # Secret values are intentionally omitted from the browser snapshot.
-        # Preserve them during ordinary edits unless the caller explicitly
-        # sends an env/headers field (including an explicit empty mapping).
-        for key in ("env", "headers"):
-            if key not in candidate and isinstance(stored.get(key), dict):
-                candidate[key] = stored[key]
+    candidate = _merge_stored_mcp_credentials(name, config, overrides=overrides)
     validated = MCPServerConfig.model_validate(candidate)
     await test_mcp_server(name, validated.model_dump(mode="json"))
     servers = overrides["tools"].setdefault("mcp_servers", {})
@@ -199,7 +211,7 @@ async def delete_mcp_server(name: str) -> dict[str, Any]:
 async def test_mcp_server(name: str, config: dict[str, Any]) -> dict[str, Any]:
     """Connect/discover through an isolated catalog; no trial tools leak into the live runtime."""
     name = _require_name(name, "MCP server name")
-    validated = MCPServerConfig.model_validate(config)
+    validated = MCPServerConfig.model_validate(_merge_stored_mcp_credentials(name, config))
     from core.mcp_runtime import MCPRuntime
 
     catalog = ToolCatalog()
