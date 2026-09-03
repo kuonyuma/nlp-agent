@@ -62,6 +62,7 @@ from server.web.contracts import (
     LoginBody,
     ReplaceUserRolesBody,
     ReplaceRolePermissionsBody,
+    ReplaceRoleMenusBody,
     CreateClassroomBody,
     ReplaceClassroomMemberBody,
     InjectChatBody,
@@ -80,6 +81,7 @@ from server.web.contracts import (
     FeedbackStatusValue,
     FeedbackPriorityValue,
     McpServerBody,
+    ModelConfigBody,
     SkillBody,
     WorkerProfileBody,
     ReleaseNoteBody,
@@ -98,7 +100,7 @@ from server.web.contracts import (
     QuotaAlertStatusBody,
 )
 from server.web.protocol import control_event
-from server.web.developer import developer_snapshot
+from server.web.developer import developer_health, developer_snapshot
 from server.web.developer_runtime import (
     DeveloperConfigurationError,
     delete_mcp_server,
@@ -109,6 +111,10 @@ from server.web.developer_runtime import (
     update_custom_tools,
     update_tool_policies,
     upsert_mcp_server,
+    upsert_model_preset,
+    upsert_model_profile,
+    upsert_model_provider,
+    upsert_model_route,
     upsert_skill,
     upsert_worker_profile,
 )
@@ -2294,6 +2300,20 @@ def create_app(
         await hub.close_user(user_id)
         return {"classroom_id": classroom_id, "user_id": user_id, "member_role": body.member_role, "status": body.status}
 
+    @app.get("/api/v1/system/menus", tags=["rbac"])
+    async def get_menus(request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            menus = await rbac_service.menus(session)
+        return {"items": [
+            {"id": item.id, "parent_id": item.parent_id, "type": item.menu_type,
+             "name": item.name, "route_path": item.route_path,
+             "component_key": item.component_key, "permission_id": item.permission_id,
+             "client_scope": item.client_scope, "sort_order": item.sort_order,
+             "visible": item.visible, "status": item.status}
+            for item in menus
+        ]}
+
     @app.get("/api/v1/system/menus/visible", tags=["rbac"])
     async def get_visible_menus(request: Request, principal: Principal):
         async with authorization_session_factory(request)() as session:
@@ -2306,6 +2326,21 @@ def create_app(
              "visible": item.visible, "status": item.status}
             for item in menus
         ]}
+
+    @app.put("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])
+    async def put_role_menus(role_code: str, body: ReplaceRoleMenusBody, request: Request, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
+        async with authorization_session_factory(request)() as session:
+            async with session.begin():
+                await rbac_service.replace_role_menus(session, role_code=role_code, menu_ids=body.menu_ids, actor_user_id=principal.user_id)
+        return {"role_code": role_code, "menu_ids": sorted(body.menu_ids)}
+
+    @app.get("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])
+    async def get_role_menus(role_code: str, request: Request, principal: Principal):
+        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
+        async with authorization_session_factory(request)() as session:
+            menu_ids = await rbac_service.role_menu_ids(session, role_code)
+        return {"role_code": role_code, "menu_ids": sorted(menu_ids)}
 
     @app.get("/api/v1/audit/authorization", tags=["rbac"])
     async def list_authorization_audit(
@@ -2454,22 +2489,6 @@ def create_app(
             "offset": offset,
             "limit": limit,
             "has_more": offset + len(page) < len(items),
-        }
-
-    @app.get("/api/v1/sessions/stats", tags=["sessions"])
-    async def session_stats(request: Request, principal: Principal):
-        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
-        service = request.app.state.gateway.sessions
-        stats = getattr(service, "stats", None)
-        if stats is not None:
-            return await stats(principal)
-        items = await service.list(principal)
-        return {
-            "sessions_total": len(items),
-            "sessions_active": len(items),
-            "turns_total": None,
-            "turns_last_24h": None,
-            "last_activity_at": None,
         }
 
     @app.post("/api/v1/sessions", status_code=status.HTTP_201_CREATED, tags=["sessions"])
@@ -2906,6 +2925,10 @@ def create_app(
     async def get_developer_snapshot(request: Request, principal: Principal):
         return await developer_snapshot(principal, request.app.state.gateway)
 
+    @app.get("/api/v1/developer/health", tags=["developer"])
+    async def get_developer_health(request: Request, principal: Principal):
+        return await developer_health(principal, request.app.state.gateway)
+
     @app.put("/api/v1/developer/tools/policies", tags=["developer"])
     async def put_tool_policies(body: UpdateToolPoliciesBody, principal: Principal, _claims: WriteClaims):
         authorization_service.require(principal, Permission.SYSTEM_TOOL_CONFIG_MANAGE)
@@ -2955,6 +2978,26 @@ def create_app(
     async def remove_worker_profile(name: str, principal: Principal, _claims: WriteClaims):
         authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
         return await delete_worker_profile(name)
+
+    @app.put("/api/v1/developer/models/providers/{name}", tags=["developer"])
+    async def put_model_provider(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_provider(name, body.config)
+
+    @app.put("/api/v1/developer/models/presets/{name}", tags=["developer"])
+    async def put_model_preset(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_preset(name, body.config)
+
+    @app.put("/api/v1/developer/models/routes/{name}", tags=["developer"])
+    async def put_model_route(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_route(name, body.config)
+
+    @app.put("/api/v1/developer/models/profiles/{name}", tags=["developer"])
+    async def put_model_profile(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_profile(name, body.config)
 
     def _release_note_payload(row) -> dict[str, Any]:
         return {

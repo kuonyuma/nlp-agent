@@ -4,6 +4,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -255,6 +256,58 @@ def create_monitor_app(
             host=request.headers.get("host"),
         )
         return {"ticket": ticket, "expires_in": 60}
+
+    @app.get("/api/v1/audit/authorization", tags=["audit"])
+    async def list_authorization_audit(
+        identity: Principal,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        actor_user_id: str | None = None,
+        decision: str | None = Query(default=None, pattern="^(allow|deny)$"),
+        reason_code: str | None = Query(default=None, min_length=1, max_length=64),
+    ):
+        authorization_service.require(identity, Permission.SYSTEM_AUDIT_READ)
+        async with rbac_runtime.session_factory() as session:
+            rows, total = await rbac_service.audit_page(
+                session,
+                limit=limit,
+                offset=offset,
+                actor_user_id=actor_user_id,
+                decision=decision,
+                reason_code=reason_code,
+            )
+        return {
+            "items": [
+                {
+                    "id": row.id,
+                    "actor_user_id": row.actor_user_id,
+                    "target_user_id": row.target_user_id,
+                    "decision": row.decision,
+                    "reason_code": row.reason_code,
+                    "permission_code": row.permission_code,
+                    "resource_type": row.resource_type,
+                    "resource_id": row.resource_id,
+                    "detail": row.detail_json,
+                    "created_at": row.created_at,
+                }
+                for row in rows
+            ],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total,
+        }
+
+    @app.get("/api/v1/audit/authorization/stats", tags=["audit"])
+    async def authorization_audit_stats(
+        identity: Principal,
+        days: int = Query(default=30, ge=1, le=3650),
+    ):
+        authorization_service.require(identity, Permission.SYSTEM_AUDIT_READ)
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+        async with rbac_runtime.session_factory() as session:
+            summary = await rbac_service.audit_summary(session, since=since)
+        return {"period_days": days, "since": since, **summary}
 
     @app.get("/api/v1/observability/overview", tags=["observability"])
     async def overview(identity: Principal, days: int = Query(30, ge=1, le=365)):

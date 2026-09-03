@@ -1,4 +1,4 @@
-import type { AgentSessionStats, AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaAlert, QuotaArchiveBatch, QuotaBillingRecord, QuotaBillingStatementInput, QuotaBinding, QuotaBucketCandidate, QuotaBucketReplay, QuotaClassroomUsage, QuotaCreditOperation, QuotaCreditOperationInput, QuotaDailyRollup, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaPolicyUpdateInput, QuotaPricingRule, QuotaRoleCreditOperationInput, QuotaRoleCreditOperationResult, QuotaSnapshot, QuotaUsageSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherAIAnalysisResult, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeacherAnalysisAnnotations, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperRuntimeHealth, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaAlert, QuotaArchiveBatch, QuotaBillingRecord, QuotaBillingStatementInput, QuotaBinding, QuotaBucketCandidate, QuotaBucketReplay, QuotaClassroomUsage, QuotaCreditOperation, QuotaCreditOperationInput, QuotaDailyRollup, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaPolicyUpdateInput, QuotaPricingRule, QuotaRoleCreditOperationInput, QuotaRoleCreditOperationResult, QuotaSnapshot, QuotaUsageSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherAIAnalysisResult, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeacherAnalysisAnnotations, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 import type { FeedbackCategory, FeedbackDailyState, FeedbackPriority, FeedbackStatus, FeedbackThread, FeedbackThreadList } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
@@ -120,7 +120,6 @@ export const api = {
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return request<SessionListResponse>(`/sessions${suffix}`);
   },
-  getSessionStats: () => request<AgentSessionStats>("/sessions/stats"),
   getUsage: (days = 30, workspaceId?: string, granularity: "day" | "week" = "day") => request<QuotaUsageSnapshot>(`/usage/me?days=${encodeURIComponent(String(days))}&granularity=${granularity}${workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
   getQuota: (workspaceId?: string) => request<{ quota: QuotaSnapshot; policy: QuotaPolicyExplanation | null }>(`/quota/me${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ""}`),
   createSession: (workspaceId = "default") =>
@@ -181,6 +180,7 @@ export const api = {
   deleteFeedback: (threadId: string) => request<void>(`/developer/feedback/${encodeURIComponent(threadId)}`, { method: "DELETE" }),
   deleteFeedbackThreads: (threadIds: string[]) => request<{ ok: boolean; deleted: number }>("/developer/feedback/bulk-delete", { method: "POST", body: JSON.stringify({ thread_ids: threadIds }) }),
   getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
+  getDeveloperHealth: () => request<DeveloperRuntimeHealth>("/developer/health"),
   listQuotaPolicies: (code?: string) => request<{ items: QuotaPolicy[] }>(`/developer/quota/policies${code ? `?code=${encodeURIComponent(code)}` : ""}`),
   listQuotaPricingRules: (pricingKey?: string) => request<{ items: QuotaPricingRule[] }>(`/developer/quota/pricing-rules${pricingKey ? `?pricing_key=${encodeURIComponent(pricingKey)}` : ""}`),
   getQuotaPricingRule: (pricingRuleId: string) => request<QuotaPricingRule>(`/developer/quota/pricing-rules/${encodeURIComponent(pricingRuleId)}`),
@@ -241,6 +241,14 @@ export const api = {
   deleteSkill: (name: string) => request<void>(`/developer/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
   saveWorkerProfile: (name: string, profile: Record<string, unknown>) => request<Record<string, unknown>>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ profile }) }),
   deleteWorkerProfile: (name: string) => request<void>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  saveModelProvider: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/providers/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelPreset: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/presets/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelRoute: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/routes/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelProfile: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
   listReleaseNotes: () => request<{ items: ReleaseNoteEntry[] }>("/developer/release-notes"),
   createReleaseNote: (note: Omit<ReleaseNoteEntry, "id">) =>
     request<ReleaseNoteEntry>("/developer/release-notes", { method: "POST", body: JSON.stringify(note) }),
@@ -313,7 +321,11 @@ export const api = {
   listRolePermissions: (roleCode: string) => request<{ role_code: string; permissions: Record<string, string[]> }>(`/system/roles/${encodeURIComponent(roleCode)}/permissions`),
   replaceRolePermissions: (roleCode: string, permission_codes: string[], scopes: Record<string, string[]>) =>
     request<void>(`/system/roles/${encodeURIComponent(roleCode)}/permissions`, { method: "PUT", body: JSON.stringify({ permission_codes, scopes }) }),
+  listMenus: () => request<{ items: SystemMenu[] }>("/system/menus"),
   listVisibleMenus: () => request<{ items: SystemMenu[] }>("/system/menus/visible"),
+  replaceRoleMenus: (roleCode: string, menu_ids: string[]) =>
+    request<void>(`/system/roles/${encodeURIComponent(roleCode)}/menus`, { method: "PUT", body: JSON.stringify({ menu_ids }) }),
+  listRoleMenus: (roleCode: string) => request<{ role_code: string; menu_ids: string[] }>(`/system/roles/${encodeURIComponent(roleCode)}/menus`),
   listAuthorizationAudit: (params?: { limit?: number; offset?: number; actorUserId?: string; decision?: string; reasonCode?: string }) => {
     const query = new URLSearchParams();
     if (params?.limit != null) query.set("limit", String(params.limit));

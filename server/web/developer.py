@@ -118,6 +118,12 @@ async def developer_snapshot(
             "routes": _safe(raw.get("model_routes", {})),
             "models": _safe(raw.get("models", {})),
             "presets": _safe(raw.get("model_presets", {})),
+            "profiles": _safe(raw.get("model_profiles", {})),
+            "default_model_profile": _safe(
+                raw.get("defaults", {}).get("model_profile")
+                if isinstance(raw.get("defaults"), dict)
+                else None
+            ),
             "providers": providers,
         },
         "tools": _tool_snapshot(),
@@ -134,3 +140,12 @@ async def developer_snapshot(
             "protocol": {"http": "/api/v1", "websocket": "/ws/v1"},
         },
     }
+
+
+async def developer_health(
+    principal: AuthenticatedPrincipal, gateway: Any
+) -> dict[str, Any]:
+    """Return the lightweight live health payload used by runtime diagnostics."""
+    authorization_service.require(principal, Permission.SYSTEM_RUNTIME_INSPECT)
+    health = await gateway.health()
+    return health.model_dump(mode="json")

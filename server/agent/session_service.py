@@ -6,7 +6,6 @@ import asyncio
 import json
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -227,61 +226,6 @@ class DatabaseSessionService:
             "has_more": page_offset + len(rows) < total,
         }
 
-    async def stats(self, principal: AuthenticatedPrincipal) -> dict[str, Any]:
-        authorization_service.require(principal, Permission.AGENT_SESSION_READ)
-        scope = self._scope(principal)
-        active = scope.where(ConversationModel.status == "active")
-        scope_ids = scope.with_only_columns(ConversationModel.id).order_by(None)
-        turn_scope = select(TurnModel).where(
-            TurnModel.conversation_id.in_(scope_ids)
-        )
-        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
-        async with self._sessions() as session:
-            sessions_total = int(
-                await session.scalar(
-                    select(func.count()).select_from(scope.order_by(None).subquery())
-                )
-                or 0
-            )
-            sessions_active = int(
-                await session.scalar(
-                    select(func.count()).select_from(active.order_by(None).subquery())
-                )
-                or 0
-            )
-            turns_total = int(
-                await session.scalar(
-                    select(func.count()).select_from(turn_scope.order_by(None).subquery())
-                )
-                or 0
-            )
-            turns_last_24h = int(
-                await session.scalar(
-                    select(func.count()).select_from(
-                        turn_scope.where(TurnModel.created_at >= since)
-                        .order_by(None)
-                        .subquery()
-                    )
-                )
-                or 0
-            )
-            last_activity = await session.scalar(
-                select(func.max(func.coalesce(
-                    ConversationModel.last_message_at,
-                    ConversationModel.updated_at,
-                    ConversationModel.created_at,
-                ))).where(
-                    ConversationModel.id.in_(scope_ids)
-                )
-            )
-        return {
-            "sessions_total": sessions_total,
-            "sessions_active": sessions_active,
-            "turns_total": turns_total,
-            "turns_last_24h": turns_last_24h,
-            "last_activity_at": last_activity,
-        }
-
     async def messages(
         self, principal: AuthenticatedPrincipal, session_id: str
     ) -> list[dict[str, Any]]:
@@ -493,22 +437,6 @@ class LocalSessionService:
             "offset": page_offset,
             "limit": page_limit,
             "has_more": page_offset + len(items) < len(output),
-        }
-
-    async def stats(self, principal: AuthenticatedPrincipal) -> dict[str, Any]:
-        page = await self.list_page(principal, limit=200)
-        active_values = [
-            item.get("last_active")
-            for item in page["items"]
-            if item.get("last_active") is not None
-        ]
-        last_active = max(active_values, default=None)
-        return {
-            "sessions_total": page["total"],
-            "sessions_active": page["total"],
-            "turns_total": None,
-            "turns_last_24h": None,
-            "last_activity_at": last_active,
         }
 
     async def messages(
