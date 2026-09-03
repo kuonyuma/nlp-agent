@@ -83,7 +83,7 @@ class LangGraphAgentEngine:
         if self._app is None:
             raise RuntimeError("Agent engine is not started")
         selected_profile = current_model_profile() or self._session_model_profiles.get(
-            context.session_id
+            context.storage_key
         )
         if selected_profile is not None and current_model_profile() != selected_profile:
             with bind_model_profile(selected_profile):
@@ -237,7 +237,7 @@ class LangGraphAgentEngine:
         teaching_materials: TeachingMaterials | None = None,
         model_profile: str | None = None,
     ) -> str:
-        self._session_model_profiles[context.session_id] = model_profile
+        self._session_model_profiles[context.storage_key] = model_profile
         with bind_model_profile(model_profile):
             return await self._run_selected_turn(
                 context,
@@ -290,7 +290,7 @@ class LangGraphAgentEngine:
         global_task_manager.cancel_turn(context.session_id, turn_id, reason="gateway_cancelled")
 
     async def delete_session(self, context: SessionContext) -> None:
-        self._session_model_profiles.pop(context.session_id, None)
+        self._session_model_profiles.pop(context.storage_key, None)
         if self._runtime is not None:
             await self._runtime.release_session(context.session_id)
         if self._app is not None:
