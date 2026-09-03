@@ -1,9 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Coins, KeyRound, Settings, ShieldCheck, UserRound, X } from "lucide-react";
+import { KeyRound, Settings, ShieldCheck, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "@/platform/http/api";
 import type { UserProfile } from "@/shared/types";
-import { QuotaUsagePage } from "@/modules/quota/QuotaUsagePage";
 
 /**
  * 个人设置弹层 — Radix 标准 Dialog（role="dialog"、aria-modal、焦点陷阱、
@@ -16,14 +15,10 @@ export function ProfileDialog({
   open,
   onClose,
   sessionRoles,
-  userId,
-  workspaceIds,
 }: {
   open: boolean;
   onClose: () => void;
   sessionRoles?: string[];
-  userId?: string;
-  workspaceIds?: string[];
 }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(false);
@@ -43,7 +38,7 @@ export function ProfileDialog({
   const [pwdSaving, setPwdSaving] = useState(false);
 
   // ---------- active section ----------
-  const [activeSection, setActiveSection] = useState<"info" | "name" | "password" | "quota">("info");
+  const [activeSection, setActiveSection] = useState<"info" | "name" | "password">("info");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -117,14 +112,13 @@ export function ProfileDialog({
     { id: "info", label: "基本信息", icon: UserRound },
     { id: "name", label: "修改昵称", icon: Settings },
     { id: "password", label: "修改密码", icon: KeyRound },
-    { id: "quota", label: "额度与用量", icon: Coins },
   ];
 
   return (
     <Dialog.Root open onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="profile-dialog-overlay" />
-        <Dialog.Content className={`profile-dialog-content${activeSection === "quota" ? " profile-dialog-content-wide" : ""}`} aria-describedby="profile-dialog-description">
+        <Dialog.Content className="profile-dialog-content" aria-describedby="profile-dialog-description">
           <button className="login-dialog-close" type="button" onClick={onClose} aria-label="关闭个人设置">
             <X size={18} />
           </button>
@@ -226,7 +220,6 @@ export function ProfileDialog({
                   </form>
                 )}
 
-                {activeSection === "quota" && <QuotaUsagePage embedded userId={userId} workspaceIds={workspaceIds} />}
               </div>
             </>
           )}

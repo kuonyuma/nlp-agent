@@ -25,6 +25,8 @@ export interface DeveloperSnapshot {
     routes: Record<string, unknown>;
     models: Record<string, Record<string, unknown>>;
     presets: Record<string, Record<string, unknown>>;
+    profiles: Record<string, Record<string, unknown>>;
+    default_model_profile: string | null;
     providers: Record<string, Record<string, unknown>>;
   };
   tools: {
@@ -38,6 +40,16 @@ export interface DeveloperSnapshot {
   agents: Record<string, unknown>;
   workspace: { roots: Array<{ name: string; path: string; exists: boolean; writable: boolean }> };
   web: Record<string, unknown>;
+}
+
+export interface DeveloperRuntimeHealth {
+  status: string;
+  started: boolean;
+  accepting_turns: boolean;
+  active_turns: number;
+  subscribers: number;
+  database: string;
+  durable_events: number;
 }
 
 export interface FeedbackMessage {
@@ -394,14 +406,6 @@ export interface SessionListResponse {
   offset?: number;
   limit?: number;
   has_more?: boolean;
-}
-
-export interface AgentSessionStats {
-  sessions_total: number;
-  sessions_active: number;
-  turns_total: number | null;
-  turns_last_24h: number | null;
-  last_activity_at: string | number | null;
 }
 
 export interface TurnRecord {

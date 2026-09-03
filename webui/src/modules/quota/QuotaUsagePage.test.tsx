@@ -63,6 +63,23 @@ describe("QuotaUsagePage", () => {
     expect(screen.queryByText("工作空间 · 今日")).not.toBeInTheDocument();
   });
 
+  it("keeps daily and weekly personal quota slots visible when one period is not configured", async () => {
+    getQuota.mockResolvedValue({
+      quota: {
+        user_id: "user-1",
+        workspace_id: "workspace-a",
+        buckets: [{ owner_type: "user", owner_id: "user-1", bucket_type: "daily", limit_micro: 100, grant_micro: 0, adjustment_micro: 0, consumed_micro: 0, reserved_micro: 20, remaining_micro: 80, reset_at: "2026-08-31T00:00:00+00:00", over_limit: false }],
+      },
+      policy: null,
+    });
+
+    render(<QuotaUsagePage />);
+
+    expect(await screen.findByText("个人 · 今日")).toBeInTheDocument();
+    expect(screen.getByText("个人 · 本周")).toBeInTheDocument();
+    expect(screen.getByText("未单独设置")).toBeInTheDocument();
+  });
+
   it("renders unlimited quota as text instead of exposing the internal sentinel", async () => {
     getQuota.mockResolvedValue({
       quota: {

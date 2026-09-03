@@ -187,6 +187,14 @@ def test_login_requires_valid_credentials_and_logout_revokes_cookie_session(web_
         assert client.get("/api/v1/sessions").status_code == 401
 
 
+def test_developer_session_management_stats_endpoint_is_not_exposed(web_app):
+    app, _engine = web_app
+
+    assert "/api/v1/sessions/stats" not in {
+        route.path for route in app.routes if hasattr(route, "path")
+    }
+
+
 def test_guest_session_has_only_guest_capabilities(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
@@ -340,12 +348,15 @@ def test_student_cannot_call_teacher_or_developer_control_planes(student_web_app
 
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         developer = client.get("/api/v1/developer/snapshot")
+        developer_health = client.get("/api/v1/developer/health")
         release_notes = client.get("/api/v1/developer/release-notes")
 
         assert teacher.status_code == 403
         assert teacher.json()["code"] == "forbidden"
         assert developer.status_code == 403
         assert developer.json()["code"] == "forbidden"
+        assert developer_health.status_code == 403
+        assert developer_health.json()["code"] == "forbidden"
         assert release_notes.status_code == 403
         assert release_notes.json()["code"] == "forbidden"
         assert client.post("/api/v1/auth/session", headers={"Origin": "http://testserver"}).status_code == 405
@@ -449,6 +460,10 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
         assert developer.status_code == 200
         assert developer.json()["runtime"]["status"] == "ok"
         assert "tools" in developer.json()
+        developer_health = client.get("/api/v1/developer/health")
+        assert developer_health.status_code == 200
+        assert developer_health.json()["status"] == "ok"
+        assert developer_health.json()["active_turns"] == 0
         teacher = client.get("/api/v1/teacher/overview?workspace_id=default")
         assert teacher.status_code == 200
         assert teacher.json()["summary"]["questions"] == 0
@@ -1166,7 +1181,7 @@ async def test_websocket_hub_broadcast_targets_workspace_members():
     assert delivered == {"alice": 1, "developer": 1}
 
 
-def test_session_list_exposes_page_metadata_and_usage_stats(web_app):
+def test_session_list_exposes_page_metadata(web_app):
     app, _engine = web_app
     with TestClient(app) as client:
         csrf = authenticate(client)
@@ -1184,7 +1199,3 @@ def test_session_list_exposes_page_metadata_and_usage_stats(web_app):
         assert page.json()["offset"] == 1
         assert len(page.json()["items"]) == 1
         assert page.json()["has_more"] is False
-
-        stats = client.get("/api/v1/sessions/stats")
-        assert stats.status_code == 200
-        assert stats.json()["sessions_total"] == 2

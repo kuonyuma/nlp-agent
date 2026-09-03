@@ -2,7 +2,6 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 
 import { SettingsDialog } from "./SettingsDialog";
 import { loadFeedback } from "@/shared/utils/feedback";
-import { APP_VERSION } from "@/shared/version";
 import type { UserSettings } from "@/shared/types";
 
 const { getFeedbackDailyStateMock, getOwnFeedbackMock, getQuotaMock, getUsageMock, listPublishedReleaseNotesMock, markOwnFeedbackReadMock, submitFeedbackMock } = vi.hoisted(() => ({ getFeedbackDailyStateMock: vi.fn(), getOwnFeedbackMock: vi.fn(), getQuotaMock: vi.fn(), getUsageMock: vi.fn(), listPublishedReleaseNotesMock: vi.fn(), markOwnFeedbackReadMock: vi.fn(), submitFeedbackMock: vi.fn() }));
@@ -52,12 +51,22 @@ describe("SettingsDialog", () => {
     getUsageMock.mockResolvedValue({ events: 0, priced_credits_micro: 0, unpriced_events: 0, credits_complete: true, tokens: {}, breakdown: [] });
   });
 
-  it("renders the current version from the build-injected constant", () => {
+  it("renders only the newest published version with a readable date", async () => {
+    listPublishedReleaseNotesMock.mockResolvedValue({
+      items: [
+        { id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["旧版本"], status: "published" },
+        { id: "n2", version: "1.1.0", released_at: "2026-08-13T00:00:00", notes: ["最新版本"], status: "published" },
+      ],
+    });
     render(<SettingsDialog {...baseProps} />);
     fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
 
-    expect(screen.getByText(`NLP 学习助手 v${APP_VERSION}`)).toBeVisible();
-    expect(screen.getByText("版本号随构建自动同步")).toBeVisible();
+    expect(await screen.findByText("v1.1.0")).toBeVisible();
+    expect(screen.getByText("发布日期 · 2026-08-13")).toBeVisible();
+    expect(screen.getByText("最新版本")).toBeVisible();
+    expect(screen.queryByText("v1.0.0")).not.toBeInTheDocument();
+    expect(screen.queryByText("旧版本")).not.toBeInTheDocument();
+    expect(screen.queryByText("版本号随构建自动同步")).not.toBeInTheDocument();
   });
 
   it("renders published release notes fetched from the backend", async () => {
@@ -86,6 +95,22 @@ describe("SettingsDialog", () => {
 
     expect(await screen.findByText("无法读取更新说明，请稍后重试。")).toBeVisible();
     expect(screen.queryByText("暂无已发布的更新说明。")).not.toBeInTheDocument();
+  });
+
+  it("refreshes published release notes when the settings dialog is opened again", async () => {
+    listPublishedReleaseNotesMock
+      .mockResolvedValueOnce({ items: [{ id: "n1", version: "1.0.0", released_at: "2026-08-01T00:00:00", notes: ["第一版"], status: "published" }] })
+      .mockResolvedValueOnce({ items: [{ id: "n2", version: "1.1.0", released_at: "2026-08-13T00:00:00", notes: ["第二版"], status: "published" }] });
+    const { rerender } = render(<SettingsDialog {...baseProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+    expect(await screen.findByText("第一版")).toBeVisible();
+
+    rerender(<SettingsDialog {...baseProps} open={false} />);
+    rerender(<SettingsDialog {...baseProps} open />);
+    fireEvent.click(screen.getByRole("button", { name: "版本与更新" }));
+
+    expect(await screen.findByText("第二版")).toBeVisible();
+    expect(listPublishedReleaseNotesMock).toHaveBeenCalledTimes(2);
   });
 
   it("retries loading release notes after the failure recovers", async () => {
