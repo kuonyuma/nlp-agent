@@ -1,10 +1,10 @@
 import {
   Activity, AppWindow, Bot, Box, ChevronDown, ChevronLeft, ChevronRight, Clock3, Code2, Database,
-  ExternalLink, FileKey2, Gauge, Globe2, KeyRound, Mail, MailOpen, Newspaper, PlugZap,
+  ExternalLink, FileKey2, Gauge, Globe2, Mail, MailOpen, Newspaper, PlugZap,
   Inbox, MessageCircle, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, User, Wrench,
   Users, LayoutList, MessageSquare, WalletCards,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, ensureAuth } from "@/platform/http/api";
 import type { DeveloperRuntimeHealth, DeveloperSnapshot, FeedbackCategory, FeedbackPriority, FeedbackStatus, FeedbackThread, FeedbackThreadSummary, ReleaseNoteEntry } from "@/shared/types";
@@ -98,19 +98,210 @@ function Overview({ snapshot }: { snapshot: DeveloperSnapshot }) {
   </div>;
 }
 
-function Agents({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
-  const agents = snapshot.agents as Record<string, unknown>;
-  const profiles = (agents.profiles ?? {}) as Record<string, unknown>;
-  const [name, setName] = useState("");
-  return <><Section title="Worker Profile" hint="Profile 组合 Skill、能力与工具授权；保存后会重新加载 Skill 解析器。"><div className="developer-inline-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="profile 名称，例如 researcher" /><button type="button" onClick={() => { if (name) void api.saveWorkerProfile(name, { description: "", skills: [], allowed_tools: [], capabilities: [] }).then(refresh); }}>新建</button></div>{Object.entries(profiles).map(([profileName, profile]) => <div className="developer-managed-card" key={profileName}><strong>{profileName}</strong><JsonEditor value={profile} label="保存 Profile" onSave={async (value) => { await api.saveWorkerProfile(profileName, value); await refresh(); }} /><button className="danger" type="button" onClick={() => { if (confirm(`删除 Profile ${profileName}？`)) void api.deleteWorkerProfile(profileName).then(refresh); }}>删除</button></div>)}</Section><Section title="Agent / Worker 运行配置"><JsonBlock value={{ runtime: agents.runtime, overrides: agents.overrides }} /></Section><Section title="当前 Gateway"><JsonBlock value={snapshot.runtime} /></Section></>;
+type WorkerProfileDraft = {
+  description: string;
+  model: string;
+  execution_mode: "react" | "one_shot";
+  requires_native_search: boolean;
+  inherit_tool_policy: boolean;
+  skills: string[];
+  capabilities: string[];
+  allowed_tools: string[];
+  denied_tools: string[];
+};
+
+function workerProfileDraft(value: unknown = {}): WorkerProfileDraft {
+  const source = asRecord(value);
+  return {
+    description: String(source.description ?? ""),
+    model: String(source.model ?? ""),
+    execution_mode: source.execution_mode === "one_shot" ? "one_shot" : "react",
+    requires_native_search: Boolean(source.requires_native_search),
+    inherit_tool_policy: source.inherit_tool_policy !== false,
+    skills: asStringList(source.skills),
+    capabilities: asStringList(source.capabilities),
+    allowed_tools: asStringList(source.allowed_tools),
+    denied_tools: asStringList(source.denied_tools),
+  };
 }
 
-function Tools({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
-  return <><Section title="工具目录" hint={`${snapshot.tools.items.length} 个已注册工具；高优先级工具会更靠前展示给模型，展示顺序不改变权限。`}><div className="developer-table-wrap"><table><thead><tr><th>工具</th><th>来源</th><th>类别 / 版本</th><th>优先级</th><th>作用域</th><th>风险</th><th>超时</th></tr></thead><tbody>{snapshot.tools.items.map((tool) => <tr key={String(tool.name)}><td><strong>{String(tool.name)}</strong><small>{String(tool.description ?? "")}</small></td><td>{String(tool.source)} / {String(tool.provider)}</td><td>{String(tool.category ?? "general")} / {String(tool.version ?? "1.0")}</td><td>{String(tool.prompt_priority ?? 100)}</td><td>{Array.isArray(tool.scopes) ? tool.scopes.join(", ") : "-"}</td><td>{String(tool.risk)}</td><td>{String(tool.timeout_s)}s</td></tr>)}</tbody></table></div></Section><Section title="角色权限策略" hint="保存后新建的 Coordinator/Worker 立即按新策略生成 ToolSet；已启动 Worker 的授权快照不会被扩大。"><JsonEditor value={snapshot.tools.policies} label="保存权限策略" onSave={async (value) => { await api.updateToolPolicies(value); await refresh(); }} /></Section><Section title="自定义 Tool" hint="每个 Provider 都需要 Manifest，声明版本、类别、优先级、作用域、能力与风险。修改来源已持久化，但必须重启 Runtime 才会安全加载或卸载 Python 模块。"><JsonEditor value={snapshot.tools.custom} label="保存自定义 Tool 配置" onSave={async (value) => { const result = await api.updateCustomTools(value); await refresh(); alert(result.reason); }} /></Section></>;
+function csvValue(value: string[]): string {
+  return value.join(", ");
 }
 
-function Models({ snapshot }: { snapshot: DeveloperSnapshot }) {
-  return <><Section title="Provider / API Key" hint="密钥值永远不会发送到浏览器。"><div className="developer-card-grid">{Object.entries(snapshot.models.providers).map(([name, provider]) => <article className="developer-card" key={name}><div><KeyRound size={18} /><strong>{name}</strong></div><StatusPill ok={Boolean(provider.api_key_configured)}>{provider.api_key_configured ? "密钥已配置" : "缺少密钥"}</StatusPill><p>{String(provider.base_url ?? "")}</p></article>)}</div></Section><Section title="模型路由与故障转移"><JsonBlock value={{ defaults: snapshot.models.defaults, routes: snapshot.models.routes }} /></Section><Section title="思考、生成、超时与重试预设"><JsonBlock value={snapshot.models.presets} /></Section></>;
+function toolGroup(tool: Record<string, unknown>): "nlp" | "sandbox" | "other" {
+  const name = String(tool.name ?? "");
+  const category = String(tool.category ?? "").toLowerCase();
+  const capabilities = asStringList(tool.capabilities);
+  if (category === "nlp" || name.startsWith("nlp_") || capabilities.some((item) => item.startsWith("nlp."))) return "nlp";
+  if (category === "sandbox" || String(tool.provider ?? "") === "sandbox" || name.startsWith("sandbox_")) return "sandbox";
+  return "other";
+}
+
+export function Agents({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
+  const agents = asRecord(snapshot.agents);
+  const profiles = asRecord(agents.profiles);
+  const profileNames = Object.keys(profiles);
+  const presetNames = Object.keys(snapshot.models.presets);
+  const [selectedName, setSelectedName] = useState(profileNames[0] ?? "");
+  const [isNew, setIsNew] = useState(false);
+  const [draft, setDraft] = useState<WorkerProfileDraft>(() => workerProfileDraft(profiles[profileNames[0]]));
+  const [message, setMessage] = useState("");
+  const coordinatorRuntime = asRecord(asRecord(agents.runtime).coordinator);
+  const workerRuntime = asRecord(asRecord(agents.runtime).worker);
+  const selectedProfile = selectedName && !isNew ? asRecord(profiles[selectedName]) : null;
+
+  const selectProfile = (name: string) => {
+    setSelectedName(name);
+    setIsNew(false);
+    setDraft(workerProfileDraft(profiles[name]));
+    setMessage("");
+  };
+  const newProfile = () => {
+    setSelectedName("new-worker");
+    setIsNew(true);
+    setDraft(workerProfileDraft());
+    setMessage("");
+  };
+  const update = <K extends keyof WorkerProfileDraft>(key: K, value: WorkerProfileDraft[K]) => setDraft((current) => ({ ...current, [key]: value }));
+  const save = async () => {
+    const name = selectedName.trim();
+    if (!name) { setMessage("请先填写 Profile 名称"); return; }
+    try {
+      await api.saveWorkerProfile(name, {
+        ...draft,
+        model: draft.model.trim() || null,
+        skills: draft.skills,
+        capabilities: draft.capabilities,
+        allowed_tools: draft.allowed_tools,
+        denied_tools: draft.denied_tools,
+      });
+      setIsNew(false);
+      setMessage("已保存，新的 Worker 会按此 Profile 运行");
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const remove = async () => {
+    if (!selectedName || !confirm(`删除 Worker Profile ${selectedName}？`)) return;
+    try {
+      await api.deleteWorkerProfile(selectedName);
+      setSelectedName("");
+      setDraft(workerProfileDraft());
+      setMessage("已删除");
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  return <div className="developer-control-page">
+    <div className="developer-control-heading"><div><span className="developer-eyebrow">AGENT RUNTIME</span><h1>Agent 与 Worker</h1><p>Agent 负责拆解和调度，Worker 按 Profile 执行具体任务。这里配置 Worker 的用途、模型、Skill 和工具边界。</p></div><button className="developer-control-primary" type="button" onClick={newProfile}><Bot size={15} />新建 Worker Profile</button></div>
+    <section className="developer-agent-flow"><div className="developer-flow-node"><span>01</span><div><strong>Coordinator Agent</strong><p>理解任务、拆解步骤并调度 Worker。</p></div><small>最多 {String(coordinatorRuntime.max_iterations ?? "-")} 轮 · {String(coordinatorRuntime.max_tool_calls ?? "-")} 次工具调用</small></div><ChevronRight className="developer-flow-arrow" size={18} /><div className="developer-flow-node"><span>02</span><div><strong>Worker Agent</strong><p>根据 Profile 的 SOP、能力和授权工具完成子任务。</p></div><small>注入上限 {String(workerRuntime.max_injections ?? "-")} · 结果回传 Gateway</small></div></section>
+    <div className="developer-agents-layout"><aside className="developer-profile-directory"><div className="developer-control-section-heading"><div><h2>Worker Profiles</h2><p>{profileNames.length} 个可用配置</p></div></div>{profileNames.length ? profileNames.map((name) => { const profile = asRecord(profiles[name]); return <button className={`developer-profile-item ${selectedName === name && !isNew ? "active" : ""}`} type="button" aria-pressed={selectedName === name && !isNew} key={name} onClick={() => selectProfile(name)}><span className="developer-profile-item-icon"><Bot size={15} /></span><span><strong>{name}</strong><small>{String(profile.description ?? "未填写用途说明")}</small></span><StatusPill ok={!profile.requires_native_search || Boolean(profile.model)}>{profile.requires_native_search ? "联网" : "标准"}</StatusPill></button>; }) : <div className="developer-control-empty"><Bot size={18} /><strong>还没有 Worker Profile</strong><p>从一个清晰的任务用途开始创建。</p></div>}</aside>
+      <section className="developer-profile-editor"><div className="developer-control-section-heading"><div><h2>{isNew ? "新建 Worker Profile" : selectedName || "选择一个 Profile"}</h2><p>{selectedProfile ? "修改后只影响新建的 Worker；已运行任务保留原授权快照。" : "Profile 是 Worker 的可复用运行合同。"}</p></div>{selectedProfile && <StatusPill ok={true}>已加载</StatusPill>}</div>{(selectedName || isNew) && <><label className="developer-control-field">Profile 名称<input aria-label="Profile 名称" value={selectedName} disabled={!isNew} onChange={(event) => setSelectedName(event.target.value)} /></label><label className="developer-control-field">用途说明<textarea aria-label="用途说明" value={draft.description} onChange={(event) => update("description", event.target.value)} placeholder="它解决什么任务？什么时候应该使用？" /></label><div className="developer-control-field-grid"><label className="developer-control-field">模型预设<select aria-label="模型预设" value={draft.model} onChange={(event) => update("model", event.target.value)}><option value="">跟随 Worker 路由</option>{presetNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="developer-control-field">执行方式<select aria-label="执行方式" value={draft.execution_mode} onChange={(event) => update("execution_mode", event.target.value as WorkerProfileDraft["execution_mode"])}><option value="react">React · 可连续使用工具</option><option value="one_shot">One-shot · 一次性生成</option></select></label></div><div className="developer-control-checks"><label><input type="checkbox" checked={draft.inherit_tool_policy} onChange={(event) => update("inherit_tool_policy", event.target.checked)} />继承 Worker 全局工具策略</label><label><input type="checkbox" checked={draft.requires_native_search} onChange={(event) => update("requires_native_search", event.target.checked)} />需要 Provider 原生联网</label></div><div className="developer-control-field-grid"><label className="developer-control-field">Skills<input aria-label="Profile Skills" value={csvValue(draft.skills)} onChange={(event) => update("skills", commaList(event.target.value))} placeholder="research, teacher" /></label><label className="developer-control-field">能力 Capabilities<input aria-label="Profile 能力" value={csvValue(draft.capabilities)} onChange={(event) => update("capabilities", commaList(event.target.value))} placeholder="nlp.analyze, web.fetch" /></label><label className="developer-control-field">额外允许工具<input aria-label="Profile 允许工具" value={csvValue(draft.allowed_tools)} onChange={(event) => update("allowed_tools", commaList(event.target.value))} placeholder="tool_name, another_tool" /></label><label className="developer-control-field">拒绝工具<input aria-label="Profile 拒绝工具" value={csvValue(draft.denied_tools)} onChange={(event) => update("denied_tools", commaList(event.target.value))} placeholder="危险工具名" /></label></div><div className="developer-control-actions"><button className="developer-control-primary" type="button" onClick={() => void save()}>保存 Profile</button>{selectedProfile && <button className="developer-control-danger" type="button" onClick={() => void remove()}>删除 Profile</button>}{message && <small role="status">{message}</small>}</div></>}</section></div>
+    <Section title="运行边界" hint="这些是 Agent/Worker 的全局预算，防止单次任务无限循环；具体 Profile 只负责选择模型和授权。"><div className="developer-limit-grid"><article><strong>Coordinator</strong><span>最大迭代 {String(coordinatorRuntime.max_iterations ?? "未配置")}</span><span>最大工具调用 {String(coordinatorRuntime.max_tool_calls ?? "未配置")}</span></article><article><strong>Worker</strong><span>最大注入 {String(workerRuntime.max_injections ?? "未配置")}</span><span>最大结果字符 {String(workerRuntime.max_tool_result_chars ?? "未配置")}</span></article></div></Section>
+  </div>;
+}
+
+export function Tools({ snapshot, refresh }: { snapshot: DeveloperSnapshot; refresh: () => Promise<void> }) {
+  const groups = [{ key: "all", label: "全部工具" }, { key: "nlp", label: "NLP 专属" }, { key: "sandbox", label: "Sandbox" }, { key: "other", label: "其他" }] as const;
+  const [group, setGroup] = useState<(typeof groups)[number]["key"]>(() => { const value = new URLSearchParams(location.search).get("group"); return groups.some((item) => item.key === value) ? value as (typeof groups)[number]["key"] : "all"; });
+  const [query, setQuery] = useState("");
+  const [role, setRole] = useState<"coordinator" | "worker">("worker");
+  const [selectedName, setSelectedName] = useState("");
+  const [policies, setPolicies] = useState<Record<string, unknown>>(() => asRecord(snapshot.tools.policies));
+  const [message, setMessage] = useState("");
+  const items = snapshot.tools.items;
+  const counts = Object.fromEntries(groups.map((item) => [item.key, item.key === "all" ? items.length : items.filter((tool) => toolGroup(tool) === item.key).length]));
+  const visibleTools = items.filter((tool) => {
+    const matchesGroup = group === "all" || toolGroup(tool) === group;
+    const text = `${String(tool.name ?? "")} ${String(tool.description ?? "")} ${String(tool.provider ?? "")}`.toLowerCase();
+    return matchesGroup && (!query.trim() || text.includes(query.trim().toLowerCase()));
+  });
+  const selectedTool = visibleTools.find((tool) => String(tool.name) === selectedName) ?? visibleTools[0];
+  const rolePolicy = asRecord(policies[role]);
+  const allowedTools = asStringList(rolePolicy.allowed_tools);
+  const setGroupAndRoute = (next: typeof group) => {
+    setGroup(next);
+    const url = new URL(location.href);
+    if (next === "all") url.searchParams.delete("group"); else url.searchParams.set("group", next);
+    history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  };
+  const toggleGrant = (name: string, checked: boolean) => {
+    setPolicies((current) => {
+      const next = { ...current };
+      const policy = { ...asRecord(next[role]) };
+      const currentNames = asStringList(policy.allowed_tools).filter((item) => item !== "*");
+      policy.allowed_tools = checked ? [...new Set([...currentNames, name])] : currentNames.filter((item) => item !== name);
+      next[role] = policy;
+      return next;
+    });
+  };
+  const savePolicy = async () => {
+    try { await api.updateToolPolicies(policies); setMessage(`${role === "worker" ? "Worker" : "Coordinator"} 权限已保存，新建任务会使用新策略`); await refresh(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+  };
+  return <div className="developer-control-page">
+    <div className="developer-control-heading"><div><span className="developer-eyebrow">TOOL CATALOG</span><h1>工具</h1><p>工具目录负责“能做什么”，权限策略负责“谁可以用”。按来源和能力分类浏览，再为 Coordinator 或 Worker 配置授权。</p></div><span className="developer-control-revision">CATALOG v{snapshot.tools.catalog_revision}</span></div>
+    <div className="developer-tool-stats"><article><strong>{items.length}</strong><span>已注册工具</span></article><article><strong>{counts.nlp}</strong><span>NLP 教学工具</span></article><article><strong>{counts.sandbox}</strong><span>Sandbox 工具</span></article><article><strong>{items.filter((tool) => String(tool.risk) === "high" || String(tool.risk) === "critical").length}</strong><span>高风险入口</span></article></div>
+    <div className="developer-tool-toolbar"><div className="developer-control-tabs" role="tablist" aria-label="工具来源分类">{groups.map((item) => <button type="button" role="tab" aria-selected={group === item.key} key={item.key} onClick={() => setGroupAndRoute(item.key)}>{item.label}<span>{counts[item.key]}</span></button>)}</div><label className="developer-tool-search"><Search size={15} /><input aria-label="搜索工具" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索工具名、描述或 Provider" /></label></div>
+    <div className="developer-tools-layout"><aside className="developer-tool-directory"><div className="developer-control-section-heading"><div><h2>{groups.find((item) => item.key === group)?.label}</h2><p>{visibleTools.length} 个结果</p></div></div>{visibleTools.length ? visibleTools.map((tool) => { const name = String(tool.name); return <button className={`developer-tool-item ${selectedTool?.name === name ? "active" : ""}`} type="button" aria-pressed={selectedTool?.name === name} key={name} onClick={() => setSelectedName(name)}><span><strong>{name}</strong><small>{String(tool.description ?? "暂无说明")}</small></span><StatusPill ok={String(tool.risk ?? "low") === "low"}>{String(tool.risk ?? "low")}</StatusPill></button>; }) : <div className="developer-control-empty"><Wrench size={18} /><strong>没有匹配工具</strong><p>换一个分类或搜索词。</p></div>}</aside>
+      <section className="developer-tool-detail">{selectedTool ? <><div className="developer-tool-detail-heading"><div><span className="developer-eyebrow">TOOL DETAIL</span><h2>{String(selectedTool.name)}</h2><p>{String(selectedTool.description ?? "暂无描述")}</p></div><StatusPill ok={String(selectedTool.risk ?? "low") === "low"}>{String(selectedTool.risk ?? "low")} risk</StatusPill></div><div className="developer-tool-facts"><span><strong>来源</strong>{String(selectedTool.source ?? "-")}</span><span><strong>Provider</strong>{String(selectedTool.provider ?? "-")}</span><span><strong>类别</strong>{String(selectedTool.category ?? "general")}</span><span><strong>超时</strong>{String(selectedTool.timeout_s ?? "-")}s</span><span><strong>作用域</strong>{asStringList(selectedTool.scopes).join("、") || "-"}</span><span><strong>能力</strong>{asStringList(selectedTool.capabilities).join("、") || "-"}</span></div><div className="developer-tool-permissions"><div className="developer-control-section-heading"><div><h3>角色权限</h3><p>只修改该角色的允许工具；能力和拒绝规则仍按完整策略一起保存。</p></div><div className="developer-role-tabs">{(["worker", "coordinator"] as const).map((item) => <button type="button" className={role === item ? "active" : ""} key={item} onClick={() => setRole(item)}>{item === "worker" ? "Worker" : "Coordinator"}</button>)}</div></div><div className="developer-tool-grant-list">{visibleTools.map((tool) => { const name = String(tool.name); return <label key={name}><input type="checkbox" aria-label={`授权 ${name}`} checked={allowedTools.includes("*") || allowedTools.includes(name)} onChange={(event) => toggleGrant(name, event.target.checked)} />{name}</label>; })}</div><div className="developer-control-actions"><button className="developer-control-primary" type="button" onClick={() => void savePolicy()}>保存 {role === "worker" ? "Worker" : "Coordinator"} 权限</button>{message && <small role="status">{message}</small>}</div></div></> : <div className="developer-control-empty"><Wrench size={20} /><strong>选择一个工具</strong><p>查看它的来源、风险、能力和角色授权。</p></div>}</section></div>
+    <Section title="自定义工具 Provider" hint="自定义 Python 工具仍使用 Manifest 注册；保存扩展配置后需要重启 Runtime 才会加载或卸载模块。"><JsonEditor value={snapshot.tools.custom} label="保存自定义 Tool 配置" onSave={async (value) => { const result = await api.updateCustomTools(value); await refresh(); alert(result.reason); }} /></Section>
+  </div>;
+}
+
+type ModelProviderDraft = { adapter: string; base_url: string; api_key_env: string };
+type ModelPresetDraft = { model: string; thinking_enabled: boolean; thinking_effort: string; max_output_tokens: number; temperature: number | null };
+
+function modelProviderDraft(value: unknown = {}): ModelProviderDraft {
+  const source = asRecord(value);
+  return { adapter: String(source.adapter ?? "openai_compatible"), base_url: String(source.base_url ?? ""), api_key_env: String(source.api_key_env ?? "") };
+}
+
+function modelPresetDraft(value: unknown = {}): ModelPresetDraft {
+  const source = asRecord(value);
+  const thinking = asRecord(source.thinking);
+  const generation = asRecord(source.generation);
+  return { model: String(source.model ?? ""), thinking_enabled: Boolean(thinking.enabled), thinking_effort: String(thinking.effort ?? "none"), max_output_tokens: Number(generation.max_output_tokens ?? 16000), temperature: generation.temperature == null ? null : Number(generation.temperature) };
+}
+
+function modelPresetConfig(original: unknown, draft: ModelPresetDraft): Record<string, unknown> {
+  const source = asRecord(original);
+  const thinking = asRecord(source.thinking);
+  const generation = asRecord(source.generation);
+  return { ...source, model: draft.model, thinking: { ...thinking, enabled: draft.thinking_enabled, effort: draft.thinking_enabled ? draft.thinking_effort : "none" }, generation: { ...generation, max_output_tokens: draft.max_output_tokens, temperature: draft.temperature } };
+}
+
+export function Models({ snapshot }: { snapshot: DeveloperSnapshot }) {
+  const providerNames = Object.keys(snapshot.models.providers);
+  const presetNames = Object.keys(snapshot.models.presets);
+  const routeNames = Object.keys(snapshot.models.routes);
+  const modelNames = Object.keys(snapshot.models.models);
+  const [view, setView] = useState<"providers" | "presets" | "routes">("providers");
+  const [providerName, setProviderName] = useState(providerNames[0] ?? "");
+  const [providerDraft, setProviderDraft] = useState<ModelProviderDraft>(() => modelProviderDraft(snapshot.models.providers[providerNames[0]]));
+  const [presetName, setPresetName] = useState(presetNames[0] ?? "");
+  const [presetDraft, setPresetDraft] = useState<ModelPresetDraft>(() => modelPresetDraft(snapshot.models.presets[presetNames[0]]));
+  const [routeName, setRouteName] = useState(routeNames[0] ?? "");
+  const [routeDraft, setRouteDraft] = useState(() => { const route = asRecord(snapshot.models.routes[routeNames[0]]); return { primary: String(route.primary ?? ""), fallbacks: asStringList(route.fallbacks) }; });
+  const [message, setMessage] = useState("");
+  const selectProvider = (name: string) => { setProviderName(name); setProviderDraft(modelProviderDraft(snapshot.models.providers[name])); setMessage(""); };
+  const selectPreset = (name: string) => { setPresetName(name); setPresetDraft(modelPresetDraft(snapshot.models.presets[name])); setMessage(""); };
+  const selectRoute = (name: string) => { const route = asRecord(snapshot.models.routes[name]); setRouteName(name); setRouteDraft({ primary: String(route.primary ?? ""), fallbacks: asStringList(route.fallbacks) }); setMessage(""); };
+  const saveProvider = async () => { try { await api.saveModelProvider(providerName, providerDraft); setMessage("Provider 已保存，新的模型请求会使用最新连接配置"); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
+  const savePreset = async () => { try { await api.saveModelPreset(presetName, modelPresetConfig(snapshot.models.presets[presetName], presetDraft)); setMessage("模型预设已保存"); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
+  const saveRoute = async () => { try { await api.saveModelRoute(routeName, routeDraft); setMessage("模型路由已保存，后续请求按新的主备链路选择"); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } };
+  return <div className="developer-control-page">
+    <div className="developer-control-heading"><div><span className="developer-eyebrow">MODEL ROUTING</span><h1>模型与 Provider</h1><p>Provider 是连接和密钥入口，模型是厂商模型目录，预设决定生成参数，路由决定主模型和故障转移顺序。</p></div><div className="developer-model-default"><span>默认模型档案</span><strong>{snapshot.models.default_model_profile || "未指定"}</strong></div></div>
+    <div className="developer-control-tabs developer-control-tabs-wide" role="tablist" aria-label="模型配置区块"><button type="button" role="tab" aria-selected={view === "providers"} onClick={() => setView("providers")}>Provider 与模型</button><button type="button" role="tab" aria-selected={view === "presets"} onClick={() => setView("presets")}>模型预设</button><button type="button" role="tab" aria-selected={view === "routes"} onClick={() => setView("routes")}>路由与故障转移</button></div>
+    {view === "providers" && <><div className="developer-model-layout"><aside className="developer-model-directory"><div className="developer-control-section-heading"><div><h2>Provider</h2><p>{providerNames.length} 个连接</p></div></div>{providerNames.map((name) => { const provider = asRecord(snapshot.models.providers[name]); return <button className={`developer-model-item ${providerName === name ? "active" : ""}`} type="button" key={name} onClick={() => selectProvider(name)}><span><strong>{name}</strong><small>{String(provider.adapter ?? "-")} · {String(provider.base_url ?? "")}</small></span><StatusPill ok={Boolean(provider.api_key_configured)}>{provider.api_key_configured ? "已就绪" : "缺少密钥"}</StatusPill></button>; })}</aside><section className="developer-model-editor"><div className="developer-control-section-heading"><div><h2>{providerName || "Provider"}</h2><p>密钥值只从环境变量读取，不会写入运行时覆盖文件或返回浏览器。</p></div>{providerName && <StatusPill ok={Boolean(asRecord(snapshot.models.providers[providerName]).api_key_configured)}>{asRecord(snapshot.models.providers[providerName]).api_key_configured ? "API Key 已配置" : "等待 API Key"}</StatusPill>}</div>{providerName && <><div className="developer-control-field-grid"><label className="developer-control-field">适配器<select aria-label={`${providerName} 适配器`} value={providerDraft.adapter} onChange={(event) => setProviderDraft((current) => ({ ...current, adapter: event.target.value }))}><option value="deepseek">DeepSeek</option><option value="qwen">Qwen</option><option value="openai_compatible">OpenAI Compatible</option></select></label><label className="developer-control-field">API Key 环境变量<input aria-label={`${providerName} API Key 环境变量`} value={providerDraft.api_key_env} onChange={(event) => setProviderDraft((current) => ({ ...current, api_key_env: event.target.value }))} /></label><label className="developer-control-field developer-control-field-wide">服务地址<input aria-label={`${providerName} 服务地址`} value={providerDraft.base_url} onChange={(event) => setProviderDraft((current) => ({ ...current, base_url: event.target.value }))} /></label></div><div className="developer-control-actions"><button className="developer-control-primary" type="button" onClick={() => void saveProvider()}>保存 Provider</button>{message && <small role="status">{message}</small>}</div></>}</section></div><Section title="模型目录" hint="模型目录是厂商提供的真实模型 ID；运行行为通过上面的 Provider、模型预设和路由来控制。"><div className="developer-model-catalog">{modelNames.map((name) => { const model = asRecord(snapshot.models.models[name]); const capabilities = asRecord(model.capabilities); return <article key={name}><div><strong>{name}</strong><small>{String(model.provider ?? "-")} · {String(model.model_id ?? "-")}</small></div><span>{Number(model.context_window_tokens ?? 0).toLocaleString()} context</span><span>{capabilities.thinking ? "支持思考" : "标准生成"}</span></article>; })}</div></Section></>}
+    {view === "presets" && <section className="developer-model-editor developer-model-single"><div className="developer-control-section-heading"><div><h2>模型预设</h2><p>预设把模型、思考、输出上限和采样参数组合成可复用的运行档位。</p></div></div><label className="developer-control-field">选择预设<select aria-label="模型预设" value={presetName} onChange={(event) => selectPreset(event.target.value)}>{presetNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>{presetName && <><div className="developer-control-field-grid"><label className="developer-control-field">使用模型<select aria-label={`${presetName} 使用模型`} value={presetDraft.model} onChange={(event) => setPresetDraft((current) => ({ ...current, model: event.target.value }))}>{modelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="developer-control-field">最大输出 Token<input aria-label={`${presetName} 最大输出 Token`} type="number" min="1" value={presetDraft.max_output_tokens} onChange={(event) => setPresetDraft((current) => ({ ...current, max_output_tokens: Number(event.target.value) }))} /></label><label className="developer-control-field">Temperature<input aria-label={`${presetName} Temperature`} type="number" min="0" max="2" step="0.1" value={presetDraft.temperature ?? ""} onChange={(event) => setPresetDraft((current) => ({ ...current, temperature: event.target.value === "" ? null : Number(event.target.value) }))} /></label><label className="developer-control-field">思考强度<select aria-label={`${presetName} 思考强度`} value={presetDraft.thinking_effort} onChange={(event) => setPresetDraft((current) => ({ ...current, thinking_effort: event.target.value }))}><option value="none">关闭</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="max">Max</option></select></label></div><label className="developer-control-checks"><input type="checkbox" checked={presetDraft.thinking_enabled} onChange={(event) => setPresetDraft((current) => ({ ...current, thinking_enabled: event.target.checked }))} />启用模型思考</label><div className="developer-control-actions"><button className="developer-control-primary" type="button" onClick={() => void savePreset()}>保存模型预设</button>{message && <small role="status">{message}</small>}</div></>}</section>}
+    {view === "routes" && <section className="developer-model-editor developer-model-single"><div className="developer-control-section-heading"><div><h2>路由与故障转移</h2><p>主预设优先使用；调用失败时按备用预设顺序切换，所有引用必须来自已存在的模型预设。</p></div></div><label className="developer-control-field">选择路由<select aria-label="模型路由" value={routeName} onChange={(event) => selectRoute(event.target.value)}>{routeNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>{routeName && <><label className="developer-control-field">主路由预设<select aria-label={`${routeName} 主路由预设`} value={routeDraft.primary} onChange={(event) => setRouteDraft((current) => ({ ...current, primary: event.target.value }))}>{presetNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label><label className="developer-control-field">故障转移预设（逗号分隔）<input aria-label={`${routeName} 故障转移预设`} value={csvValue(routeDraft.fallbacks)} onChange={(event) => setRouteDraft((current) => ({ ...current, fallbacks: commaList(event.target.value) }))} placeholder="例如 worker-safe, worker-backup" /></label><div className="developer-route-chain"><span>Primary</span><strong>{routeDraft.primary || "未选择"}</strong>{routeDraft.fallbacks.map((name) => <Fragment key={name}><ChevronRight size={15} /><span>Fallback</span><strong>{name}</strong></Fragment>)}</div><div className="developer-control-actions"><button className="developer-control-primary" type="button" onClick={() => void saveRoute()}>保存模型路由</button>{message && <small role="status">{message}</small>}</div></>}</section>}
+    <Section title="模型档案" hint="模型档案把同一组 Provider 下的 Coordinator、Worker、Utility 预设组合起来，学生端会按会话选择它。"><div className="developer-model-profiles">{Object.entries(asRecord(snapshot.models.profiles)).map(([name, profile]) => <article key={name}><div><strong>{String(asRecord(profile).label ?? name)}</strong><small>{name} · {String(asRecord(profile).provider ?? "-")}</small></div><span>Coordinator: {String(asRecord(profile).coordinator ?? "-")}</span><span>Worker: {String(asRecord(profile).worker ?? "-")}</span></article>)}</div></Section>
+  </div>;
 }
 
 type McpTransport = "stdio" | "sse" | "streamable_http";

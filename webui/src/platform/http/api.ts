@@ -238,6 +238,14 @@ export const api = {
   deleteSkill: (name: string) => request<void>(`/developer/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
   saveWorkerProfile: (name: string, profile: Record<string, unknown>) => request<Record<string, unknown>>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ profile }) }),
   deleteWorkerProfile: (name: string) => request<void>(`/developer/worker-profiles/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  saveModelProvider: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/providers/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelPreset: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/presets/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelRoute: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/routes/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
+  saveModelProfile: (name: string, config: Record<string, unknown>) =>
+    request<Record<string, unknown>>(`/developer/models/profiles/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ config }) }),
   listReleaseNotes: () => request<{ items: ReleaseNoteEntry[] }>("/developer/release-notes"),
   createReleaseNote: (note: Omit<ReleaseNoteEntry, "id">) =>
     request<ReleaseNoteEntry>("/developer/release-notes", { method: "POST", body: JSON.stringify(note) }),

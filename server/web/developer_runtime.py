@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +12,16 @@ import yaml
 from core.runtime_config import (
     BASE_DIR,
     RESERVED_WORKER_PROFILES,
+    load_runtime_config,
     load_runtime_overrides,
     save_runtime_overrides,
+)
+from core.model_runtime.contracts import (
+    ModelPresetConfig,
+    ModelProfileConfig,
+    ModelRouteConfig,
+    ModelRuntimeConfig,
+    ProviderConfig,
 )
 from core.tool_config import CustomToolsConfig, MCPServerConfig, ToolPoliciesConfig, WorkerProfileSpec
 from core.tool_runtime import ToolCatalog
@@ -42,11 +51,15 @@ def _section(name: str) -> dict[str, Any]:
 async def reload_runtime(*, reload_mcp: bool = False, reload_skills: bool = False) -> dict[str, Any]:
     """Refresh config consumers. Existing Worker grants intentionally stay immutable."""
     from configs.settings import settings
+    from core.model_runtime import factory as model_factory
     from core.skill_loader import skill_loader
     from core.tool_registry import physical_tool_manager
     from server.agent.node.coordinator import invalidate_coordinator_caches
 
     settings._config = __import__("core.runtime_config", fromlist=["load_runtime_config"]).load_runtime_config()
+    # ModelFactory caches provider clients and typed runtime config. Rebuild it
+    # after any developer override so the next turn observes the new route.
+    model_factory._global_model_factory = None
     physical_tool_manager.refresh_config()
     if reload_skills:
         skill_loader.profiles = physical_tool_manager.config.worker_profiles
@@ -60,6 +73,76 @@ async def reload_runtime(*, reload_mcp: bool = False, reload_skills: bool = Fals
         "skills_reloaded": reload_skills,
         "restart_required": False,
     }
+
+
+def _model_runtime_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    defaults = raw.get("defaults") if isinstance(raw.get("defaults"), dict) else {}
+    return {
+        "providers": raw.get("providers", {}),
+        "models": raw.get("models", {}),
+        "model_presets": raw.get("model_presets", {}),
+        "model_routes": raw.get("model_routes", {}),
+        "model_profiles": raw.get("model_profiles", {}),
+        "default_model_profile": defaults.get("model_profile"),
+    }
+
+
+def _validated_model_update(section: str, name: str, value: dict[str, Any]) -> dict[str, Any]:
+    name = _require_name(name, f"Model {section} name")
+    current = deepcopy(load_runtime_config())
+    values = current.setdefault(section, {})
+    if not isinstance(values, dict):
+        raise DeveloperConfigurationError(f"invalid persisted {section} configuration")
+    values[name] = value
+    validated = ModelRuntimeConfig.model_validate(_model_runtime_payload(current))
+    return validated.model_dump(mode="json")
+
+
+def _persist_model_entry(section: str, name: str, value: dict[str, Any]) -> None:
+    overrides = load_runtime_overrides()
+    values = overrides.setdefault(section, {})
+    if not isinstance(values, dict):
+        raise DeveloperConfigurationError(f"invalid persisted {section} override")
+    values[name] = value
+    save_runtime_overrides(overrides)
+
+
+async def upsert_model_provider(name: str, config: dict[str, Any]) -> dict[str, Any]:
+    name = _require_name(name, "Model provider name")
+    candidate = dict(config)
+    current = load_runtime_config()
+    existing = current.get("providers", {}).get(name) if isinstance(current.get("providers"), dict) else None
+    if isinstance(existing, dict) and "default_headers" not in candidate:
+        candidate["default_headers"] = existing.get("default_headers", {})
+    provider = ProviderConfig.model_validate(candidate)
+    validated = _validated_model_update("providers", name, provider.model_dump(mode="json"))
+    _persist_model_entry("providers", name, validated["providers"][name])
+    result = await reload_runtime()
+    return {**result, "provider": name}
+
+
+async def upsert_model_preset(name: str, config: dict[str, Any]) -> dict[str, Any]:
+    preset = ModelPresetConfig.model_validate(config)
+    validated = _validated_model_update("model_presets", name, preset.model_dump(mode="json"))
+    _persist_model_entry("model_presets", name, validated["model_presets"][name])
+    result = await reload_runtime()
+    return {**result, "preset": _require_name(name, "Model preset name")}
+
+
+async def upsert_model_route(name: str, config: dict[str, Any]) -> dict[str, Any]:
+    route = ModelRouteConfig.model_validate(config)
+    validated = _validated_model_update("model_routes", name, route.model_dump(mode="json"))
+    _persist_model_entry("model_routes", name, validated["model_routes"][name])
+    result = await reload_runtime()
+    return {**result, "route": _require_name(name, "Model route name")}
+
+
+async def upsert_model_profile(name: str, config: dict[str, Any]) -> dict[str, Any]:
+    profile = ModelProfileConfig.model_validate(config)
+    validated = _validated_model_update("model_profiles", name, profile.model_dump(mode="json"))
+    _persist_model_entry("model_profiles", name, validated["model_profiles"][name])
+    result = await reload_runtime()
+    return {**result, "profile": _require_name(name, "Model profile name")}
 
 
 async def update_tool_policies(policies: dict[str, Any]) -> dict[str, Any]:

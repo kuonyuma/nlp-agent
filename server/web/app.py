@@ -82,6 +82,7 @@ from server.web.contracts import (
     FeedbackStatusValue,
     FeedbackPriorityValue,
     McpServerBody,
+    ModelConfigBody,
     SkillBody,
     WorkerProfileBody,
     ReleaseNoteBody,
@@ -110,6 +111,10 @@ from server.web.developer_runtime import (
     update_custom_tools,
     update_tool_policies,
     upsert_mcp_server,
+    upsert_model_preset,
+    upsert_model_profile,
+    upsert_model_provider,
+    upsert_model_route,
     upsert_skill,
     upsert_worker_profile,
 )
@@ -2761,6 +2766,26 @@ def create_app(
     async def remove_worker_profile(name: str, principal: Principal, _claims: WriteClaims):
         authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
         return await delete_worker_profile(name)
+
+    @app.put("/api/v1/developer/models/providers/{name}", tags=["developer"])
+    async def put_model_provider(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_provider(name, body.config)
+
+    @app.put("/api/v1/developer/models/presets/{name}", tags=["developer"])
+    async def put_model_preset(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_preset(name, body.config)
+
+    @app.put("/api/v1/developer/models/routes/{name}", tags=["developer"])
+    async def put_model_route(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_route(name, body.config)
+
+    @app.put("/api/v1/developer/models/profiles/{name}", tags=["developer"])
+    async def put_model_profile(name: str, body: ModelConfigBody, principal: Principal, _claims: WriteClaims):
+        authorization_service.require(principal, Permission.SYSTEM_MODEL_PROFILE_MANAGE)
+        return await upsert_model_profile(name, body.config)
 
     def _release_note_payload(row) -> dict[str, Any]:
         return {

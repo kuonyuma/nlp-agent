@@ -118,6 +118,12 @@ async def developer_snapshot(
             "routes": _safe(raw.get("model_routes", {})),
             "models": _safe(raw.get("models", {})),
             "presets": _safe(raw.get("model_presets", {})),
+            "profiles": _safe(raw.get("model_profiles", {})),
+            "default_model_profile": _safe(
+                raw.get("defaults", {}).get("model_profile")
+                if isinstance(raw.get("defaults"), dict)
+                else None
+            ),
             "providers": providers,
         },
         "tools": _tool_snapshot(),

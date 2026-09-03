@@ -190,6 +190,10 @@ class WorkerProfileBody(StrictModel):
     profile: dict[str, Any]
 
 
+class ModelConfigBody(StrictModel):
+    config: dict[str, Any]
+
+
 class ReleaseNoteBody(StrictModel):
     version: str = Field(pattern=r"^\d+\.\d+\.\d+$", max_length=32)
     released_at: datetime

@@ -25,6 +25,8 @@ export interface DeveloperSnapshot {
     routes: Record<string, unknown>;
     models: Record<string, Record<string, unknown>>;
     presets: Record<string, Record<string, unknown>>;
+    profiles: Record<string, Record<string, unknown>>;
+    default_model_profile: string | null;
     providers: Record<string, Record<string, unknown>>;
   };
   tools: {
