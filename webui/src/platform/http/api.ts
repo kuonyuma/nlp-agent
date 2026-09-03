@@ -1,4 +1,4 @@
-import type { AuthSession, DeveloperRuntimeHealth, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaAlert, QuotaArchiveBatch, QuotaBillingRecord, QuotaBillingStatementInput, QuotaBinding, QuotaBucketCandidate, QuotaBucketReplay, QuotaClassroomUsage, QuotaCreditOperation, QuotaCreditOperationInput, QuotaDailyRollup, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaPolicyUpdateInput, QuotaRoleCreditOperationInput, QuotaRoleCreditOperationResult, QuotaSnapshot, QuotaUsageSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherAIAnalysisResult, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeacherAnalysisAnnotations, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
+import type { AuthSession, AuthorizationAuditListResponse, AuthorizationAuditSummary, DeveloperRuntimeHealth, DeveloperSnapshot, LearningBookNavigationItem, LearningBookPage, QuotaAdjustment, QuotaAlert, QuotaArchiveBatch, QuotaBillingRecord, QuotaBillingStatementInput, QuotaBinding, QuotaBucketCandidate, QuotaBucketReplay, QuotaClassroomUsage, QuotaCreditOperation, QuotaCreditOperationInput, QuotaDailyRollup, QuotaGrant, QuotaPolicy, QuotaPolicyExplanation, QuotaPolicyUpdateInput, QuotaPricingRule, QuotaRoleCreditOperationInput, QuotaRoleCreditOperationResult, QuotaSnapshot, QuotaUsageSnapshot, RbacPermission, RbacRole, ReleaseNoteEntry, SessionListResponse, SettingsRuntime, SystemMenu, TeacherAIAnalysisResult, TeacherBookArchiveImportPreview, TeacherBookAssetInput, TeacherBookImportPreview, TeacherBookNavigationItem, TeacherBookPage, TeacherCatalog, TeacherOverview, TeacherAnalysisAnnotations, TeachingGoals, SessionSummary, TurnRecord, UserSettings, UserListResponse, UserProfile, Workspace, WorkspaceMember, ClassroomSummary, JoinRequest, JoinRequestListResponse } from "@/shared/types";
 import type { FeedbackCategory, FeedbackDailyState, FeedbackPriority, FeedbackStatus, FeedbackThread, FeedbackThreadList } from "@/shared/types";
 
 const API_ROOT = "/api/v1";
@@ -182,6 +182,10 @@ export const api = {
   getDeveloperSnapshot: () => request<DeveloperSnapshot>("/developer/snapshot"),
   getDeveloperHealth: () => request<DeveloperRuntimeHealth>("/developer/health"),
   listQuotaPolicies: (code?: string) => request<{ items: QuotaPolicy[] }>(`/developer/quota/policies${code ? `?code=${encodeURIComponent(code)}` : ""}`),
+  listQuotaPricingRules: (pricingKey?: string) => request<{ items: QuotaPricingRule[] }>(`/developer/quota/pricing-rules${pricingKey ? `?pricing_key=${encodeURIComponent(pricingKey)}` : ""}`),
+  getQuotaPricingRule: (pricingRuleId: string) => request<QuotaPricingRule>(`/developer/quota/pricing-rules/${encodeURIComponent(pricingRuleId)}`),
+  createQuotaPricingRule: (input: Omit<QuotaPricingRule, "pricing_rule_id" | "status" | "created_by" | "created_at">) => request<QuotaPricingRule>("/developer/quota/pricing-rules", { method: "POST", body: JSON.stringify(input) }),
+  retireQuotaPricingRule: (pricingRuleId: string) => request<QuotaPricingRule>(`/developer/quota/pricing-rules/${encodeURIComponent(pricingRuleId)}`, { method: "DELETE" }),
   getQuotaPolicy: (policyId: string) => request<QuotaPolicy>(`/developer/quota/policies/${encodeURIComponent(policyId)}`),
   createQuotaPolicy: (input: Omit<QuotaPolicy, "policy_id" | "created_by" | "created_at" | "updated_at">) => request<QuotaPolicy>("/developer/quota/policies", { method: "POST", body: JSON.stringify(input) }),
   updateQuotaPolicy: (policyId: string, input: QuotaPolicyUpdateInput) => request<QuotaPolicy>(`/developer/quota/policies/${encodeURIComponent(policyId)}`, { method: "PATCH", body: JSON.stringify(input) }),
@@ -194,7 +198,7 @@ export const api = {
   listQuotaGrants: (ownerType?: string, ownerId?: string) => request<{ items: QuotaGrant[] }>(`/developer/quota/grants${ownerType || ownerId ? `?${new URLSearchParams({ ...(ownerType ? { owner_type: ownerType } : {}), ...(ownerId ? { owner_id: ownerId } : {}) })}` : ""}`),
   createQuotaGrant: (input: Omit<QuotaGrant, "grant_id" | "created_by" | "created_at" | "revoked_at" | "revoked_by" | "revocation_idempotency_key" | "status">) => request<QuotaGrant>("/developer/quota/grants", { method: "POST", body: JSON.stringify(input) }),
   getQuotaGrant: (grantId: string) => request<QuotaGrant>(`/developer/quota/grants/${encodeURIComponent(grantId)}`),
-  revokeQuotaGrant: (grantId: string, idempotency_key: string) => request<QuotaGrant>(`/developer/quota/grants/${encodeURIComponent(grantId)}/revoke`, { method: "POST", body: JSON.stringify({ idempotency_key }) }),
+  revokeQuotaGrant: (grantId: string, idempotency_key: string) => request<QuotaGrant>(`/developer/quota/grants/${encodeURIComponent(grantId)}`, { method: "DELETE", body: JSON.stringify({ idempotency_key }) }),
   listQuotaAdjustments: (ownerType?: string, ownerId?: string) => request<{ items: QuotaAdjustment[] }>(`/developer/quota/adjustments${ownerType || ownerId ? `?${new URLSearchParams({ ...(ownerType ? { owner_type: ownerType } : {}), ...(ownerId ? { owner_id: ownerId } : {}) })}` : ""}`),
   getQuotaAdjustment: (adjustmentId: string) => request<QuotaAdjustment>(`/developer/quota/adjustments/${encodeURIComponent(adjustmentId)}`),
   listQuotaDailyRollups: (start: string, end: string, filters: { userId?: string; workspaceId?: string } = {}) => {
@@ -289,7 +293,7 @@ export const api = {
     request<{ items: unknown[]; status: string }>(`/teacher/${resource}?workspace_id=${encodeURIComponent(workspaceId)}`),
 
   // ---- Admin module (用户 / 工作区 / 班级加入申请) ----
-  listUsers: (offset = 0, limit = 20, status?: string, keyword?: string, includeDeleted = false) =>
+  listUsers: (offset = 0, limit = 12, status?: string, keyword?: string, includeDeleted = false) =>
     request<UserListResponse>(
       `/users?offset=${offset}&limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ""}${includeDeleted ? "&include_deleted=true" : ""}`,
     ),
@@ -313,10 +317,6 @@ export const api = {
   replaceUserRoles: (userId: string, role_codes: string[]) =>
     request<{ user_id: string; role_codes: string[] }>(`/users/${encodeURIComponent(userId)}/roles`, { method: "PUT", body: JSON.stringify({ role_codes }) }),
   listRoles: () => request<{ items: RbacRole[] }>("/roles"),
-  createRole: (input: { code: string; name: string; description?: string }) =>
-    request<RbacRole>("/system/roles", { method: "POST", body: JSON.stringify(input) }),
-  updateRoleStatus: (roleCode: string, status: "active" | "disabled") =>
-    request<void>(`/system/roles/${encodeURIComponent(roleCode)}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
   listPermissions: () => request<{ items: RbacPermission[] }>("/permissions"),
   listRolePermissions: (roleCode: string) => request<{ role_code: string; permissions: Record<string, string[]> }>(`/system/roles/${encodeURIComponent(roleCode)}/permissions`),
   replaceRolePermissions: (roleCode: string, permission_codes: string[], scopes: Record<string, string[]>) =>
@@ -326,6 +326,17 @@ export const api = {
   replaceRoleMenus: (roleCode: string, menu_ids: string[]) =>
     request<void>(`/system/roles/${encodeURIComponent(roleCode)}/menus`, { method: "PUT", body: JSON.stringify({ menu_ids }) }),
   listRoleMenus: (roleCode: string) => request<{ role_code: string; menu_ids: string[] }>(`/system/roles/${encodeURIComponent(roleCode)}/menus`),
+  listAuthorizationAudit: (params?: { limit?: number; offset?: number; actorUserId?: string; decision?: string; reasonCode?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.limit != null) query.set("limit", String(params.limit));
+    if (params?.offset != null) query.set("offset", String(params.offset));
+    if (params?.actorUserId) query.set("actor_user_id", params.actorUserId);
+    if (params?.decision) query.set("decision", params.decision);
+    if (params?.reasonCode) query.set("reason_code", params.reasonCode);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<AuthorizationAuditListResponse>(`/audit/authorization${suffix}`);
+  },
+  getAuthorizationAuditStats: (days = 30) => request<AuthorizationAuditSummary>(`/audit/authorization/stats?days=${days}`),
   listWorkspaces: () => request<{ workspaces: Workspace[]; total: number }>("/workspaces"),
   listWorkspaceMembers: (workspaceId: string) =>
     request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),

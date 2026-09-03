@@ -25,6 +25,7 @@ from server.quota.models import (
     QuotaReservationModel,
     UsageEventModel,
 )
+from server.quota.management import QuotaManagementService
 from server.quota.reporting import (
     DurableModelUsageReporter,
     UsageEventConflictError,
@@ -146,6 +147,84 @@ async def test_durable_reporter_persists_exact_attempt_and_shadow_credits(quota_
     assert row["usage_status"] == "exact"
     assert row["pricing_version"] == "2026-08-29"
     assert row["credits_micro"] == 2_798_000
+
+
+@pytest.mark.asyncio
+async def test_retired_pricing_rule_can_reconcile_historical_usage(quota_engine):
+    management = QuotaManagementService(quota_engine)
+    rule = management.create_pricing_rule(
+        pricing_key="provider-a/model-a",
+        version="managed-2026-09-02",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        effective_until=None,
+        ordinary_input_credits_micro_per_million_tokens=1_000_000,
+        cached_input_credits_micro_per_million_tokens=0,
+        cache_write_credits_micro_per_million_tokens=0,
+        output_credits_micro_per_million_tokens=2_000_000,
+        reasoning_output_credits_micro_per_million_tokens=None,
+        created_by="developer-1",
+    )
+    management.retire_pricing_rule(rule["pricing_rule_id"], actor_user_id="developer-1")
+
+    reporter = DurableModelUsageReporter(quota_engine)
+    await reporter.report(
+        _invocation(),
+        CanonicalTokenUsage(
+            input_tokens=20,
+            output_tokens=5,
+            total_tokens=25,
+            source="provider",
+        ),
+        _outcome(),
+    )
+
+    with quota_engine.connect() as connection:
+        row = connection.execute(select(UsageEventModel.__table__)).mappings().one()
+    assert row["pricing_version"] == "managed-2026-09-02"
+    assert row["credits_micro"] == 30
+
+
+@pytest.mark.asyncio
+async def test_legacy_overlapping_pricing_rules_fail_closed_as_pending(quota_engine):
+    with quota_engine.begin() as connection:
+        for version, effective_from in (
+            ("legacy-a", datetime(2026, 1, 1)),
+            ("legacy-b", datetime(2026, 1, 2)),
+        ):
+            connection.execute(
+                insert(PricingRuleModel).values(
+                    id=str(uuid4()),
+                    pricing_key="provider-a/model-a",
+                    version=version,
+                    effective_from=effective_from,
+                    effective_until=None,
+                    ordinary_input_credits_micro_per_million_tokens=1_000_000,
+                    cached_input_credits_micro_per_million_tokens=1_000_000,
+                    cache_write_credits_micro_per_million_tokens=1_000_000,
+                    output_credits_micro_per_million_tokens=1_000_000,
+                    reasoning_output_credits_micro_per_million_tokens=None,
+                    status="retired" if version == "legacy-a" else "active",
+                    created_by="legacy-test",
+                    created_at=datetime(2026, 1, 1),
+                )
+            )
+
+    reporter = DurableModelUsageReporter(quota_engine)
+    await reporter.report(
+        _invocation(),
+        CanonicalTokenUsage(
+            input_tokens=20,
+            output_tokens=5,
+            total_tokens=25,
+            source="provider",
+        ),
+        _outcome(),
+    )
+
+    with quota_engine.connect() as connection:
+        row = connection.execute(select(UsageEventModel.__table__)).mappings().one()
+    assert row["usage_status"] == "pending"
+    assert row["credits_micro"] is None
 
 
 @pytest.mark.asyncio

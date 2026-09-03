@@ -642,6 +642,21 @@ export interface QuotaPolicyUpdateInput {
   effective_from?: string;
   effective_until?: string | null;
 }
+export interface QuotaPricingRule {
+  pricing_rule_id: string;
+  pricing_key: string;
+  version: string;
+  effective_from: string;
+  effective_until: string | null;
+  ordinary_input_credits_micro_per_million_tokens: number;
+  cached_input_credits_micro_per_million_tokens: number;
+  cache_write_credits_micro_per_million_tokens: number;
+  output_credits_micro_per_million_tokens: number;
+  reasoning_output_credits_micro_per_million_tokens: number | null;
+  status: string;
+  created_by: string;
+  created_at: string;
+}
 export interface QuotaBinding {
   binding_id: string;
   subject_type: string;
