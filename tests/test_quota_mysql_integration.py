@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import create_engine, delete, insert, select, text
 
 from core.model_runtime.usage import (
+    BillableFeatureUsage,
     CanonicalTokenUsage,
     InvocationOutcome,
     ModelIdentity,
@@ -134,6 +135,16 @@ def test_mysql_phase4_schema_contains_operations_tables_and_archive_columns():
                     )
                 )
             }
+            pricing_columns = {
+                row[0]
+                for row in connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = DATABASE() "
+                        "AND table_name = 'nlp_pricing_rules'"
+                    )
+                )
+            }
             credit_columns = {
                 row[0]
                 for row in connection.execute(
@@ -154,6 +165,18 @@ def test_mysql_phase4_schema_contains_operations_tables_and_archive_columns():
             ).scalar_one()
         assert operations_tables <= tables
         assert {"archived_at", "archive_batch_id"} <= usage_columns
+        assert {
+            "visual_input_tokens",
+            "image_units",
+            "search_calls",
+            "link_pages",
+        } <= usage_columns
+        assert {
+            "visual_input_credits_micro_per_million_tokens",
+            "image_unit_credits_micro",
+            "search_call_credits_micro",
+            "link_page_credits_micro",
+        } <= pricing_columns
         assert {"effective_from", "expires_at"} <= credit_columns
         assert entry_type_length >= 32
         assert QuotaOperationsService(engine).partition_strategy(
@@ -163,6 +186,193 @@ def test_mysql_phase4_schema_contains_operations_tables_and_archive_columns():
             {"name": "p202609", "from": "2026-09-01", "to": "2026-10-01"},
         ]
     finally:
+        engine.dispose()
+
+
+def test_mysql_feature_hold_and_usage_event_settle_on_existing_reservation():
+    dsn = _mysql_dsn()
+    engine = create_engine(dsn.replace("mysql+aiomysql://", "mysql+pymysql://"))
+    at = datetime.now(timezone.utc)
+    policy_id = str(uuid4())
+    user_id = f"feature-mysql-user-{uuid4()}"
+    workspace_id = f"feature-mysql-workspace-{uuid4()}"
+    turn_id = f"feature-mysql-turn-{uuid4()}"
+    operation_id = str(uuid4())
+    pricing_key = f"feature-mysql/search-{uuid4()}"
+    reservation_id = None
+    try:
+        service = QuotaService(engine, lease_seconds=60)
+        service.verify_schema()
+        with engine.begin() as connection:
+            connection.execute(
+                insert(QuotaPolicyModel).values(
+                    id=policy_id,
+                    code=f"feature-mysql-{uuid4()}",
+                    version="1",
+                    name="Feature MySQL settlement",
+                    status="active",
+                    request_limit_micro=1_000,
+                    daily_limit_micro=1_000,
+                    weekly_limit_micro=None,
+                    concurrency_limit=2,
+                    max_overdraft_micro=0,
+                    allowed_model_profiles=["economy"],
+                    unlimited=False,
+                    effective_from=at,
+                    effective_until=None,
+                    created_by="feature-integration",
+                )
+            )
+            connection.execute(
+                insert(PolicyBindingModel).values(
+                    id=str(uuid4()),
+                    subject_type="user",
+                    subject_id=user_id,
+                    policy_id=policy_id,
+                    priority=1_000,
+                    status="active",
+                    effective_from=at,
+                    effective_until=None,
+                )
+            )
+            connection.execute(
+                insert(PricingRuleModel).values(
+                    id=str(uuid4()),
+                    pricing_key=pricing_key,
+                    version="1",
+                    effective_from=at,
+                    effective_until=None,
+                    ordinary_input_credits_micro_per_million_tokens=0,
+                    cached_input_credits_micro_per_million_tokens=0,
+                    cache_write_credits_micro_per_million_tokens=0,
+                    output_credits_micro_per_million_tokens=0,
+                    reasoning_output_credits_micro_per_million_tokens=None,
+                    visual_input_credits_micro_per_million_tokens=0,
+                    image_unit_credits_micro=0,
+                    search_call_credits_micro=25,
+                    link_page_credits_micro=0,
+                    status="active",
+                    created_by="feature-integration",
+                    created_at=at,
+                )
+            )
+        admitted = service.admit_turn(
+            AdmitTurn(
+                request_id=f"request-{turn_id}",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                model_profile="economy",
+                model_role="coordinator",
+                estimated_input_tokens=0,
+                estimated_output_tokens=0,
+                estimated_micro=10,
+                pricing_key=pricing_key,
+                idempotency_key=f"idempotency-{turn_id}",
+            ),
+            now=at,
+        )
+        reservation_id = admitted.reservation_id
+        invocation = ModelInvocation(
+            operation_id=operation_id,
+            identity=ModelIdentity(
+                provider="feature-mysql",
+                provider_model="search",
+                model_profile="economy",
+                preset="search",
+                pricing_key=pricing_key,
+            ),
+            attribution=UsageAttributionContext(
+                request_id=f"request-{turn_id}",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                reservation_id=reservation_id,
+                purpose="worker",
+            ),
+            attempt=1,
+            fallback_index=0,
+            started_at=at,
+            feature_usage=BillableFeatureUsage(search_calls=1),
+        )
+        reporter = DurableModelUsageReporter(engine, quota_service=service)
+        asyncio.run(reporter.reserve_feature_usage(invocation))
+        asyncio.run(
+            reporter.report(
+                invocation,
+                CanonicalTokenUsage(source="provider"),
+                InvocationOutcome(status="succeeded", completed_at=at),
+            )
+        )
+        asyncio.run(
+            reporter.report(
+                invocation,
+                CanonicalTokenUsage(source="provider"),
+                InvocationOutcome(status="succeeded", completed_at=at),
+            )
+        )
+
+        with engine.connect() as connection:
+            event = connection.execute(
+                select(UsageEventModel.__table__).where(
+                    UsageEventModel.operation_id == operation_id
+                )
+            ).mappings().one()
+            reservation = connection.execute(
+                select(QuotaReservationModel.__table__).where(
+                    QuotaReservationModel.id == reservation_id
+                )
+            ).mappings().one()
+            bucket = connection.execute(
+                select(QuotaBucketModel.__table__).where(
+                    QuotaBucketModel.owner_id == user_id,
+                    QuotaBucketModel.bucket_type == "daily",
+                )
+            ).mappings().one()
+        assert event["search_calls"] == 1
+        assert event["credits_micro"] == 25
+        assert reservation["reserved_micro"] == 10
+        assert reservation["settled_micro"] == 25
+        assert bucket["consumed_micro"] == 25
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                delete(UsageEventModel).where(
+                    UsageEventModel.operation_id == operation_id
+                )
+            )
+            if reservation_id is not None:
+                connection.execute(
+                    delete(QuotaLedgerEntryModel).where(
+                        QuotaLedgerEntryModel.reservation_id == reservation_id
+                    )
+                )
+                connection.execute(
+                    delete(QuotaReservationModel).where(
+                        QuotaReservationModel.id == reservation_id
+                    )
+                )
+            connection.execute(
+                delete(QuotaBucketModel).where(QuotaBucketModel.owner_id == user_id)
+            )
+            connection.execute(
+                delete(QuotaConcurrencyLockModel).where(
+                    QuotaConcurrencyLockModel.user_id == user_id
+                )
+            )
+            connection.execute(
+                delete(PolicyBindingModel).where(
+                    PolicyBindingModel.policy_id == policy_id
+                )
+            )
+            connection.execute(
+                delete(QuotaPolicyModel).where(QuotaPolicyModel.id == policy_id)
+            )
+            connection.execute(
+                delete(PricingRuleModel).where(
+                    PricingRuleModel.pricing_key == pricing_key
+                )
+            )
         engine.dispose()
 
 

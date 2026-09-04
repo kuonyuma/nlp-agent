@@ -13,21 +13,30 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import create_engine
 
 from core.model_runtime.usage import (
+    BillableFeatureUsage,
     CanonicalTokenUsage,
     InvocationOutcome,
+    ModelIdentity,
     ModelInvocation,
     ModelUsageReporter,
+    UsageReporterUnavailableError,
+    resolve_usage_attribution,
 )
 from core.model_runtime.reporters import UsageEventConflictError
 from server.quota.models import PricingRuleModel, UsageEventModel
 from server.quota.service import QuotaService
 from server.quota.pricing import (
     EstimatedUsageCannotBePricedError,
+    MissingFeaturePricingError,
     PricingCatalog,
     PricingRule,
     UnknownPricingKeyError,
     UnknownUsageCannotBePricedError,
 )
+
+
+_IMAGE_ANALYZE_PRICING_KEY = "feature/image-understanding"
+_LINK_READ_PRICING_KEY = "feature/link-read"
 
 
 def _utc(value: datetime) -> datetime:
@@ -72,6 +81,37 @@ class DurableModelUsageReporter(ModelUsageReporter):
         outcome: InvocationOutcome,
     ) -> None:
         await asyncio.to_thread(self._report_sync, invocation, usage, outcome)
+
+    async def reserve_feature_usage(self, invocation: ModelInvocation) -> None:
+        """Add a feature hold to the invocation's existing Turn Reservation."""
+
+        if (
+            self._quota_service is None
+            or invocation.attribution.reservation_id is None
+            or not any(invocation.feature_usage.model_dump().values())
+        ):
+            return
+        pricing_key = invocation.identity.pricing_key
+        if pricing_key is None:
+            raise UnknownPricingKeyError(
+                "Billable feature invocation has no pricing_key for admission"
+            )
+        await asyncio.to_thread(
+            self._quota_service.reserve_feature_usage,
+            reservation_id=invocation.attribution.reservation_id,
+            operation_id=invocation.operation_id,
+            pricing_key=pricing_key,
+            feature_usage=invocation.feature_usage,
+        )
+
+    async def release_feature_usage(self, invocation: ModelInvocation) -> None:
+        if self._quota_service is None or invocation.attribution.reservation_id is None:
+            return
+        await asyncio.to_thread(
+            self._quota_service.release_feature_usage,
+            reservation_id=invocation.attribution.reservation_id,
+            operation_id=invocation.operation_id,
+        )
 
     def _report_sync(
         self,
@@ -236,6 +276,10 @@ class DurableModelUsageReporter(ModelUsageReporter):
             "cache_write_input_tokens": usage.cache_write_input_tokens,
             "output_tokens": usage.output_tokens,
             "reasoning_output_tokens": usage.reasoning_output_tokens,
+            "visual_input_tokens": invocation.feature_usage.visual_input_tokens,
+            "image_units": invocation.feature_usage.image_units,
+            "search_calls": invocation.feature_usage.search_calls,
+            "link_pages": invocation.feature_usage.link_pages,
             "total_tokens": usage.total_tokens,
             "usage_source": usage.source,
             "usage_status": usage_status,
@@ -278,6 +322,7 @@ class DurableModelUsageReporter(ModelUsageReporter):
             )
         except (
             EstimatedUsageCannotBePricedError,
+            MissingFeaturePricingError,
             UnknownUsageCannotBePricedError,
             UnknownPricingKeyError,
             ValueError,
@@ -325,6 +370,12 @@ class DurableModelUsageReporter(ModelUsageReporter):
                 reasoning_output_credits_micro_per_million_tokens=(
                     row["reasoning_output_credits_micro_per_million_tokens"]
                 ),
+                visual_input_credits_micro_per_million_tokens=(
+                    row["visual_input_credits_micro_per_million_tokens"]
+                ),
+                image_unit_credits_micro=row["image_unit_credits_micro"],
+                search_call_credits_micro=row["search_call_credits_micro"],
+                link_page_credits_micro=row["link_page_credits_micro"],
             )
             for row in rows
         ]
@@ -353,3 +404,91 @@ class DurableModelUsageReporter(ModelUsageReporter):
             self._quota_service.close()
         if self._owns_engine:
             self._engine.dispose()
+
+
+def _tool_identity(tool_name: str) -> tuple[ModelIdentity, str]:
+    if tool_name == "web_fetch":
+        return (
+            ModelIdentity(
+                provider="internal-tool",
+                provider_model="web_fetch",
+                preset="web_fetch",
+                pricing_key=_LINK_READ_PRICING_KEY,
+            ),
+            "worker",
+        )
+    if tool_name == "image_analyze":
+        return (
+            ModelIdentity(
+                provider="internal-tool",
+                provider_model="image_analyze",
+                preset="image_analyze",
+                pricing_key=_IMAGE_ANALYZE_PRICING_KEY,
+            ),
+            "vision",
+        )
+    raise ValueError(f"Unsupported billable tool {tool_name!r}")
+
+
+async def begin_billable_tool_usage(
+    *,
+    tool_name: str,
+    feature_usage: BillableFeatureUsage,
+) -> ModelInvocation | None:
+    """Reserve a billable tool unit before the paid operation starts."""
+
+    from core.model_runtime.factory import get_global_model_factory
+
+    slot = get_global_model_factory().reporter_slot
+    reporter = slot.reporter
+    if reporter is None:
+        if slot.required:
+            raise UsageReporterUnavailableError(
+                "Required usage Reporter is not configured for billable tool usage"
+            )
+        return None
+    identity, purpose = _tool_identity(tool_name)
+    attribution = resolve_usage_attribution().model_copy(update={"purpose": purpose})
+    invocation = ModelInvocation(
+        operation_id=str(uuid.uuid4()),
+        identity=identity,
+        attribution=attribution,
+        attempt=1,
+        fallback_index=0,
+        started_at=datetime.now(timezone.utc),
+        feature_usage=feature_usage,
+    )
+    reserve = getattr(reporter, "reserve_feature_usage", None)
+    if reserve is not None:
+        await reserve(invocation)
+    return invocation
+
+
+async def complete_billable_tool_usage(
+    invocation: ModelInvocation | None,
+) -> None:
+    if invocation is None:
+        return
+    from core.model_runtime.factory import get_global_model_factory
+
+    reporter = get_global_model_factory().reporter_slot.reporter
+    if reporter is None:
+        raise UsageReporterUnavailableError(
+            "Usage Reporter disappeared during billable tool execution"
+        )
+    await reporter.report(
+        invocation,
+        CanonicalTokenUsage(source="provider"),
+        InvocationOutcome(status="succeeded", completed_at=datetime.now(timezone.utc)),
+    )
+
+
+async def cancel_billable_tool_usage(invocation: ModelInvocation | None) -> None:
+    if invocation is None:
+        return
+    from core.model_runtime.factory import get_global_model_factory
+
+    reporter = get_global_model_factory().reporter_slot.reporter
+    release = getattr(reporter, "release_feature_usage", None)
+    if release is not None:
+        await release(invocation)

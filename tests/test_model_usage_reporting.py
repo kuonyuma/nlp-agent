@@ -14,6 +14,7 @@ from core.model_runtime.contracts import (
     ModelCapabilities,
     ModelDefinition,
     ModelPresetConfig,
+    NativeSearchConfig,
     RetryPolicy,
     ThinkingConfig,
     TimeoutPolicy,
@@ -27,21 +28,27 @@ from core.model_runtime.runtime import (
     StreamInterruptedError,
 )
 from core.model_runtime.usage import (
+    BillableFeatureUsage,
     CanonicalTokenUsage,
     MissingUsageAttributionError,
     UsageReporterUnavailableError,
     UsageAttributionContext,
     bind_usage_attribution,
+    bind_billable_feature_usage,
 )
 from core.observability.context import TelemetryContext, bind_telemetry_context
 from core.observability.models import SpanStatus
 
 
-def _preset(*, attempts: int = 1) -> ModelPresetConfig:
+def _preset(*, attempts: int = 1, native_search: bool = False) -> ModelPresetConfig:
     return ModelPresetConfig(
         model="test-model",
         thinking=ThinkingConfig(enabled=False, effort="none"),
         generation=GenerationConfig(max_output_tokens=100),
+        native_search=NativeSearchConfig(
+            enabled=native_search,
+            forced=native_search,
+        ),
         timeouts=TimeoutPolicy(connect_s=1, first_token_s=1, stream_idle_s=1, total_s=2),
         retry=RetryPolicy(max_attempts=attempts, base_delay_s=0, max_delay_s=0, jitter="none"),
         circuit_breaker=CircuitBreakerPolicy(failure_threshold=10, cooldown_s=1),
@@ -59,13 +66,20 @@ def _definition(model_id: str = "test-model", provider: str = "test-prov") -> Mo
     )
 
 
-def _candidate(name: str, model: object, *, attempts: int = 1, provider: str = "test-prov") -> ModelCandidate:
+def _candidate(
+    name: str,
+    model: object,
+    *,
+    attempts: int = 1,
+    provider: str = "test-prov",
+    native_search: bool = False,
+) -> ModelCandidate:
     return ModelCandidate(
         preset_name=name,
         provider_name=provider,
         model_name=name,
         definition=_definition(name, provider=provider),
-        preset=_preset(attempts=attempts),
+        preset=_preset(attempts=attempts, native_search=native_search),
         model=model,
     )
 
@@ -166,6 +180,96 @@ async def test_non_streaming_success_reports_once():
     assert inv.identity.model_profile == "test-profile"
     assert inv.attempt == 1
     assert inv.fallback_index == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_feature_usage_overrides_image_fallback_and_counts_search():
+    reporter = InMemoryModelUsageReporter()
+    slot = ModelUsageReporterSlot(reporter)
+    raw_usage = {
+        "prompt_tokens": 50,
+        "completion_tokens": 20,
+        "image_tokens": 30,
+        "plugins": {"search": {"count": 2}},
+    }
+    fake = FakeRawModel(
+        [
+            AIMessage(
+                content="done",
+                additional_kwargs={"provider_usage_raw": raw_usage},
+            )
+        ]
+    )
+    resilient = ResilientChatModel(
+        [_candidate("feature-cand", fake, native_search=True)],
+        reporter_slot=slot,
+        normalize_response=False,
+    )
+
+    with bind_usage_attribution(_sample_attribution()):
+        with bind_billable_feature_usage(BillableFeatureUsage(image_units=2)):
+            await resilient.ainvoke([HumanMessage(content="inspect and search")])
+
+    invocation, usage, _outcome = reporter.events[0]
+    reserved = reporter.feature_reservations[0]
+    assert reserved.feature_usage.image_units == 2
+    assert reserved.feature_usage.search_calls == 1
+    assert usage.input_tokens == 50
+    assert invocation.feature_usage.visual_input_tokens == 30
+    assert invocation.feature_usage.image_units == 0
+    assert invocation.feature_usage.search_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_forced_search_increments_prebound_count_without_provider_count():
+    reporter = InMemoryModelUsageReporter()
+    slot = ModelUsageReporterSlot(reporter)
+    fake = FakeRawModel(
+        [
+            AIMessage(
+                content="done",
+                response_metadata={
+                    "token_usage": {"prompt_tokens": 10, "completion_tokens": 2}
+                },
+            )
+        ]
+    )
+    resilient = ResilientChatModel(
+        [_candidate("forced-search-cand", fake, native_search=True)],
+        reporter_slot=slot,
+        normalize_response=False,
+    )
+
+    with bind_usage_attribution(_sample_attribution()):
+        with bind_billable_feature_usage(BillableFeatureUsage(search_calls=2)):
+            await resilient.ainvoke([HumanMessage(content="search again")])
+
+    invocation, _usage, _outcome = reporter.events[0]
+    assert invocation.feature_usage.search_calls == 3
+    assert reporter.feature_reservations[0].feature_usage.search_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_feature_admission_failure_prevents_provider_execution():
+    class RejectingReporter(InMemoryModelUsageReporter):
+        async def reserve_feature_usage(self, invocation):
+            raise RuntimeError("feature quota exhausted")
+
+    reporter = RejectingReporter()
+    slot = ModelUsageReporterSlot(reporter, required=True)
+    fake = FakeRawModel([AIMessage(content="must not run")])
+    resilient = ResilientChatModel(
+        [_candidate("denied-search-cand", fake, native_search=True)],
+        reporter_slot=slot,
+        normalize_response=False,
+    )
+
+    with bind_usage_attribution(_sample_attribution()):
+        with pytest.raises(RuntimeError, match="feature quota exhausted"):
+            await resilient.ainvoke([HumanMessage(content="search")])
+
+    assert fake.calls == 0
+    assert reporter.events == []
 
 
 @pytest.mark.asyncio
