@@ -95,6 +95,18 @@ providers:
     api_key_env: QWEN_API_KEY
     default_headers: {}
 
+  kimi:
+    adapter: kimi
+    base_url: https://api.moonshot.cn/v1
+    api_key_env: KIMI_API_KEY
+    default_headers: {}
+
+  glm:
+    adapter: glm
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key_env: GLM_API_KEY
+    default_headers: {}
+
 models:
   deepseek-v4-flash:
     provider: deepseek
@@ -136,6 +148,30 @@ models:
     max_output_tokens: 32768
     capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: true, json_mode: true, vision: true, structured_output: true}
 
+  kimi-k2.6:
+    provider: kimi
+    model_id: kimi-k2.6
+    pricing_key: kimi/kimi-k2.6
+    context_window_tokens: 262144
+    max_output_tokens: 32768
+    capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: true, json_mode: true}
+
+  glm-5.3:
+    provider: glm
+    model_id: glm-5.3
+    pricing_key: glm/glm-5.3
+    context_window_tokens: 1048576
+    max_output_tokens: 131072
+    capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: true, json_mode: true}
+
+  glm-5.2:
+    provider: glm
+    model_id: glm-5.2
+    pricing_key: glm/glm-5.2
+    context_window_tokens: 1048576
+    max_output_tokens: 131072
+    capabilities: {streaming: true, tool_calls: true, thinking: true, cache_usage: true, json_mode: true}
+
 model_presets:
   coordinator-pro:
     model: deepseek-v4-pro
@@ -171,6 +207,54 @@ model_presets:
 
   utility-flash:
     model: deepseek-v4-flash
+    thinking: {enabled: false, effort: none}
+    generation: {max_output_tokens: 12000, temperature: 0.1}
+    timeouts: {connect_s: 10, first_token_s: 90, stream_idle_s: 45, total_s: 240}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  coordinator-kimi:
+    model: kimi-k2.6
+    thinking: {enabled: true, effort: max}
+    generation: {max_output_tokens: 32000}
+    timeouts: {connect_s: 10, first_token_s: 180, stream_idle_s: 90, total_s: 600}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  worker-kimi:
+    model: kimi-k2.6
+    thinking: {enabled: true, effort: high}
+    generation: {max_output_tokens: 24000}
+    timeouts: {connect_s: 10, first_token_s: 120, stream_idle_s: 60, total_s: 360}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  utility-kimi:
+    model: kimi-k2.6
+    thinking: {enabled: false, effort: none}
+    generation: {max_output_tokens: 12000}
+    timeouts: {connect_s: 10, first_token_s: 90, stream_idle_s: 45, total_s: 240}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  coordinator-glm:
+    model: glm-5.3
+    thinking: {enabled: true, effort: max}
+    generation: {max_output_tokens: 32000}
+    timeouts: {connect_s: 10, first_token_s: 180, stream_idle_s: 90, total_s: 600}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  worker-glm:
+    model: glm-5.3
+    thinking: {enabled: true, effort: high}
+    generation: {max_output_tokens: 24000}
+    timeouts: {connect_s: 10, first_token_s: 120, stream_idle_s: 60, total_s: 360}
+    retry: {max_attempts: 3, base_delay_s: 1, max_delay_s: 12, jitter: full}
+    circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
+
+  utility-glm:
+    model: glm-5.2
     thinking: {enabled: false, effort: none}
     generation: {max_output_tokens: 12000, temperature: 0.1}
     timeouts: {connect_s: 10, first_token_s: 90, stream_idle_s: 45, total_s: 240}
@@ -246,6 +330,18 @@ model_profiles:
     coordinator: coordinator-qwen-max
     worker: worker-qwen-plus
     utility: utility-qwen-plus
+  kimi:
+    label: Kimi
+    provider: kimi
+    coordinator: coordinator-kimi
+    worker: worker-kimi
+    utility: utility-kimi
+  glm:
+    label: GLM
+    provider: glm
+    coordinator: coordinator-glm
+    worker: worker-glm
+    utility: utility-glm
 
 # Local memory stays under one root (.data/memory) and is internally scoped by
 # workspace/user/session. Durable Markdown is injected directly; no vector RAG.

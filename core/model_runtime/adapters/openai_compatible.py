@@ -78,16 +78,19 @@ class OpenAICompatibleChatModel(ChatOpenAI):
         )
         if result is None:
             return None
-        response_id = chunk.get("id") or chunk.get("chunk", {}).get("id")
-        if response_id:
-            result.message.response_metadata["provider_response_id"] = response_id
-            result.message.additional_kwargs["provider_response_id"] = response_id
         choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
         if choices:
             reasoning = (choices[0].get("delta") or {}).get("reasoning_content")
             if reasoning:
                 result.message.additional_kwargs["reasoning_content"] = reasoning
         if chunk.get("usage"):
+            # Compatible providers commonly repeat the response id on every
+            # streamed chunk. Keep it only on the terminal usage chunk so
+            # LangChain's chunk merge cannot concatenate it repeatedly.
+            response_id = chunk.get("id") or chunk.get("chunk", {}).get("id")
+            if response_id:
+                result.message.response_metadata["provider_response_id"] = response_id
+                result.message.additional_kwargs["provider_response_id"] = response_id
             raw_usage = chunk["usage"]
             usage = normalize_usage(raw_usage, default_semantics="cumulative")
             result.message.additional_kwargs["provider_usage"] = usage

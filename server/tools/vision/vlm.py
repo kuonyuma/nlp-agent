@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.exceptions import OutputParserException
 from pydantic import ValidationError
 
 from core.model_runtime.factory import ModelFactory, get_global_model_factory
@@ -25,6 +27,10 @@ from server.tools.vision.contracts import (
     VisionErrorCode,
     VisionModelResult,
 )
+from utils.logger import get_logger
+
+
+logger = get_logger("nlp_agent.tools.vision.vlm")
 
 
 _OUTPUT_SCHEMA_JSON = json.dumps(
@@ -54,6 +60,30 @@ Evidence rules:
 Required output JSON Schema:
 {_OUTPUT_SCHEMA_JSON}
 """
+
+
+def _safe_error_metadata(error: BaseException) -> dict[str, str | int]:
+    """Return diagnostic identifiers without logging Provider request data."""
+
+    metadata: dict[str, str | int] = {
+        "error_type": type(error).__name__,
+        "error_module": type(error).__module__,
+    }
+    status_code = getattr(error, "status_code", None)
+    if isinstance(status_code, int):
+        metadata["status_code"] = status_code
+    provider_code = getattr(error, "code", None)
+    if isinstance(provider_code, (str, int)) and str(provider_code).strip():
+        metadata["provider_code"] = str(provider_code)[:64]
+    original = getattr(error, "orig", None)
+    original_args = getattr(original, "args", ())
+    if original_args and isinstance(original_args[0], (str, int)):
+        metadata["database_code"] = str(original_args[0])[:32]
+    if len(original_args) > 1 and isinstance(original_args[1], str):
+        column_match = re.search(r"column ['`](?P<column>[A-Za-z0-9_]+)['`]", original_args[1])
+        if column_match is not None:
+            metadata["database_column"] = column_match.group("column")
+    return metadata
 
 
 class ModelRuntimeVLMProvider:
@@ -133,7 +163,25 @@ class ModelRuntimeVLMProvider:
                 response = await structured_model.ainvoke(messages)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except OutputParserException as error:
+            logger.warning(
+                "vision structured response validation failed",
+                model_route=self.model_route,
+                **_safe_error_metadata(error),
+            )
+            raise VisionError(
+                VisionErrorCode.INVALID_PROVIDER_RESPONSE,
+                "视觉模型 provider 返回了无效结构",
+            ) from None
+        except Exception as error:
+            # Keep Provider messages out of the user-visible response because
+            # they can contain request details, while retaining a safe signal
+            # in correlated logs for diagnosis.
+            logger.warning(
+                "vision model invocation failed",
+                model_route=self.model_route,
+                **_safe_error_metadata(error),
+            )
             raise VisionError(
                 VisionErrorCode.PROVIDER_UNAVAILABLE,
                 "视觉模型 provider 当前不可用",

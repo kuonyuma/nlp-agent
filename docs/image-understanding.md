@@ -89,6 +89,13 @@ OCR/表格/图表/描述/问答 → 结果带置信度和引用返回前端。
 - **重试**: 低置信度时 2x 上采样重试一次
 - **配置**: `configs/agent_config.yaml` → `tools.vision.ocr`
 
+## VLM 与本地计价前置条件
+
+- 选择 DeepSeek、Qwen、Kimi 或 GLM 对话档案不会改变图片模型；图片语义理解固定走 `vision-worker` → `qwen3-vl-plus`。
+- 百炼华北 2（北京）`qwen3-vl-plus` 的 32K 以内官方标准价为输入 ¥1/MTok、输出 ¥10/MTok、缓存命中输入 ¥0.2/MTok。图片 Token 包含在输入 Token 中。
+- 本地数据库必须存在有效的 `qwen/qwen3-vl-plus` PricingRule。运行 `python -m scripts.seed_extended_model_pricing --apply` 可幂等初始化；缺少该规则时，额度预留会在请求发往 Qwen 前拒绝调用。
+- 价格证据：[qwen3-vl-plus 模型信息](https://help.aliyun.com/zh/model-studio/qwen3-vl-plus)、[阿里云百炼模型价格](https://help.aliyun.com/zh/model-studio/model-pricing)。
+
 ## 附件消息流
 
 1. 前端 `POST /api/v1/uploads` 上传图片，获得 `file_name`

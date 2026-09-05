@@ -75,11 +75,14 @@ class DeepSeekChatModel(ChatDeepSeek):
             chunk, default_chunk_class, base_generation_info
         )
         if result is not None:
-            response_id = chunk.get("id")
-            if response_id:
-                result.message.response_metadata["provider_response_id"] = response_id
-                result.message.additional_kwargs["provider_response_id"] = response_id
             if chunk.get("usage"):
+                # DeepSeek repeats response ids across streamed chunks. Attaching
+                # the id only to the terminal usage chunk prevents LangChain from
+                # concatenating it during chunk aggregation.
+                response_id = chunk.get("id")
+                if response_id:
+                    result.message.response_metadata["provider_response_id"] = response_id
+                    result.message.additional_kwargs["provider_response_id"] = response_id
                 raw_usage = chunk["usage"]
                 usage = normalize_usage(raw_usage, default_semantics="cumulative")
                 result.message.additional_kwargs["provider_usage"] = usage

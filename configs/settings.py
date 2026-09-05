@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     BASE_DIR: Path = BASE_DIR
     DEEPSEEK_API_KEY: str = ""
     QWEN_API_KEY: str = ""
+    KIMI_API_KEY: str = ""
+    GLM_API_KEY: str = ""
     NLP_AGENT_WORKER_MODEL: str = ""
     NLP_AGENT_WEB_SECRET: str = ""
     NLP_AGENT_AUTH_USERNAME: str = ""
@@ -126,6 +128,7 @@ class Settings(BaseSettings):
             "model_id": model["model_id"],
             "provider": provider_name,
             "base_url": provider["base_url"],
+            "api_key_env": env_name,
             "api_key_configured": bool(getattr(self, env_name, "")),
             "context_window_tokens": int(model["context_window_tokens"]),
             "output_reserve_tokens": int(generation.get("max_output_tokens", 16_000)),

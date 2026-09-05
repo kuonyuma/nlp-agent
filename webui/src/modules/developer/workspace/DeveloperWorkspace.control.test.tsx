@@ -177,6 +177,15 @@ describe("developer control-plane configuration", () => {
     const refresh = vi.fn(async () => undefined);
     render(<Models snapshot={snapshot as never} refresh={refresh} />);
 
+    const adapterSelect = screen.getByLabelText("deepseek 适配器") as HTMLSelectElement;
+    expect(Array.from(adapterSelect.options, (option) => option.value)).toEqual([
+      "deepseek",
+      "qwen",
+      "kimi",
+      "glm",
+      "openai_compatible",
+    ]);
+
     fireEvent.change(screen.getByLabelText("deepseek 服务地址"), { target: { value: "https://proxy.example/v1" } });
     fireEvent.click(screen.getByRole("button", { name: "保存 Provider" }));
     await waitFor(() => expect(saveModelProviderMock).toHaveBeenCalledWith(
