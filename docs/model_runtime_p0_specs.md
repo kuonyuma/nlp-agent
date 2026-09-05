@@ -16,6 +16,9 @@
   - [智谱 BigModel 价格页](https://bigmodel.cn/pricing)：GLM-5.3 与 GLM-5.2 当前公开的输入、输出与缓存命中价格。
   - [智谱 API 错误码](https://docs.bigmodel.cn/cn/api/api-code)：HTTP 状态码与业务错误码的当前官方映射。
   - [阿里云 qwen3-vl-plus 模型信息](https://help.aliyun.com/zh/model-studio/qwen3-vl-plus)：视觉依赖模型的上下文、分档 Token 价格和缓存价格。
+  - [阿里云百炼模型价格](https://help.aliyun.com/zh/model-studio/model-pricing)：Qwen 3.8 Max 与 Qwen 3.7 Plus 的分模式标准价。
+  - [阿里云百炼联网搜索计费](https://help.aliyun.com/zh/model-studio/web-search)：华北 2 地域 `turbo` 策略的搜索调用价格。
+  - [DeepSeek 模型与价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)：V4 Flash/Pro 的高峰、空闲输入输出与缓存命中价格。
 - **账号级验证**：2026-09-05 的安全检查仅记录是否配置，不输出密钥值。`GLM_API_KEY` 已在本地 `.env` 配置并通过账号验证：List Models 返回 HTTP 200，账号可见 `glm-5.3` 与 `glm-5.2`；两模型的真实 Chat Completions 冒烟均成功。`KIMI_API_KEY` 在 `.env`、当前进程、用户级和机器级环境中均未配置，Kimi 真实 API 冒烟仍被阻塞。
 
 ---
@@ -61,7 +64,9 @@
 | **GLM** | `glm-5.3` | `glm/glm-5.3` | ¥8.00 | ¥28.00 | ¥2.00 | 以官方价格页当前公开值为准；Cache-miss 自动落入 ordinary input 计价；嵌套 `prompt_tokens_details.cached_tokens` 归一化 |
 | **GLM** | `glm-5.2` | `glm/glm-5.2` | ¥8.00 | ¥28.00 | ¥2.00 | 以官方价格页当前公开值为准；Cache-miss 自动落入 ordinary input 计价；嵌套 `prompt_tokens_details.cached_tokens` 归一化 |
 
-版本化初始化脚本为 `scripts/seed_extended_model_pricing.py`，版本号为 `official-cny-2026-09-05`，生效时间为 2026-09-05 00:00:00（Asia/Shanghai）。脚本创建 `kimi/kimi-k2.6`、`glm/glm-5.3`、`glm/glm-5.2`，并创建图片链路依赖的 `qwen/qwen3-vl-plus` 规则；重复执行时对相同版本做精确值校验并保持幂等。Qwen-VL 规则按本项目图片请求适用的首档（输入不超过 32K）记录输入 ¥1、输出 ¥10、缓存命中 ¥0.2/MTok；视觉 Token 与普通输入同价，`image_units` 价格只用于请求前的保守额度预留，响应后由实际视觉 Token 替代。
+内置目录为 `server/quota/builtin_pricing.py`，版本号为 `official-cny-2026-09-05`，基准生效时间为 2026-09-05 00:00:00（Asia/Shanghai）。`python main.py bootstrap-db` 在迁移后自动安装目录；`scripts/seed_extended_model_pricing.py` 复用同一目录，只保留预览和人工执行能力。目录覆盖当前生产可达模型、Qwen-VL 视觉字段、Qwen 原生搜索以及本地 OCR/链接读取的显式产品政策。重复执行会精确校验同版本费率；系统管理的开放旧版本会在同一事务中闭合，人工规则发生重叠则阻止部署。
+
+Qwen-VL 规则按本项目图片请求适用的首档（输入不超过 32K）记录输入 ¥1、输出 ¥10、缓存命中 ¥0.2/MTok；视觉 Token 与普通输入同价，`image_units` 价格只用于请求前的保守额度预留，响应后由实际视觉 Token 替代。DeepSeek 静态目录采用官方高峰价格；Qwen 3.7 Plus 因思考和非思考 preset 共用一个 `pricing_key`，采用较高的思考模式输入价进行保守准入。临时优惠不进入内置目录。
 
 ### 用量字段归一化 (`core/model_runtime/normalization.py`)
 1. **Kimi**：Moonshot 在响应的 `usage` 对象中返回 `cached_tokens`；在本项目归一化函数接收的 usage 映射中，该字段表现为顶层 `cached_tokens`。现有归一化逻辑（`normalization.py:62-73`）已自动兼容，提取为 `cached_input_tokens`。

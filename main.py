@@ -212,8 +212,15 @@ if __name__ == "__main__":
         asyncio.run(run_forever())
     elif command in {"bootstrap-developer", "bootstrap_developer"}:
         asyncio.run(bootstrap_developer())
+    elif command in {"bootstrap-db", "bootstrap_db"}:
+        from scripts.bootstrap_database import run
+
+        run()
     elif command in {"chat", "--chat", "-c"}:
         asyncio.run(main())
     else:
-        print("Usage: python main.py [chat|serve|monitor|worker|sandbox-manager|bootstrap-developer]")
+        print(
+            "Usage: python main.py "
+            "[chat|serve|monitor|worker|sandbox-manager|bootstrap-developer|bootstrap-db]"
+        )
         raise SystemExit(2)

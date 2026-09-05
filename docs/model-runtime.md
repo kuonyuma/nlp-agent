@@ -159,7 +159,8 @@ model.stream_interrupted
 - 原生搜索按 Provider 返回的搜索次数计量；当前强制搜索 preset 在 Provider 不返回次数时按一次调用记录。搜索结果不另建 Token 字段，进入模型的内容只通过现有 `input_tokens` 计价一次。
 - `web_fetch` 每次成功、非缓存的页面读取记录一个 `link_pages`；缓存命中不收页面读取费。页面正文进入后续模型调用时，只通过该模型调用的 `input_tokens` 计价。
 - 单价只来自版本化 PricingRule。模型规则可配置视觉 Token、图片单位和搜索调用价格；纯 OCR 使用 `feature/image-understanding`，链接读取使用 `feature/link-read`。缺少对应价格时 UsageEvent 保持 `pending`，不会按零价结算。
-- `qwen3-vl-plus` 的图片分析在模型请求前会预留 `image_units`，响应后改用 Provider 返回的 `prompt_tokens_details.image_tokens` 精确结算。`scripts/seed_extended_model_pricing.py` 必须同时初始化 `qwen/qwen3-vl-plus`；否则额度预留会在请求发出前拒绝视觉调用。
+- `qwen3-vl-plus` 的图片分析在模型请求前会预留 `image_units`，响应后改用 Provider 返回的 `prompt_tokens_details.image_tokens` 精确结算。`python main.py bootstrap-db` 会自动安装并验证这条视觉规则；`scripts/seed_extended_model_pricing.py` 仅作为预览或人工修复入口。
+- 图片输入不直接发送给 Coordinator、普通 Worker、Kimi 或 GLM。所有聊天 profile 统一调用 `image_analyze`，再由固定的 `vision-worker -> vision-qwen-plus -> qwen3-vl-plus` 路由处理。
 
 ### 4. 标准化错误分类
 

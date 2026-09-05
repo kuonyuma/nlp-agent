@@ -41,11 +41,11 @@ services:
       timeout: 3s
       retries: 10
 
-  # Alembic, rather than application code, owns all schema creation and upgrades.
+  # One-shot deployment bootstrap owns schema upgrades and built-in pricing.
   nova-migrate:
     image: ${NOVA_IMAGE_REF:-nova-agent:local}
     pull_policy: ${NOVA_PULL_POLICY:-build}
-    command: [".venv/bin/python", "-m", "alembic", "upgrade", "head"]
+    command: [".venv/bin/python", "main.py", "bootstrap-db"]
     env_file:
       - ${NOVA_ENV_FILE:-.env}
     restart: "no"

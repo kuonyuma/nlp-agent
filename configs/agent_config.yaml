@@ -295,6 +295,7 @@ model_presets:
     circuit_breaker: {failure_threshold: 5, cooldown_s: 60}
 
   vision-qwen-plus:
+    # Project-wide image service. Chat profiles never replace this preset.
     model: qwen3-vl-plus
     thinking: {enabled: false, effort: none}
     generation: {max_output_tokens: 8192, temperature: 0.1}
@@ -315,6 +316,8 @@ model_routes:
     primary: utility-flash
     fallbacks: []
   vision-worker:
+    # Keep this Qwen-only and fallback-free. Kimi/GLM/DeepSeek remain text
+    # chat choices even if a provider later adds native multimodal input.
     primary: vision-qwen-plus
     fallbacks: []
 model_profiles:
@@ -467,6 +470,7 @@ tools:
       language_default: auto
       confidence_threshold: 0.75
     vlm:
+      # Fixed application route; model profile overrides cannot change it.
       model_route: vision-worker
       max_image_bytes: 6000000
       send_ocr_context: true

@@ -28,6 +28,20 @@ UTC = timezone.utc
 _OWNER_TYPES = {"user", "workspace", "classroom"}
 _BUCKET_TYPES = {"daily", "weekly"}
 _SOURCE_TYPES = {"role", "purchase", "grant", "adjustment", "reset"}
+_PRICING_RATE_FIELDS = (
+    "ordinary_input_credits_micro_per_million_tokens",
+    "cached_input_credits_micro_per_million_tokens",
+    "cache_write_credits_micro_per_million_tokens",
+    "output_credits_micro_per_million_tokens",
+    "reasoning_output_credits_micro_per_million_tokens",
+    "visual_input_credits_micro_per_million_tokens",
+    "image_unit_credits_micro",
+    "search_call_credits_micro",
+    "link_page_credits_micro",
+)
+_BUILTIN_PRICING_OWNERS = frozenset(
+    {"system:pricing-bootstrap", "p4-model-pricing"}
+)
 
 
 def _utc(value: datetime) -> datetime:
@@ -483,6 +497,207 @@ class QuotaManagementService:
                 select(PricingRuleModel).where(PricingRuleModel.id == rule_id)
             ).mappings().one()
         return self._pricing_rule_payload(row)
+
+    def install_builtin_pricing_version(
+        self,
+        definition: PricingRule,
+        *,
+        installed_by: str,
+        now: datetime,
+        managed_created_by: frozenset[str] = _BUILTIN_PRICING_OWNERS,
+    ) -> dict[str, Any]:
+        """Atomically install one built-in pricing version.
+
+        Existing built-in open ranges may be closed at the rollout instant.
+        Human-managed or otherwise unknown ranges are never modified.
+        """
+        if installed_by not in managed_created_by:
+            raise ValueError("installed_by must identify a managed pricing installer")
+        installed_at = _utc(now)
+
+        def _same_rates(row: Any) -> bool:
+            return all(
+                row[field] == getattr(definition, field)
+                for field in _PRICING_RATE_FIELDS
+            )
+
+        try:
+            with self._engine.begin() as connection:
+                rows = connection.execute(
+                    select(PricingRuleModel)
+                    .where(PricingRuleModel.pricing_key == definition.pricing_key)
+                    .order_by(PricingRuleModel.effective_from, PricingRuleModel.version)
+                    .with_for_update()
+                ).mappings().all()
+
+                target = next(
+                    (row for row in rows if row["version"] == definition.version),
+                    None,
+                )
+                if target is not None:
+                    if not _same_rates(target):
+                        mismatches = [
+                            field
+                            for field in _PRICING_RATE_FIELDS
+                            if target[field] != getattr(definition, field)
+                        ]
+                        raise QuotaDomainError(
+                            QuotaErrorCode.PRICING_RULE_CONFLICT,
+                            f"Built-in pricing version {definition.version!r} for "
+                            f"{definition.pricing_key!r} has different fields: "
+                            f"{', '.join(mismatches)}",
+                        )
+                    return {
+                        **self._pricing_rule_payload(target),
+                        "install_status": "already_present",
+                        "superseded_rule_id": None,
+                    }
+
+                # Fresh databases preserve the official effective timestamp.
+                # Existing installations switch no earlier than this rollout,
+                # so historical settlements are never repriced retroactively.
+                effective_from = (
+                    definition.effective_from
+                    if not rows
+                    else max(definition.effective_from, installed_at)
+                )
+                candidate = definition.model_copy(
+                    update={"effective_from": effective_from, "effective_until": None}
+                )
+                overlapping = [
+                    row
+                    for row in rows
+                    if row["effective_until"] is None
+                    or self._stored_utc(row["effective_until"]) > effective_from
+                ]
+
+                predecessor = None
+                if overlapping:
+                    if len(overlapping) != 1:
+                        details = ", ".join(
+                            f"{row['id']}:{row['version']}" for row in overlapping
+                        )
+                        raise QuotaDomainError(
+                            QuotaErrorCode.PRICING_RULE_CONFLICT,
+                            f"Multiple pricing rules overlap the built-in rollout for "
+                            f"{definition.pricing_key!r}: {details}",
+                        )
+                    current = overlapping[0]
+                    current_from = self._stored_utc(current["effective_from"])
+                    if (
+                        current["effective_until"] is not None
+                        or current["created_by"] not in managed_created_by
+                        or current_from >= effective_from
+                    ):
+                        raise QuotaDomainError(
+                            QuotaErrorCode.PRICING_RULE_CONFLICT,
+                            f"Pricing rule {current['id']} version {current['version']!r} "
+                            f"created_by={current['created_by']!r} overlaps built-in "
+                            f"version {definition.version!r}; retire or close it explicitly",
+                        )
+                    predecessor = current
+
+                adjusted: list[PricingRule] = []
+                for row in rows:
+                    current = self._pricing_rule_from_row(row)
+                    if predecessor is not None and row["id"] == predecessor["id"]:
+                        current = current.model_copy(
+                            update={"effective_until": effective_from}
+                        )
+                    adjusted.append(current)
+                try:
+                    PricingCatalog([*adjusted, candidate])
+                except ValueError as error:
+                    raise QuotaDomainError(
+                        QuotaErrorCode.PRICING_RULE_CONFLICT,
+                        str(error),
+                    ) from error
+
+                if predecessor is not None:
+                    connection.execute(
+                        update(PricingRuleModel)
+                        .where(PricingRuleModel.id == predecessor["id"])
+                        .values(
+                            effective_until=_db_time(effective_from),
+                            status=(
+                                "retired"
+                                if effective_from <= installed_at
+                                else predecessor["status"]
+                            ),
+                        )
+                    )
+
+                rule_id = str(uuid.uuid4())
+                connection.execute(
+                    insert(PricingRuleModel).values(
+                        id=rule_id,
+                        pricing_key=candidate.pricing_key,
+                        version=candidate.version,
+                        effective_from=_db_time(candidate.effective_from),
+                        effective_until=None,
+                        ordinary_input_credits_micro_per_million_tokens=(
+                            candidate.ordinary_input_credits_micro_per_million_tokens
+                        ),
+                        cached_input_credits_micro_per_million_tokens=(
+                            candidate.cached_input_credits_micro_per_million_tokens
+                        ),
+                        cache_write_credits_micro_per_million_tokens=(
+                            candidate.cache_write_credits_micro_per_million_tokens
+                        ),
+                        output_credits_micro_per_million_tokens=(
+                            candidate.output_credits_micro_per_million_tokens
+                        ),
+                        reasoning_output_credits_micro_per_million_tokens=(
+                            candidate.reasoning_output_credits_micro_per_million_tokens
+                        ),
+                        visual_input_credits_micro_per_million_tokens=(
+                            candidate.visual_input_credits_micro_per_million_tokens
+                        ),
+                        image_unit_credits_micro=candidate.image_unit_credits_micro,
+                        search_call_credits_micro=candidate.search_call_credits_micro,
+                        link_page_credits_micro=candidate.link_page_credits_micro,
+                        status="active",
+                        created_by=installed_by,
+                    )
+                )
+                created = connection.execute(
+                    select(PricingRuleModel).where(PricingRuleModel.id == rule_id)
+                ).mappings().one()
+                return {
+                    **self._pricing_rule_payload(created),
+                    "install_status": (
+                        "superseded" if predecessor is not None else "created"
+                    ),
+                    "superseded_rule_id": (
+                        predecessor["id"] if predecessor is not None else None
+                    ),
+                }
+        except IntegrityError as error:
+            # A concurrent bootstrap may win the unique key/version insert.
+            # Re-read only after this transaction has rolled back.
+            existing = next(
+                (
+                    row
+                    for row in self.list_pricing_rules(
+                        pricing_key=definition.pricing_key
+                    )
+                    if row["version"] == definition.version
+                ),
+                None,
+            )
+            if existing is not None and all(
+                existing[field] == getattr(definition, field)
+                for field in _PRICING_RATE_FIELDS
+            ):
+                return {
+                    **existing,
+                    "install_status": "already_present",
+                    "superseded_rule_id": None,
+                }
+            raise QuotaDomainError(
+                QuotaErrorCode.PRICING_RULE_CONFLICT,
+                f"Concurrent pricing install conflicted for {definition.pricing_key!r}",
+            ) from error
 
     def get_pricing_rule(self, pricing_rule_id: str) -> dict[str, Any]:
         with self._engine.connect() as connection:

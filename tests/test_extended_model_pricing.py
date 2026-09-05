@@ -13,22 +13,18 @@ def test_verified_extended_model_prices_are_versioned_and_idempotent() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     PricingRuleModel.__table__.create(engine)
 
-    first = seed_verified_extended_model_pricing(engine, created_by="p4-test")
-    second = seed_verified_extended_model_pricing(engine, created_by="p4-test")
+    first = seed_verified_extended_model_pricing(
+        engine, created_by="p4-model-pricing"
+    )
+    second = seed_verified_extended_model_pricing(
+        engine, created_by="p4-model-pricing"
+    )
 
     assert CREDITS_MICRO_PER_CNY == 1_000_000
-    assert [item["status"] for item in first["rules"]] == [
-        "created",
-        "created",
-        "created",
-        "created",
-    ]
-    assert [item["status"] for item in second["rules"]] == [
-        "already_present",
-        "already_present",
-        "already_present",
-        "already_present",
-    ]
+    assert {item["status"] for item in first["rules"]} == {"created"}
+    assert {item["status"] for item in second["rules"]} == {"already_present"}
+    assert len(first["rules"]) == 10
+    assert len(second["rules"]) == 10
     assert first["unverified_pricing_keys"] == []
     assert UNVERIFIED_PRICING_KEYS == ()
 
@@ -38,10 +34,16 @@ def test_verified_extended_model_prices_are_versioned_and_idempotent() -> None:
             for row in connection.execute(select(PricingRuleModel)).mappings()
         }
     assert set(rows) == {
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3.8-max",
+        "qwen/qwen3.7-plus",
         "qwen/qwen3-vl-plus",
         "kimi/kimi-k2.6",
         "glm/glm-5.3",
         "glm/glm-5.2",
+        "feature/image-understanding",
+        "feature/link-read",
     }
     assert rows["qwen/qwen3-vl-plus"]["version"] == PRICING_VERSION
     assert rows["qwen/qwen3-vl-plus"][
@@ -97,5 +99,8 @@ def test_verified_extended_model_prices_are_versioned_and_idempotent() -> None:
     assert rows["glm/glm-5.3"][
         "reasoning_output_credits_micro_per_million_tokens"
     ] is None
+    assert rows["qwen/qwen3.7-plus"]["search_call_credits_micro"] == 3_000
+    assert rows["feature/image-understanding"]["image_unit_credits_micro"] == 0
+    assert rows["feature/link-read"]["link_page_credits_micro"] == 0
 
     engine.dispose()

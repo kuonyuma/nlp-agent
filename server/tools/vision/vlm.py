@@ -137,7 +137,7 @@ class ModelRuntimeVLMProvider:
         except Exception:
             raise VisionError(
                 VisionErrorCode.PROVIDER_UNAVAILABLE,
-                "视觉模型路由未配置或当前不可用",
+                "视觉模型未配置或当前不可用（需要 QWEN_API_KEY）",
             ) from None
 
         messages = self._messages(
@@ -204,7 +204,7 @@ class ModelRuntimeVLMProvider:
         except Exception:
             raise VisionError(
                 VisionErrorCode.PROVIDER_UNAVAILABLE,
-                "视觉模型路由未配置或当前不可用",
+                "视觉模型未配置或当前不可用（需要 QWEN_API_KEY）",
             ) from None
 
         if not definitions or any(

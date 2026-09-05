@@ -144,8 +144,12 @@ def _provider(monkeypatch, factory: FakeFactory, **kwargs):
 
 
 def test_configured_qwen_vision_route_builds_without_network(monkeypatch) -> None:
-    monkeypatch.setenv("QWEN_API_KEY", "test-only-key")
     factory = ModelFactory.from_settings()
+    monkeypatch.setattr(
+        factory,
+        "_api_key",
+        lambda env_name: "test-only-key" if env_name == "QWEN_API_KEY" else "",
+    )
     provider = ModelRuntimeVLMProvider(
         model_route="vision-worker",
         max_image_bytes=1_024,
@@ -160,6 +164,52 @@ def test_configured_qwen_vision_route_builds_without_network(monkeypatch) -> Non
 
     assert route.candidates[0].definition.model_id == "qwen3-vl-plus"
     assert structured.normalize_response is False
+
+
+def test_chat_profile_never_changes_the_qwen_only_vision_route(monkeypatch) -> None:
+    factory = ModelFactory.from_settings()
+    monkeypatch.setattr(
+        factory,
+        "_api_key",
+        lambda env_name: "test-only-key" if env_name == "QWEN_API_KEY" else "",
+    )
+
+    for profile in ("deepseek", "qwen", "kimi", "glm"):
+        route = factory.build_route("vision-worker", model_profile=profile)
+        assert [
+            candidate.definition.model_id for candidate in route.candidates
+        ] == ["qwen3-vl-plus"]
+
+
+async def test_glm_text_can_build_when_qwen_vision_is_not_configured(
+    monkeypatch,
+) -> None:
+    factory = ModelFactory.from_settings()
+    monkeypatch.setattr(
+        factory,
+        "_api_key",
+        lambda env_name: "test-only-key" if env_name == "GLM_API_KEY" else "",
+    )
+
+    text_model = factory.build_profile_role("glm", "utility")
+    assert text_model.candidates[0].definition.model_id == "glm-5.2"
+
+    provider = ModelRuntimeVLMProvider(
+        model_route="vision-worker",
+        max_image_bytes=1_024,
+        factory=factory,
+    )
+    with pytest.raises(VisionError) as raised:
+        await provider.analyze(
+            _asset(),
+            task="describe",
+            question=None,
+            language="auto",
+            ocr_context=None,
+        )
+
+    assert raised.value.code is VisionErrorCode.PROVIDER_UNAVAILABLE
+    assert "QWEN_API_KEY" in raised.value.message
 
 
 async def test_builds_openai_compatible_multimodal_message(monkeypatch) -> None:
@@ -430,6 +480,6 @@ async def test_route_and_api_key_failures_become_safe_errors(
         )
 
     assert raised.value.code is VisionErrorCode.PROVIDER_UNAVAILABLE
-    assert raised.value.message == "视觉模型路由未配置或当前不可用"
+    assert raised.value.message == "视觉模型未配置或当前不可用（需要 QWEN_API_KEY）"
     assert "sk-test-secret" not in raised.value.message
     assert "C:/private" not in raised.value.message
