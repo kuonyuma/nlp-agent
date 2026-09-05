@@ -160,6 +160,29 @@ async def test_durable_reporter_persists_exact_attempt_and_shadow_credits(quota_
 
 
 @pytest.mark.asyncio
+async def test_durable_reporter_bounds_oversized_provider_response_id(quota_engine):
+    _insert_pricing_rule(quota_engine)
+    reporter = DurableModelUsageReporter(quota_engine)
+    repeated_id = "chatcmpl-qwen-stream-456" * 40
+    usage = CanonicalTokenUsage(
+        input_tokens=10,
+        output_tokens=2,
+        total_tokens=12,
+        source="provider",
+        provider_response_id=repeated_id,
+    )
+
+    await reporter.report(_invocation(), usage, _outcome())
+
+    with quota_engine.connect() as connection:
+        row = connection.execute(select(UsageEventModel.__table__)).mappings().one()
+    stored_id = row["provider_response_id"]
+    assert len(stored_id) == 255
+    assert stored_id.startswith("chatcmpl-qwen-stream-456")
+    assert ":sha256:" in stored_id
+
+
+@pytest.mark.asyncio
 async def test_durable_reporter_persists_and_prices_search_feature_usage(quota_engine):
     _insert_pricing_rule(quota_engine)
     reporter = DurableModelUsageReporter(quota_engine)

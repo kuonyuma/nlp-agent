@@ -22,7 +22,8 @@ def check_config() -> bool:
     print(f"Coordinator: {config['model_id']} ({config['base_url']})")
     print(f"Worker:      {settings.tool_llm['model_id']}")
     if not config.get("api_key_configured"):
-        print("Missing DEEPSEEK_API_KEY; create .env in the project root.")
+        env_name = config.get("api_key_env", "the selected Provider API key")
+        print(f"Missing {env_name}; create .env in the project root.")
         return False
     return True
 
@@ -211,8 +212,15 @@ if __name__ == "__main__":
         asyncio.run(run_forever())
     elif command in {"bootstrap-developer", "bootstrap_developer"}:
         asyncio.run(bootstrap_developer())
+    elif command in {"bootstrap-db", "bootstrap_db"}:
+        from scripts.bootstrap_database import run
+
+        run()
     elif command in {"chat", "--chat", "-c"}:
         asyncio.run(main())
     else:
-        print("Usage: python main.py [chat|serve|monitor|worker|sandbox-manager|bootstrap-developer]")
+        print(
+            "Usage: python main.py "
+            "[chat|serve|monitor|worker|sandbox-manager|bootstrap-developer|bootstrap-db]"
+        )
         raise SystemExit(2)

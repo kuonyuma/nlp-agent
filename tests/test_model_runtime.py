@@ -367,7 +367,6 @@ def test_qwen_adapter_adds_search_only_for_an_opted_in_preset():
     payload = model._get_request_payload([HumanMessage(content="今天有什么新闻？")])
     assert payload["extra_body"] == {
         "enable_thinking": False,
-        "preserve_thinking": False,
         "enable_search": True,
         "search_options": {
             "forced_search": True,
@@ -386,6 +385,28 @@ def test_deepseek_usage_normalization_includes_kv_cache():
     })
     assert usage["input_token_details"]["cache_read"] == 75
     assert usage["input_token_details"]["cache_miss"] == 25
+
+
+def test_kimi_usage_normalization_extracts_cached_tokens():
+    usage = normalize_usage({
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+        "cached_tokens": 75,
+    })
+    assert usage["input_token_details"]["cache_read"] == 75
+    assert usage["prompt_cache_hit_tokens"] == 75
+
+
+def test_glm_usage_normalization_extracts_nested_cached_tokens():
+    usage = normalize_usage({
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+        "prompt_tokens_details": {"cached_tokens": 60},
+    })
+    assert usage["input_token_details"]["cache_read"] == 60
+    assert usage["prompt_cache_hit_tokens"] == 60
 
 
 def test_deepseek_replays_reasoning_only_for_tool_call_messages():

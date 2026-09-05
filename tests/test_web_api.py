@@ -443,8 +443,17 @@ def test_http_lifecycle_sessions_chat_settings_and_csrf(web_app, monkeypatch):
         csrf = authenticate(client)
         developer = client.get("/api/v1/developer/snapshot")
         assert developer.status_code == 200
-        assert developer.json()["runtime"]["status"] == "ok"
-        assert "tools" in developer.json()
+        developer_payload = developer.json()
+        assert developer_payload["runtime"]["status"] == "ok"
+        assert "tools" in developer_payload
+        providers = developer_payload["models"]["providers"]
+        assert providers["kimi"]["adapter"] == "kimi"
+        assert providers["kimi"]["api_key_env"] == "KIMI_API_KEY"
+        assert providers["glm"]["adapter"] == "glm"
+        assert providers["glm"]["api_key_env"] == "GLM_API_KEY"
+        for provider in providers.values():
+            assert isinstance(provider["api_key_configured"], bool)
+            assert "api_key" not in provider
         developer_health = client.get("/api/v1/developer/health")
         assert developer_health.status_code == 200
         assert developer_health.json()["status"] == "ok"

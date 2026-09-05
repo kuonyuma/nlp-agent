@@ -28,13 +28,37 @@ DeepSeek 思考模式通过 `extra_body.thinking.type` 控制。内部统一 eff
 
 ## Qwen 适配
 
-Qwen 使用专用 `qwen` Adapter，而不是把兼容接口直接当作通用 OpenAI Provider。Adapter 根据 preset 写入 `extra_body.enable_thinking`；启用思考时同时设置 `preserve_thinking=true`，并将 Qwen3.8 Max 的内部 `high/max` effort 映射为厂商参数 `xhigh`。
+Qwen 使用专用 `qwen` Adapter，而不是把兼容接口直接当作通用 OpenAI Provider。Adapter 根据 preset 写入 `extra_body.enable_thinking`；仅对官方声明支持该参数的模型在启用思考时设置 `preserve_thinking=true`，并将 Qwen3.8 Max 的内部 `high/max` effort 映射为厂商参数 `xhigh`。`qwen3-vl-plus` 不发送 `preserve_thinking`。
 
 流式和非流式响应中的 `reasoning_content` 都会保留。多轮请求会将历史 Assistant 消息的 `reasoning_content` 回传给 Qwen，避免开启 `preserve_thinking` 后丢失推理上下文。缓存 Token、推理 Token 和总用量仍归一化到统一 usage 字段。
 
 Qwen 原生联网搜索是 preset 级的显式能力，不会随 Qwen Provider 全局开启。只有 `worker-qwen-web` 设置 `native_search.enabled=true`；Adapter 才会在 `extra_body` 中写入 `enable_search=true` 和 `search_options`。普通 `coordinator-qwen-max`、`worker-qwen-plus` 与 `utility-qwen-plus` 的请求保持不联网。
 
 Coordinator 仅把最新、实时、新闻、价格、政策、版本或用户明确要求联网检索的问题路由到 `web_researcher`。该 Worker 固定使用 `qwen3.7-plus`、`forced_search=true` 和 `turbo` 策略；运行时禁止模型覆盖及其他 Profile 借用该 preset。它采用 one-shot 执行（单轮、无工具、无 Provider/Worker 重试、预算耗尽不再调用模型），从服务端限制单任务最多一次原生搜索。用户提供明确 URL 时改用 `web_reader`；它继承当前普通 Worker 模型且只获授 `web_fetch`，不会触发 Qwen 原生搜索。两个内建 Web Profile 不继承全局 Worker 工具授权，也不能被 Developer UI 覆盖。兼容模式的模型回答不保证包含结构化来源 URL，因此运行时不得补造引用。
+
+## Kimi 适配
+
+Kimi 使用专用 `kimi` Adapter，通过国内 Moonshot Endpoint `https://api.moonshot.cn/v1` 调用配置中的 `kimi-k2.6`。`coordinator-kimi` 和 `worker-kimi` 启用思考，`utility-kimi` 关闭思考；请求统一写入 `extra_body.thinking.type`，并设置 `keep=null`，不跨普通轮次保留推理内容。
+
+Kimi K2.6 不接收项目的统一 effort、temperature、top_p 或 n 参数。Adapter 不发送这些字段；preset 一旦显式设置 temperature 或 top_p，会在构建阶段报错，避免产生表面生效、实际被忽略的配置。
+
+流式和非流式响应中的 `reasoning_content`、响应 ID 与用量都会进入统一模型消息。只有包含 `tool_calls` 的历史 Assistant 消息会回传 `reasoning_content`，以满足工具调用循环，同时保持普通请求前缀稳定。Kimi 顶层 `cached_tokens` 会归一化为 `cached_input_tokens`。
+
+## GLM 适配
+
+GLM 使用专用 `glm` Adapter，通过国内 BigModel Endpoint `https://open.bigmodel.cn/api/paas/v4` 调用。Coordinator 和 Worker 使用 `glm-5.3`；该模型必须启用思考，配置为 disabled 时会在 Adapter 构建阶段直接报错。内部 effort 映射为 GLM-5.3 支持的 `low/high/max`：low→low、medium/high→high、max→max。Utility 使用可关闭思考的 `glm-5.2`，并配置 `temperature=0.1`。
+
+GLM 请求始终设置 `tool_stream=true`，使长工具参数生成能够持续产生增量 chunk。与 Kimi 相同，只有包含工具调用的历史 Assistant 消息才会回传 `reasoning_content`。GLM 的 `prompt_tokens_details.cached_tokens` 会归一化为统一缓存 Token 字段。
+
+GLM 还可能在 HTTP 请求正常结束时通过 `finish_reason` 表示错误。`model_context_window_exceeded` 按上下文超限处理，`network_error` 按可重试过载处理，`sensitive` 按不可重试错误处理。首个可见 delta 前可以执行既有 retry/fallback；已经输出正文、reasoning 或工具参数后会抛出 `StreamInterruptedError`，不会把另一轮输出拼接到原流。
+
+数字业务码在通用 HTTP 状态之前分类：`1113` 是欠费、`1261` 是 Prompt 超长、`1301` 是安全拦截，均不可重试；`1302` 是可重试限流；`1305` 是可重试过载；`1308–1311` 与 `1313–1321` 属于用量上限或订阅权益限制，不进行短退避重试。完整依据与暂不映射的代码见 `docs/model_runtime_p0_specs.md`。
+
+## Provider 密钥
+
+模型密钥只从服务端环境读取：DeepSeek 使用 `DEEPSEEK_API_KEY`，Qwen 使用 `QWEN_API_KEY`，Kimi 使用 `KIMI_API_KEY`，GLM 使用 `GLM_API_KEY`。本地开发在项目根目录 `.env` 配置；部署时使用 `deploy/env/production.env.example` 或 `deploy/env/test.env.example` 创建服务器专用文件，不提交真实密钥。
+
+Developer UI 的 Provider 页面可以选择 `deepseek`、`qwen`、`kimi`、`glm` 或 `openai_compatible` Adapter，也会显示对应密钥是否已配置。浏览器只收到布尔状态，不会收到密钥值。CLI 在当前 Coordinator 缺少密钥时会显示其实际环境变量名。
 
 ## 学生端模型档案
 
@@ -46,7 +70,7 @@ Coordinator 仅把最新、实时、新闻、价格、政策、版本或用户�
 
 `ResilientChatModel` 保持 LangChain 的 `bind_tools()`、`with_structured_output()`、`ainvoke()` 和 `astream()` 调用形态。普通 `ainvoke()` 内部也使用统一流式路径，确保首 Token、流空闲和总超时具有相同语义。
 
-重试仅覆盖超时、连接错误、408/409/429 和 5xx。400/401/403/404、上下文超限、非法工具 Schema、余额和配额错误不会重试或 fallback。SDK 自带重试固定为 0，避免双重重试。
+重试仅覆盖超时、连接错误、408/409、通用 429 和 5xx。400/401/403/404、上下文超限、非法工具 Schema、余额和配额错误不会重试或 fallback；GLM 的数字业务码会先于通用 HTTP 状态分类，因此欠费或订阅上限即使返回 429 也不会重试。SDK 自带重试固定为 0，避免双重重试。
 
 流式调用遵守：
 
@@ -135,6 +159,8 @@ model.stream_interrupted
 - 原生搜索按 Provider 返回的搜索次数计量；当前强制搜索 preset 在 Provider 不返回次数时按一次调用记录。搜索结果不另建 Token 字段，进入模型的内容只通过现有 `input_tokens` 计价一次。
 - `web_fetch` 每次成功、非缓存的页面读取记录一个 `link_pages`；缓存命中不收页面读取费。页面正文进入后续模型调用时，只通过该模型调用的 `input_tokens` 计价。
 - 单价只来自版本化 PricingRule。模型规则可配置视觉 Token、图片单位和搜索调用价格；纯 OCR 使用 `feature/image-understanding`，链接读取使用 `feature/link-read`。缺少对应价格时 UsageEvent 保持 `pending`，不会按零价结算。
+- `qwen3-vl-plus` 的图片分析在模型请求前会预留 `image_units`，响应后改用 Provider 返回的 `prompt_tokens_details.image_tokens` 精确结算。`python main.py bootstrap-db` 会自动安装并验证这条视觉规则；`scripts/seed_extended_model_pricing.py` 仅作为预览或人工修复入口。
+- 图片输入不直接发送给 Coordinator、普通 Worker、Kimi 或 GLM。所有聊天 profile 统一调用 `image_analyze`，再由固定的 `vision-worker -> vision-qwen-plus -> qwen3-vl-plus` 路由处理。
 
 ### 4. 标准化错误分类
 

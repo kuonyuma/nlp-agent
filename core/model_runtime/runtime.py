@@ -70,6 +70,27 @@ class EmptyModelResponseError(RuntimeError):
     pass
 
 
+class ModelFinishReasonError(RuntimeError):
+    """A provider reported an error through an otherwise successful response."""
+
+    def __init__(
+        self,
+        *,
+        finish_reason: str,
+        error_kind: str,
+        provider: str,
+        model: str,
+    ) -> None:
+        super().__init__(
+            f"Provider {provider!r} model {model!r} ended with "
+            f"error finish_reason {finish_reason!r}"
+        )
+        self.finish_reason = finish_reason
+        self.error_kind = error_kind
+        self.provider = provider
+        self.model = model
+
+
 class StreamInterruptedError(RuntimeError):
     """A stream failed after externally visible output; transparent replay is unsafe."""
 
@@ -114,6 +135,13 @@ class ModelCandidate:
     preset: ModelPresetConfig
     model: Any
     circuit: CircuitState = field(default_factory=CircuitState)
+    error_finish_reasons: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.error_finish_reasons:
+            self.error_finish_reasons = dict(
+                getattr(self.model, "ERROR_FINISH_REASONS", {}) or {}
+            )
 
 
 @dataclass(frozen=True)
@@ -165,16 +193,68 @@ def _finalize_stream_usage(
 def classify_model_error(error: BaseException) -> ErrorDecision:
     if isinstance(error, EmptyModelResponseError):
         return ErrorDecision(True, "upstream_empty_response")
+    if isinstance(error, ModelFinishReasonError):
+        return ErrorDecision(
+            error.error_kind == "upstream_overloaded",
+            error.error_kind,
+        )
     if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
         return ErrorDecision(True, "upstream_timeout")
     status = getattr(error, "status_code", None)
     message = str(error).lower()
-    code = str(getattr(error, "code", "") or "").lower()
+    code = str(getattr(error, "code", "") or "").strip().lower()
     body = getattr(error, "body", None)
     if isinstance(body, dict):
         details = body.get("error", body)
-        code = str(details.get("code", code) or code).lower()
-        message = f"{message} {details.get('type', '')} {details.get('message', '')}".lower()
+        if isinstance(details, dict):
+            code = str(details.get("code", code) or code).strip().lower()
+            message = (
+                f"{message} {details.get('type', '')} {details.get('message', '')}"
+            ).lower()
+
+    retry_after = None
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        try:
+            retry_after = max(
+                0.0,
+                float(headers.get("retry-after") or headers.get("Retry-After")),
+            )
+        except (TypeError, ValueError):
+            retry_after = None
+
+    if code == "1113":
+        return ErrorDecision(False, "upstream_provider_quota_exhausted")
+    if code == "1261":
+        return ErrorDecision(False, "upstream_context_length_exceeded")
+    if code == "1301":
+        return ErrorDecision(False, "upstream_unknown")
+    if code in {"1210", "1212", "1213", "1214", "1215"}:
+        return ErrorDecision(False, "upstream_invalid_request")
+    if code in {"1211", "1221", "1222"}:
+        return ErrorDecision(False, "upstream_model_unavailable")
+    if code == "1302":
+        return ErrorDecision(True, "upstream_rate_limited", retry_after)
+    if code == "1305":
+        return ErrorDecision(True, "upstream_overloaded", retry_after)
+    if code in {
+        "1308",
+        "1309",
+        "1310",
+        "1311",
+        "1313",
+        "1314",
+        "1315",
+        "1316",
+        "1317",
+        "1318",
+        "1319",
+        "1320",
+        "1321",
+    }:
+        return ErrorDecision(False, "upstream_provider_quota_exhausted")
+
     quota_markers = (
         "insufficient_quota",
         "quota_exceeded",
@@ -187,15 +267,6 @@ def classify_model_error(error: BaseException) -> ErrorDecision:
         return ErrorDecision(False, "upstream_provider_quota_exhausted")
     if status == 402:
         return ErrorDecision(False, "upstream_provider_quota_exhausted")
-
-    retry_after = None
-    response = getattr(error, "response", None)
-    headers = getattr(response, "headers", None)
-    if headers:
-        try:
-            retry_after = max(0.0, float(headers.get("retry-after")))
-        except (TypeError, ValueError):
-            retry_after = None
 
     if status == 429:
         return ErrorDecision(True, "upstream_rate_limited", retry_after)
@@ -296,6 +367,7 @@ class ResilientChatModel:
                     preset=item.preset,
                     model=item.model.bind_tools(tools, **kwargs),
                     circuit=item.circuit,
+                    error_finish_reasons=item.error_finish_reasons,
                 )
                 for item in self.candidates
             ],
@@ -324,6 +396,7 @@ class ResilientChatModel:
                         schema, **underlying_kwargs
                     ),
                     circuit=item.circuit,
+                    error_finish_reasons=item.error_finish_reasons,
                 )
                 for item in self.candidates
             ],
@@ -475,6 +548,22 @@ class ResilientChatModel:
         additional = getattr(chunk, "additional_kwargs", None) or {}
         return bool(additional.get("reasoning_content"))
 
+    @staticmethod
+    def _finish_reason_error(
+        candidate: ModelCandidate, finish_reason: str | None
+    ) -> ModelFinishReasonError | None:
+        if not finish_reason:
+            return None
+        error_kind = candidate.error_finish_reasons.get(finish_reason)
+        if error_kind is None:
+            return None
+        return ModelFinishReasonError(
+            finish_reason=finish_reason,
+            error_kind=error_kind,
+            provider=candidate.provider_name,
+            model=candidate.definition.model_id,
+        )
+
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         if self.normalize_response:
             combined: Any = None
@@ -514,6 +603,7 @@ class ResilientChatModel:
                 )
                 await self._reserve_feature_attempt(invocation)
                 attempt_reported = False
+                terminal_error: ModelFinishReasonError | None = None
                 try:
                     async with _attempt_span(
                         candidate, attempt, fallback_index, operation_id
@@ -583,6 +673,27 @@ class ResilientChatModel:
                                 usage_meta = response_usage(response)
                                 if usage_meta.get("total_tokens"):
                                     span.set_usage(usage_meta)
+
+                        terminal_error = self._finish_reason_error(
+                            candidate, finish_reason
+                        )
+                        if terminal_error is not None and span is not None:
+                            span.set_status(
+                                SpanStatus.ERROR,
+                                error_kind=terminal_error.error_kind,
+                                error_message=str(terminal_error),
+                            )
+
+                    if terminal_error is not None:
+                        attempt_reported = True
+                        await self._report_attempt_guarded(
+                            invocation=invocation,
+                            usage=canon_usage,
+                            status="failed",
+                            finish_reason=finish_reason,
+                            error_kind=terminal_error.error_kind,
+                        )
+                        raise terminal_error
 
                     if is_structured:
                         if parsing_error is not None:
@@ -770,6 +881,11 @@ class ResilientChatModel:
                             raise EmptyModelResponseError(
                                 "Provider stream completed without chunks"
                             )
+                        terminal_error = self._finish_reason_error(
+                            candidate, finish_reason
+                        )
+                        if terminal_error is not None:
+                            raise terminal_error
                     final_usage = _finalize_stream_usage(
                         latest_usage,
                         delta_usage,

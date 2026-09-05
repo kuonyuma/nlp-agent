@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.model_runtime.factory import ModelFactory
@@ -25,23 +26,27 @@ from server.tools.vision.contracts import (
     VisionModelResult,
 )
 from server.tools.vision.vlm import ModelRuntimeVLMProvider
+from server.tools.vision.vlm import _safe_error_metadata
 
 
 class FakeStructuredModel:
-    def __init__(self, response) -> None:
+    def __init__(self, response, error: Exception | None = None) -> None:
         self.response = response
+        self.error = error
         self.calls: list[list] = []
         self.feature_usages: list[BillableFeatureUsage] = []
 
     async def ainvoke(self, messages):
         self.calls.append(messages)
         self.feature_usages.append(current_billable_feature_usage())
+        if self.error is not None:
+            raise self.error
         return self.response
 
 
 class FakeRoute:
-    def __init__(self, response) -> None:
-        self.structured = FakeStructuredModel(response)
+    def __init__(self, response, invoke_error: Exception | None = None) -> None:
+        self.structured = FakeStructuredModel(response, invoke_error)
         self.schemas: list[type] = []
         self.structured_kwargs: list[dict] = []
 
@@ -88,12 +93,13 @@ class FakeFactory:
         capabilities: tuple[tuple[bool, bool], ...] = ((True, True),),
         route_error: Exception | None = None,
         build_error: Exception | None = None,
+        invoke_error: Exception | None = None,
     ) -> None:
         self.config = FakeConfig(
             capabilities=capabilities,
             route_error=route_error,
         )
-        self.route = FakeRoute(response)
+        self.route = FakeRoute(response, invoke_error)
         self.build_error = build_error
         self.build_calls = 0
 
@@ -138,8 +144,12 @@ def _provider(monkeypatch, factory: FakeFactory, **kwargs):
 
 
 def test_configured_qwen_vision_route_builds_without_network(monkeypatch) -> None:
-    monkeypatch.setenv("QWEN_API_KEY", "test-only-key")
     factory = ModelFactory.from_settings()
+    monkeypatch.setattr(
+        factory,
+        "_api_key",
+        lambda env_name: "test-only-key" if env_name == "QWEN_API_KEY" else "",
+    )
     provider = ModelRuntimeVLMProvider(
         model_route="vision-worker",
         max_image_bytes=1_024,
@@ -154,6 +164,52 @@ def test_configured_qwen_vision_route_builds_without_network(monkeypatch) -> Non
 
     assert route.candidates[0].definition.model_id == "qwen3-vl-plus"
     assert structured.normalize_response is False
+
+
+def test_chat_profile_never_changes_the_qwen_only_vision_route(monkeypatch) -> None:
+    factory = ModelFactory.from_settings()
+    monkeypatch.setattr(
+        factory,
+        "_api_key",
+        lambda env_name: "test-only-key" if env_name == "QWEN_API_KEY" else "",
+    )
+
+    for profile in ("deepseek", "qwen", "kimi", "glm"):
+        route = factory.build_route("vision-worker", model_profile=profile)
+        assert [
+            candidate.definition.model_id for candidate in route.candidates
+        ] == ["qwen3-vl-plus"]
+
+
+async def test_glm_text_can_build_when_qwen_vision_is_not_configured(
+    monkeypatch,
+) -> None:
+    factory = ModelFactory.from_settings()
+    monkeypatch.setattr(
+        factory,
+        "_api_key",
+        lambda env_name: "test-only-key" if env_name == "GLM_API_KEY" else "",
+    )
+
+    text_model = factory.build_profile_role("glm", "utility")
+    assert text_model.candidates[0].definition.model_id == "glm-5.2"
+
+    provider = ModelRuntimeVLMProvider(
+        model_route="vision-worker",
+        max_image_bytes=1_024,
+        factory=factory,
+    )
+    with pytest.raises(VisionError) as raised:
+        await provider.analyze(
+            _asset(),
+            task="describe",
+            question=None,
+            language="auto",
+            ocr_context=None,
+        )
+
+    assert raised.value.code is VisionErrorCode.PROVIDER_UNAVAILABLE
+    assert "QWEN_API_KEY" in raised.value.message
 
 
 async def test_builds_openai_compatible_multimodal_message(monkeypatch) -> None:
@@ -343,6 +399,58 @@ async def test_invalid_structured_response_becomes_safe_vision_error(
     assert "C:/private" not in raised.value.message
 
 
+async def test_structured_output_parser_failure_is_not_reported_as_outage(
+    monkeypatch,
+) -> None:
+    factory = FakeFactory(
+        _result(),
+        invoke_error=OutputParserException("invalid schema C:/private/input.png"),
+    )
+    provider = _provider(monkeypatch, factory)
+
+    with pytest.raises(VisionError) as raised:
+        await provider.analyze(
+            _asset(),
+            task="describe",
+            question=None,
+            language="auto",
+            ocr_context=None,
+        )
+
+    assert raised.value.code is VisionErrorCode.INVALID_PROVIDER_RESPONSE
+    assert raised.value.message == "视觉模型 provider 返回了无效结构"
+    assert "C:/private" not in raised.value.message
+
+
+def test_safe_error_metadata_excludes_exception_messages_and_request_data() -> None:
+    class ProviderError(Exception):
+        status_code = 400
+        code = "invalid_parameter"
+
+    error = ProviderError("sk-secret C:/private/input.png")
+
+    assert _safe_error_metadata(error) == {
+        "error_type": "ProviderError",
+        "error_module": __name__,
+        "status_code": 400,
+        "provider_code": "invalid_parameter",
+    }
+
+    class DatabaseError(Exception):
+        orig = RuntimeError(
+            1406,
+            "Data too long for column 'provider_response_id' at row 1; "
+            "sk-secret C:/private/input.png",
+        )
+
+    assert _safe_error_metadata(DatabaseError("private")) == {
+        "error_type": "DatabaseError",
+        "error_module": __name__,
+        "database_code": "1406",
+        "database_column": "provider_response_id",
+    }
+
+
 @pytest.mark.parametrize(
     ("route_error", "build_error"),
     [
@@ -372,6 +480,6 @@ async def test_route_and_api_key_failures_become_safe_errors(
         )
 
     assert raised.value.code is VisionErrorCode.PROVIDER_UNAVAILABLE
-    assert raised.value.message == "视觉模型路由未配置或当前不可用"
+    assert raised.value.message == "视觉模型未配置或当前不可用（需要 QWEN_API_KEY）"
     assert "sk-test-secret" not in raised.value.message
     assert "C:/private" not in raised.value.message

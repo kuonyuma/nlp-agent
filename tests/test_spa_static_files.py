@@ -51,7 +51,10 @@ def test_existing_static_asset_is_served_unchanged(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.text == "console.log('ok')"
-    assert response.headers["content-type"].startswith("text/javascript")
+    assert response.headers["content-type"].split(";", 1)[0] in {
+        "application/javascript",
+        "text/javascript",
+    }
 
 
 def test_head_browser_navigation_gets_spa_shell_without_body(tmp_path) -> None:

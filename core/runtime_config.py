@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -21,6 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 BASE_CONFIG_PATH = BASE_DIR / "configs" / "agent_config.yaml"
 OVERRIDE_PATH = BASE_DIR / ".data" / "developer" / "runtime-overrides.yaml"
 RESERVED_WORKER_PROFILES = frozenset({"web_researcher", "web_reader"})
+_RUNTIME_OVERRIDE_THREAD_LOCK = threading.Lock()
 
 
 def _compatible_overrides(value: dict[str, Any]) -> dict[str, Any]:
@@ -79,26 +81,27 @@ def runtime_overrides_transaction() -> Iterator[dict[str, Any]]:
     """Serialize read-modify-write updates to the developer override file."""
     OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
     lock_path = Path(f"{OVERRIDE_PATH}.lock")
-    with lock_path.open("a+b") as lock_file:
-        if os.name == "nt":
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            overrides = load_runtime_overrides()
-            yield overrides
-            save_runtime_overrides(overrides)
-        finally:
+    with _RUNTIME_OVERRIDE_THREAD_LOCK:
+        with lock_path.open("a+b") as lock_file:
             if os.name == "nt":
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
                 lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
             else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                overrides = load_runtime_overrides()
+                yield overrides
+                save_runtime_overrides(overrides)
+            finally:
+                if os.name == "nt":
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def save_runtime_overrides(overrides: dict[str, Any]) -> None:

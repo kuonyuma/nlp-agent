@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -37,12 +38,23 @@ from server.quota.pricing import (
 
 _IMAGE_ANALYZE_PRICING_KEY = "feature/image-understanding"
 _LINK_READ_PRICING_KEY = "feature/link-read"
+_PROVIDER_RESPONSE_ID_MAX_LENGTH = 255
 
 
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _storage_safe_provider_response_id(value: str | None) -> str | None:
+    """Fit an opaque provider id into the durable schema without losing identity."""
+    if value is None or len(value) <= _PROVIDER_RESPONSE_ID_MAX_LENGTH:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    marker = ":sha256:"
+    prefix_length = _PROVIDER_RESPONSE_ID_MAX_LENGTH - len(marker) - len(digest)
+    return f"{value[:prefix_length]}{marker}{digest}"
 
 
 class DurableModelUsageReporter(ModelUsageReporter):
@@ -261,7 +273,9 @@ class DurableModelUsageReporter(ModelUsageReporter):
             "purpose": attribution.purpose,
             "provider": identity.provider,
             "provider_model": identity.provider_model,
-            "provider_response_id": usage.provider_response_id,
+            "provider_response_id": _storage_safe_provider_response_id(
+                usage.provider_response_id
+            ),
             "model_profile": identity.model_profile,
             "preset": identity.preset,
             "route": identity.route,

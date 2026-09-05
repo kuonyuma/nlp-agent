@@ -37,7 +37,7 @@ def test_monitor_network_settings_can_be_overridden_by_environment_values():
     assert runtime["allowed_origins"] == ["http://monitor.internal"]
 
 
-def test_compose_runs_mysql_migrations_before_application_services_start():
+def test_compose_runs_database_bootstrap_before_application_services_start():
     compose = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "compose.yaml").read_text(
             encoding="utf-8"
@@ -50,10 +50,74 @@ def test_compose_runs_mysql_migrations_before_application_services_start():
     assert mysql["image"] == "mysql:8.4"
     assert "ports" not in mysql
     assert mysql["healthcheck"]
-    assert migrate["command"] == [".venv/bin/python", "-m", "alembic", "upgrade", "head"]
+    assert migrate["command"] == [
+        ".venv/bin/python",
+        "main.py",
+        "bootstrap-db",
+    ]
     assert migrate["depends_on"]["mysql"]["condition"] == "service_healthy"
     for service_name in ("nova-web", "nova-worker", "nova-monitor"):
         assert (
             compose["services"][service_name]["depends_on"]["nova-migrate"]["condition"]
             == "service_completed_successfully"
         )
+
+
+def test_model_provider_api_key_settings_bind_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+    default_settings = Settings(_env_file=None)
+    assert default_settings.KIMI_API_KEY == ""
+    assert default_settings.GLM_API_KEY == ""
+
+    monkeypatch.setenv("KIMI_API_KEY", "test-kimi-key")
+    monkeypatch.setenv("GLM_API_KEY", "test-glm-key")
+    configured = Settings(_env_file=None)
+    assert configured.KIMI_API_KEY == "test-kimi-key"
+    assert configured.GLM_API_KEY == "test-glm-key"
+    assert configured._get_llm_config("worker-kimi")["api_key_env"] == "KIMI_API_KEY"
+    assert configured._get_llm_config("worker-glm")["api_key_env"] == "GLM_API_KEY"
+
+
+def test_cli_config_error_names_the_selected_provider_key(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    import configs.settings as settings_module
+    from main import check_config
+
+    monkeypatch.setattr(
+        settings_module,
+        "settings",
+        SimpleNamespace(
+            planner_llm={
+                "model_id": "glm-5.3",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "api_key_env": "GLM_API_KEY",
+                "api_key_configured": False,
+            },
+            tool_llm={"model_id": "glm-5.3"},
+        ),
+    )
+
+    assert check_config() is False
+    assert "Missing GLM_API_KEY" in capsys.readouterr().out
+
+
+def test_deployment_and_example_env_templates_include_kimi_and_glm_api_keys():
+    root = Path(__file__).resolve().parents[1]
+    templates = [
+        root / ".env-example",
+        root / "deploy" / "env" / "production.env.example",
+        root / "deploy" / "env" / "test.env.example",
+    ]
+    for template_path in templates:
+        assert template_path.exists(), f"Missing template file: {template_path}"
+        content = template_path.read_text(encoding="utf-8")
+        assert "KIMI_API_KEY" in content, f"Missing KIMI_API_KEY in {template_path}"
+        assert "GLM_API_KEY" in content, f"Missing GLM_API_KEY in {template_path}"
+
+    local_env = root / ".env"
+    if local_env.exists():
+        content = local_env.read_text(encoding="utf-8")
+        assert "KIMI_API_KEY" in content, f"Missing KIMI_API_KEY in {local_env}"
+        assert "GLM_API_KEY" in content, f"Missing GLM_API_KEY in {local_env}"
