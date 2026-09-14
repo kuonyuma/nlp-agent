@@ -28,7 +28,7 @@ from server.infrastructure.mysql.models import (
 from server.auth import code_store
 
 from .schemas import UserCreate, UserRegister, UserUpdate
-from .phone import normalize_phone_number
+from .email import normalize_email
 
 
 class UserServiceError(Exception):
@@ -43,12 +43,12 @@ class UserAlreadyExistsError(UserServiceError):
     """Raised when attempting to create a duplicate user."""
 
 
-class PhoneNumberAlreadyUsedError(UserServiceError):
-    """Raised when a phone number is already registered."""
+class EmailAlreadyUsedError(UserServiceError):
+    """Raised when an email address is already registered."""
 
 
-class InvalidSmsCodeError(UserServiceError):
-    """Raised when an SMS verification code is invalid or expired."""
+class InvalidEmailCodeError(UserServiceError):
+    """Raised when an email verification code is invalid or expired."""
 
 
 class InvalidCaptchaError(UserServiceError):
@@ -511,15 +511,15 @@ class UserService:
         self,
         data: UserRegister,
     ) -> UserModel:
-        """Register a phone account within the caller's transaction.
+        """Register an email account within the caller's transaction.
 
         This is the sole registration entry point.  The web controller only
         maps service errors to HTTP responses; all verification, identity
         normalization, account provisioning, and default-role policy live
         here.
         """
-        phone = normalize_phone_number(data.phone_number)
-        username = phone[1:]
+        email = normalize_email(data.email)
+        username = f"user{uuid.uuid4().hex[:12]}"
 
         # Consume both one-time credentials in the same request transaction.
         if not await code_store.consume_code(
@@ -530,42 +530,41 @@ class UserService:
         ):
             raise InvalidCaptchaError("Invalid or expired CAPTCHA")
         if not await code_store.consume_code(
-            self.session, kind="sms", subject=phone, code=data.sms_code
+            self.session, kind="email", subject=email, code=data.email_code
         ):
-            raise InvalidSmsCodeError("Invalid or expired verification code")
+            raise InvalidEmailCodeError("Invalid or expired verification code")
 
-        # The normalized phone column is the durable identity key. The numeric
-        # username keeps compatibility with the original phone-registration API.
+        # The normalized email column is the durable identity key.
         existing = await self.session.scalar(
             select(UserModel.id).where(
-                (UserModel.phone_number_normalized == phone)
+                (UserModel.email_normalized == email)
                 | (UserModel.username_lower == username.casefold())
             )
         )
         if existing:
-            raise PhoneNumberAlreadyUsedError("This phone number is already registered")
+            raise EmailAlreadyUsedError("This email is already registered")
 
-        display_name = (data.display_name or "").strip() or username
+        display_name = (data.display_name or "").strip() or email.split("@")[0]
         user_create = UserCreate(
             username=username,
             display_name=display_name,
             password=data.password,
         )
         user = await self.create_user(user_create)
-        user.phone_number = phone
-        user.phone_number_normalized = phone
-        user.registration_source = "phone"
+        user.email = email
+        user.email_normalized = email
+        user.registration_source = "email"
         await self.session.flush()
         await self.session.refresh(user)
         return user
 
 
 # ---------------------------------------------------------------------------
-# SMS code generation
+# Email code generation
 # ---------------------------------------------------------------------------
 
 
-def generate_sms_code() -> str:
+def generate_email_code() -> str:
     """Generate a 6-digit verification code.
 
     This is a pure random generator: persistence, the 120s expiry, single-use

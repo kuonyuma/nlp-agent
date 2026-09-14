@@ -14,7 +14,7 @@ describe("LoginDialog", () => {
     const close = vi.fn();
     render(<LoginDialog open onClose={close} onAuthenticate={authenticate} />);
 
-    fireEvent.change(screen.getByLabelText("账号"), { target: { value: "nova" } });
+    fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "nova" } });
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "test-password" } });
     fireEvent.click(screen.getByRole("button", { name: "登录并继续" }));
 
@@ -27,7 +27,7 @@ describe("LoginDialog", () => {
     const close = vi.fn();
     render(<LoginDialog open onClose={close} onAuthenticate={authenticate} />);
 
-    fireEvent.change(screen.getByLabelText("账号"), { target: { value: "nova" } });
+    fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "nova" } });
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "wrong" } });
     fireEvent.click(screen.getByRole("button", { name: "登录并继续" }));
 
@@ -80,7 +80,7 @@ it("keeps the expired dialog open when re-login credentials are wrong", async ()
     />,
   );
 
-  fireEvent.change(screen.getByLabelText("账号"), {
+  fireEvent.change(screen.getByLabelText("邮箱"), {
     target: { value: "nova" },
   });
 

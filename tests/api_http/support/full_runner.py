@@ -355,8 +355,10 @@ def _parameter_value(
         return context.username
     if normalized in {"password", "current_password", "new_password"}:
         return context.password
-    if normalized in {"phone", "phone_number"}:
-        return "13800000000"
+    if normalized in {"email"}:
+        return "probe-user@example.com"
+    if normalized in {"email_code"}:
+        return "123456"
     if normalized in {"limit"}:
         return "1"
     if normalized in {"offset"}:

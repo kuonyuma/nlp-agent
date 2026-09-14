@@ -13,7 +13,10 @@ from alembic.script import ScriptDirectory
 def test_migration_graph_has_one_head_after_all_feature_branches_are_merged() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert scripts.get_heads() == ["20260912_54_usage_cache_fix"]
+    assert scripts.get_heads() == ["20260914_55_email_registration"]
+    assert scripts.get_revision("20260914_55_email_registration").down_revision == (
+        "20260912_54_usage_cache_fix"
+    )
     assert scripts.get_revision("20260912_54_usage_cache_fix").down_revision == (
         "20260910_53_whiteboard_library"
     )

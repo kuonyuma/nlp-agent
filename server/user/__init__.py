@@ -5,9 +5,9 @@ integrated with the existing RBAC infrastructure.
 """
 
 from server.user.service import (
+    EmailAlreadyUsedError,
     InvalidCaptchaError,
-    InvalidSmsCodeError,
-    PhoneNumberAlreadyUsedError,
+    InvalidEmailCodeError,
     UserAlreadyExistsError,
     UserService,
     UserServiceError,
@@ -23,9 +23,9 @@ __all__ = [
     "UserService",
     "UserServiceError",
     "UserAlreadyExistsError",
-    "PhoneNumberAlreadyUsedError",
+    "EmailAlreadyUsedError",
     "InvalidCaptchaError",
-    "InvalidSmsCodeError",
+    "InvalidEmailCodeError",
     "UserCreate",
     "UserUpdate",
     "UserResponse",

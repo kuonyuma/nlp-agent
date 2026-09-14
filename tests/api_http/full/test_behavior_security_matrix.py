@@ -32,7 +32,7 @@ _PUBLIC_WEB = {
     ("GET", "/api/v1/auth/captcha"),
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/register"),
-    ("POST", "/api/v1/auth/sms/send"),
+    ("POST", "/api/v1/auth/email/send"),
     ("POST", "/api/v1/auth/guest"),
 }
 _COOKIE_EXEMPT_WEB = {

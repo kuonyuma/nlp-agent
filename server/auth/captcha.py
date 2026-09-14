@@ -1,6 +1,6 @@
 """Self-hosted image CAPTCHA generation.
 
-Generates distorted text images to prevent automated registration / SMS abuse.
+Generates distorted text images to prevent automated registration / email abuse.
 Each captcha is identified by a UUID; the answer is stored in the shared
 ``nlp_auth_codes`` table (see :mod:`server.auth.code_store`) so that
 verification works across multiple server instances.

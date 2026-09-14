@@ -377,15 +377,15 @@ export const api = {
   // ---------------------------------------------------------------------------
   getCaptcha: () =>
     request<{ captcha_id: string; image: string }>("/auth/captcha"),
-  register: (data: { phone_number: string; sms_code: string; password: string; display_name?: string; captcha_id: string; captcha_code: string }) =>
+  register: (data: { email: string; email_code: string; password: string; display_name?: string; captcha_id: string; captcha_code: string }) =>
     request<UserProfile>("/auth/register", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  sendSmsCode: (phoneNumber: string, captchaId: string, captchaCode: string) =>
-    request<{ message: string }>("/auth/sms/send", {
+  sendEmailCode: (email: string, captchaId: string, captchaCode: string) =>
+    request<{ message: string }>("/auth/email/send", {
       method: "POST",
-      body: JSON.stringify({ phone_number: phoneNumber, captcha_id: captchaId, captcha_code: captchaCode }),
+      body: JSON.stringify({ email, captcha_id: captchaId, captcha_code: captchaCode }),
     }),
 
   // ---------------------------------------------------------------------------

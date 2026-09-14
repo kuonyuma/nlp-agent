@@ -41,7 +41,7 @@ describe("LoginPage", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.change(screen.getByLabelText("用户名"), { target: { value: "new-user" } });
+    fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "new-user" } });
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "password" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "登录" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "登录" }));

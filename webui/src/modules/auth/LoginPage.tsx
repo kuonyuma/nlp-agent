@@ -90,10 +90,10 @@ function LoginForm({ returnPath }: { returnPath: string }) {
       )}
 
       <div>
-        <label htmlFor="login-username" className="block text-sm font-medium text-gray-700">用户名</label>
-        <input id="login-username" type="text" required autoComplete="username" autoFocus
+        <label htmlFor="login-email" className="block text-sm font-medium text-gray-700">邮箱</label>
+        <input id="login-email" type="text" required autoComplete="username" autoFocus
           value={username} onChange={(e) => setUsername(e.target.value)}
-          disabled={submitting} className={inputCls} />
+          disabled={submitting} placeholder="请输入邮箱" className={inputCls} />
       </div>
 
       <div>
@@ -116,30 +116,30 @@ function LoginForm({ returnPath }: { returnPath: string }) {
 // ---------------------------------------------------------------------------
 
 function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
-  const [phone, setPhone] = useState("");
-  const [smsCode, setSmsCode] = useState("");
+  const [email, setEmail] = useState("");
+  const [emailCode, setEmailCode] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [smsSending, setSmsSending] = useState(false);
-  const [smsCooldown, setSmsCooldown] = useState(0);
-  const [smsSent, setSmsSent] = useState(false);
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailCooldown, setEmailCooldown] = useState(0);
+  const [emailSent, setEmailSent] = useState(false);
 
-  const [smsCaptchaId, setSmsCaptchaId] = useState("");
-  const [smsCaptchaImage, setSmsCaptchaImage] = useState("");
-  const [smsCaptchaCode, setSmsCaptchaCode] = useState("");
+  const [emailCaptchaId, setEmailCaptchaId] = useState("");
+  const [emailCaptchaImage, setEmailCaptchaImage] = useState("");
+  const [emailCaptchaCode, setEmailCaptchaCode] = useState("");
   const [regCaptchaId, setRegCaptchaId] = useState("");
   const [regCaptchaImage, setRegCaptchaImage] = useState("");
   const [regCaptchaCode, setRegCaptchaCode] = useState("");
 
-  const loadCaptcha = useCallback(async (target: "sms" | "reg") => {
+  const loadCaptcha = useCallback(async (target: "email" | "reg") => {
     try {
       const resp = await api.getCaptcha();
-      if (target === "sms") {
-        setSmsCaptchaId(resp.captcha_id);
-        setSmsCaptchaImage(resp.image);
+      if (target === "email") {
+        setEmailCaptchaId(resp.captcha_id);
+        setEmailCaptchaImage(resp.image);
       } else {
         setRegCaptchaId(resp.captcha_id);
         setRegCaptchaImage(resp.image);
@@ -149,44 +149,44 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
     }
   }, []);
 
-  useEffect(() => { void loadCaptcha("sms"); }, [loadCaptcha]); // eslint-disable-line react-hooks/set-state-in-effect
+  useEffect(() => { void loadCaptcha("email"); }, [loadCaptcha]); // eslint-disable-line react-hooks/set-state-in-effect
 
   const sendCode = async () => {
-    if (!phone.trim() || smsSending || smsCooldown > 0 || !smsCaptchaCode.trim()) return;
-    setSmsSending(true);
+    if (!email.trim() || emailSending || emailCooldown > 0 || !emailCaptchaCode.trim()) return;
+    setEmailSending(true);
     setError("");
     try {
-      await api.sendSmsCode(phone.trim(), smsCaptchaId, smsCaptchaCode.trim());
-      setSmsCooldown(60);
-      setSmsSent(true);
+      await api.sendEmailCode(email.trim(), emailCaptchaId, emailCaptchaCode.trim());
+      setEmailCooldown(60);
+      setEmailSent(true);
       // 保留用户已输入的图片验证码字符串，不在此处清空
       await loadCaptcha("reg");
       const timer = setInterval(() => {
-        setSmsCooldown((prev) => {
+        setEmailCooldown((prev) => {
           if (prev <= 1) { clearInterval(timer); return 0; }
           return prev - 1;
         });
       }, 1000);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "发送验证码失败");
-      await loadCaptcha("sms");
-      setSmsCaptchaCode("");
+      await loadCaptcha("email");
+      setEmailCaptchaCode("");
     } finally {
-      setSmsSending(false);
+      setEmailSending(false);
     }
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!phone.trim() || !smsCode || !password || !regCaptchaCode.trim() || submitting) return;
+    if (!email.trim() || !emailCode || !password || !regCaptchaCode.trim() || submitting) return;
     if (password !== confirmPassword) { setError("两次输入的密码不一致"); return; }
     if (password.length < 8) { setError("密码至少8位"); return; }
     setSubmitting(true);
     setError("");
     try {
       await api.register({
-        phone_number: phone.trim(),
-        sms_code: smsCode.trim(),
+        email: email.trim(),
+        email_code: emailCode.trim(),
         password,
         display_name: displayName.trim() || undefined,
         captcha_id: regCaptchaId,
@@ -210,44 +210,44 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
       {error && <div className="rounded bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
       <div>
-        <label htmlFor="reg-phone" className="block text-sm font-medium text-gray-700">手机号</label>
-        <input id="reg-phone" type="tel" autoComplete="tel" autoFocus required value={phone}
-          onChange={(e) => setPhone(e.target.value)} disabled={submitting} placeholder="请输入手机号" maxLength={20} className={inputCls} />
+        <label htmlFor="reg-email" className="block text-sm font-medium text-gray-700">邮箱</label>
+        <input id="reg-email" type="email" autoComplete="email" autoFocus required value={email}
+          onChange={(e) => setEmail(e.target.value)} disabled={submitting} placeholder="请输入邮箱" maxLength={254} className={inputCls} />
       </div>
 
-      {/* CAPTCHA for SMS */}
+      {/* CAPTCHA for email code */}
       <div>
         <label className="block text-sm font-medium text-gray-700">图片验证码</label>
         <div className="mt-1 flex items-center gap-2">
-          <input type="text" required value={smsCaptchaCode}
-            onChange={(e) => setSmsCaptchaCode(e.target.value)} disabled={submitting}
+          <input type="text" required value={emailCaptchaCode}
+            onChange={(e) => setEmailCaptchaCode(e.target.value)} disabled={submitting}
             placeholder="输入图中字符" maxLength={10} className={inputCls} />
-          {smsCaptchaImage && (
-            <img src={smsCaptchaImage} alt="验证码" className={captchaImgCls}
-              onClick={() => void loadCaptcha("sms")} title="点击刷新" />
+          {emailCaptchaImage && (
+            <img src={emailCaptchaImage} alt="验证码" className={captchaImgCls}
+              onClick={() => void loadCaptcha("email")} title="点击刷新" />
           )}
-          <button type="button" onClick={() => void loadCaptcha("sms")}
+          <button type="button" onClick={() => void loadCaptcha("email")}
             className="shrink-0 rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600" title="刷新">
             <RefreshCw size={16} />
           </button>
         </div>
       </div>
 
-      {/* SMS code */}
+      {/* Email code */}
       <div>
-        <label className="block text-sm font-medium text-gray-700">短信验证码</label>
+        <label className="block text-sm font-medium text-gray-700">邮箱验证码</label>
         <div className="mt-1 flex gap-2">
-          <input type="text" required value={smsCode}
-            onChange={(e) => setSmsCode(e.target.value)} disabled={submitting || !smsSent}
+          <input type="text" required value={emailCode}
+            onChange={(e) => setEmailCode(e.target.value)} disabled={submitting || !emailSent}
             placeholder="6位验证码" maxLength={8} className={inputCls} />
           <button type="button" onClick={sendCode}
-            disabled={smsSending || smsCooldown > 0 || !phone.trim() || !smsCaptchaCode.trim()}
+            disabled={emailSending || emailCooldown > 0 || !email.trim() || !emailCaptchaCode.trim()}
             className="shrink-0 whitespace-nowrap rounded-md border border-gray-300 px-3 py-2 text-xs font-medium text-white transition-colors disabled:cursor-not-allowed"
             style={{
-              background: smsCooldown > 0 ? "#f3f4f6" : "#3b82f6",
-              color: smsCooldown > 0 ? "#6b7280" : "#fff",
+              background: emailCooldown > 0 ? "#f3f4f6" : "#3b82f6",
+              color: emailCooldown > 0 ? "#6b7280" : "#fff",
             }}>
-            {smsSending ? "发送中..." : smsCooldown > 0 ? `${smsCooldown}s` : "发送验证码"}
+            {emailSending ? "发送中..." : emailCooldown > 0 ? `${emailCooldown}s` : "发送验证码"}
           </button>
         </div>
       </div>
@@ -271,7 +271,7 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
       </div>
 
       {/* CAPTCHA for registration */}
-      {smsSent && regCaptchaImage && (
+      {emailSent && regCaptchaImage && (
         <div>
           <label className="block text-sm font-medium text-gray-700">注册验证</label>
           <div className="mt-1 flex items-center gap-2">
@@ -288,7 +288,7 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
         </div>
       )}
 
-      <button type="submit" disabled={submitting || !phone.trim() || !smsCode || !password || !regCaptchaCode.trim()}
+      <button type="submit" disabled={submitting || !email.trim() || !emailCode || !password || !regCaptchaCode.trim()}
         className="w-full rounded-md bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors">
         {submitting ? "注册中..." : "注册"}
       </button>
