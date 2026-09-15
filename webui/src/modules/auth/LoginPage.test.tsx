@@ -98,7 +98,7 @@ describe("LoginPage", () => {
     fireEvent.change(await screen.findByPlaceholderText("输入图中字符"), { target: { value: "ABCD" } });
 
     const captcha = await screen.findByAltText("验证码");
-    expect(captcha).toHaveClass("h-12", "w-32");
+    expect(captcha).toHaveClass("h-16", "w-40");
     fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
     expect(email).toBeDisabled();
     finishSending();

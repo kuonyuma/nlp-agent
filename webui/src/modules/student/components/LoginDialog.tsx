@@ -318,7 +318,7 @@ function RegisterForm({
             <img
               src={emailCaptchaImage}
               alt="验证码"
-              style={{ width: 128, height: 48, flexShrink: 0, objectFit: "cover", borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
+              style={{ width: 160, height: 64, flexShrink: 0, objectFit: "cover", borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
               onClick={() => void loadCaptcha("email")}
               title="点击刷新"
             />
@@ -421,7 +421,7 @@ function RegisterForm({
               <img
                 src={regCaptchaImage}
                 alt="注册验证码"
-                style={{ width: 128, height: 48, flexShrink: 0, objectFit: "cover", borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
+                style={{ width: 160, height: 64, flexShrink: 0, objectFit: "cover", borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
                 onClick={() => void loadCaptcha("reg")}
                 title="点击刷新"
               />

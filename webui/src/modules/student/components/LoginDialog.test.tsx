@@ -55,7 +55,7 @@ describe("LoginDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "立即注册" }));
 
     const captcha = await screen.findByAltText("验证码");
-    expect(captcha).toHaveStyle({ width: "128px", height: "48px" });
+    expect(captcha).toHaveStyle({ width: "160px", height: "64px" });
   });
 
   it("locks email while sending and refreshes consumed captcha after an email change", async () => {
