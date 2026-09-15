@@ -30,7 +30,11 @@ _FONT_SIZE = 48
 
 
 def _random_color(low: int = 30, high: int = 150) -> tuple[int, int, int]:
-    return (random.randint(low, high), random.randint(low, high), random.randint(low, high))
+    return (
+        random.randint(low, high),
+        random.randint(low, high),
+        random.randint(low, high),
+    )
 
 
 def generate_captcha_image() -> tuple[str, str, str]:
@@ -53,9 +57,11 @@ def generate_captcha_image() -> tuple[str, str, str]:
         font = ImageFont.truetype("arial.ttf", _FONT_SIZE)
     except (OSError, IOError):
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _FONT_SIZE)
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _FONT_SIZE
+            )
         except (OSError, IOError):
-            font = ImageFont.load_default()
+            font = ImageFont.load_default(size=_FONT_SIZE)
 
     # Draw each character with random rotation and position
     x_offset = 12
