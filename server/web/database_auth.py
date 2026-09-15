@@ -33,26 +33,12 @@ from server.infrastructure.mysql.models import (
     WsTicketModel,
 )
 from server.user.service import PasswordHasherSingleton
-from server.user.phone import InvalidPhoneNumberError, normalize_phone_number
 from server.sandbox.service import sandbox_lifecycle_service
 from server.web.auth import AuthenticationError, CsrfRejectedError, OriginRejectedError
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def _phone_variants(identifier: str) -> list[str]:
-    """Plausible stored forms of *identifier* when it looks like a phone number.
-
-    Registration stores one canonical E.164 value, so login uses the same
-    identity regardless of spacing, punctuation or domestic ``+86`` prefix.
-    Returns ``[]`` for inputs that are not phone-shaped.
-    """
-    try:
-        return [normalize_phone_number(identifier)]
-    except InvalidPhoneNumberError:
-        return []
 
 
 @dataclass(frozen=True)
@@ -220,12 +206,12 @@ class DatabaseSessionAuth:
             raise AuthenticationError("too many login attempts")
 
         async with factory.begin() as session:
-            # 主登录入口同时接受用户名与规范化手机号。手机号命中唯一的
-            # ``phone_number_normalized`` 索引，避免多种原始格式产生歧义。
-            identity_criteria = UserModel.username_lower == normalized
-            phone_variants = _phone_variants(username)
-            if phone_variants:
-                identity_criteria = identity_criteria | UserModel.phone_number_normalized.in_(phone_variants)
+            # 主登录入口同时接受用户名与规范化邮箱。邮箱命中唯一的
+            # ``email_normalized`` 索引；预置/后台账号仍可用用户名登录。
+            identity_criteria = (
+                (UserModel.username_lower == normalized)
+                | (UserModel.email_normalized == normalized)
+            )
             user = await session.scalar(
                 select(UserModel)
                 .where(

@@ -674,7 +674,7 @@ def _safe_child_environment(
     ):
         child.pop(key, None)
     for key in list(child):
-        if key.startswith("TENCENT_SMS_"):
+        if key.startswith(("TENCENT_SMS_", "NLP_AGENT_SMTP_")):
             child.pop(key, None)
     child.update(
         {
@@ -703,11 +703,11 @@ def _safe_child_environment(
             "NLP_AGENT_API_HTTP_RUNTIME_OVERRIDES": str(uploads_root.parent / "runtime-overrides.yaml"),
             "NLP_AGENT_API_HTTP_SKILLS_ROOT": str(uploads_root.parent / ".data" / "skills"),
             "NLP_AGENT_API_HTTP_MCP_STUB": "1",
-            "NLP_AGENT_API_HTTP_SMS_PROVIDER": "stub",
-            # The application normalizes domestic numbers to E.164 before
-            # invoking the provider, so the deterministic failure prefix is
-            # expressed in that canonical form too.
-            "NLP_AGENT_API_HTTP_SMS_FAILURE_PREFIX": "+86131",
+            "NLP_AGENT_API_HTTP_EMAIL_PROVIDER": "stub",
+            # The deterministic stub fails delivery for any address that starts
+            # with this prefix, so the gateway-error path can be exercised
+            # without a real SMTP server.
+            "NLP_AGENT_API_HTTP_EMAIL_FAILURE_PREFIX": "fail",
             "DEEPSEEK_API_KEY": "",
             "QWEN_API_KEY": "",
             "NLP_AGENT_AUTH_USERNAME": "",

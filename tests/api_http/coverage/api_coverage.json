@@ -10,7 +10,7 @@
     {"service": "web","method": "GET","path": "/api/v1/auth/session","tiers": ["smoke","full"]},
     {"service": "web","method": "GET","path": "/api/v1/auth/sessions","tiers": ["core","full"]},
     {"service": "web","method": "DELETE","path": "/api/v1/auth/sessions/{session_id}","tiers": ["core","full"]},
-    {"service": "web","method": "POST","path": "/api/v1/auth/sms/send","tiers": ["core","full"]},
+    {"service": "web","method": "POST","path": "/api/v1/auth/email/send","tiers": ["core","full"]},
     {"service": "web","method": "POST","path": "/api/v1/auth/ws-ticket","tiers": ["smoke","full"]},
     {"service": "web","method": "POST","path": "/api/v1/chat/injections","tiers": ["full"]},
     {"service": "web","method": "POST","path": "/api/v1/chat/turns","tiers": ["async_core","full"]},

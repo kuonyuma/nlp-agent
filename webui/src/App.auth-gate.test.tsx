@@ -59,7 +59,7 @@ describe("student authentication gate", () => {
     screen.getByRole("button", { name: "发送" }).click();
     await screen.findByRole("heading", { name: "登录 Nova" });
 
-    fireEvent.change(screen.getByLabelText("账号"), { target: { value: "user-1" } });
+    fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "user-1" } });
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "password" } });
     screen.getByRole("button", { name: "登录并继续" }).click();
 

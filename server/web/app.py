@@ -169,22 +169,22 @@ from server.web.feedback import (
 from server.auth.dependencies import get_db_session
 from server.auth import code_store
 from server.auth.captcha import generate_captcha_image
-from server.user.schemas import SmsCodeRequest, UserRegister
+from server.user.schemas import EmailCodeRequest, UserRegister
 from server.user.service import (
+    EmailAlreadyUsedError,
     InvalidCaptchaError,
-    InvalidSmsCodeError,
-    PhoneNumberAlreadyUsedError,
+    InvalidEmailCodeError,
     UserAlreadyExistsError,
     UserService,
-    generate_sms_code,
+    generate_email_code,
 )
-from server.user.tencent_sms import (
-    SmsConfigurationError,
-    create_tencent_sms_provider_from_env,
-    development_sms_code_logging_enabled,
-    mask_phone_for_logging,
+from server.user.email_provider import (
+    EmailConfigurationError,
+    create_email_provider_from_env,
+    development_email_code_logging_enabled,
+    mask_email_for_logging,
 )
-from server.user.phone import InvalidPhoneNumberError, normalize_phone_number
+from server.user.email import InvalidEmailError, normalize_email
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
@@ -954,7 +954,7 @@ def create_app(
 
     @app.get("/api/v1/auth/captcha", tags=["auth"])
     async def get_captcha(db: DbSession):
-        """Generate a CAPTCHA image for registration/SMS verification.
+        """Generate a CAPTCHA image for registration/email verification.
 
         The answer is persisted in ``nlp_auth_codes`` (shared across all
         instances) with a short TTL; verification goes through
@@ -970,16 +970,15 @@ def create_app(
         )
         return {"captcha_id": captcha_id, "image": image_data}
 
-    @app.post("/api/v1/auth/sms/send", status_code=status.HTTP_200_OK, tags=["auth"])
-    async def send_sms_code(body: SmsCodeRequest, db: DbSession, request: Request):
-        """Validate the image CAPTCHA, then issue an SMS verification code.
+    @app.post("/api/v1/auth/email/send", status_code=status.HTTP_200_OK, tags=["auth"])
+    async def send_email_code(body: EmailCodeRequest, db: DbSession, request: Request):
+        """Validate the image CAPTCHA, then issue an email verification code.
 
         Server-side controls (the frontend 60s countdown is UX only):
         - the CAPTCHA answer is consumed single-use from ``nlp_auth_codes``;
-          - per-phone cooldown / per-phone hourly / per-IP hourly send limits;
-          - real delivery via Tencent Cloud SMS when ``TENCENT_SMS_*`` env vars
-            are configured; missing production configuration returns 503 and
-            never prints the verification code;
+          - per-email cooldown / per-email hourly / per-IP hourly send limits;
+          - real delivery via the configured SMTP provider; missing production
+            configuration returns 503 and never prints the verification code;
         - the code is stored hashed with a hard 120s expiry enforced at
           consumption time.
         """
@@ -992,40 +991,40 @@ def create_app(
                 detail="Invalid or expired CAPTCHA",
             )
         try:
-            phone = normalize_phone_number(body.phone_number)
-        except InvalidPhoneNumberError as error:
+            email = normalize_email(body.email)
+        except InvalidEmailError as error:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
         client_ip = request.client.host if request.client else None
         try:
-            async with code_store.sms_send_lock(db, phone):
-                allowed, reason = await code_store.sms_send_allowed(db, phone=phone, client_ip=client_ip)
+            async with code_store.email_send_lock(db, email):
+                allowed, reason = await code_store.email_send_allowed(db, email=email, client_ip=client_ip)
                 if not allowed:
                     raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason)
-                code = generate_sms_code()
-                provider = create_tencent_sms_provider_from_env()
+                code = generate_email_code()
+                provider = create_email_provider_from_env()
                 if provider is not None:
-                    if not await provider.send_verification_code(phone, code):
-                        await code_store.record_sms_send(db, phone=phone, client_ip=client_ip, outcome="failed")
-                        return JSONResponse({"detail": "SMS gateway failed to deliver the code"}, status_code=status.HTTP_502_BAD_GATEWAY)
+                    if not await provider.send_verification_code(email, code):
+                        await code_store.record_email_send(db, email=email, client_ip=client_ip, outcome="failed")
+                        return JSONResponse({"detail": "Email gateway failed to deliver the code"}, status_code=status.HTTP_502_BAD_GATEWAY)
                 else:
-                    if development_sms_code_logging_enabled():
+                    if development_email_code_logging_enabled():
                         logger.warning(
-                            "[SMS] Development verification code for %s: %s",
-                            mask_phone_for_logging(phone),
+                            "[EMAIL] Development verification code for %s: %s",
+                            mask_email_for_logging(email),
                             code,
                         )
                     else:
                         logger.warning(
-                            "[SMS] Development verification code generated for %s; code omitted from logs",
-                            mask_phone_for_logging(phone),
+                            "[EMAIL] Development verification code generated for %s; code omitted from logs",
+                            mask_email_for_logging(email),
                         )
-                await code_store.record_sms_send(db, phone=phone, client_ip=client_ip, outcome="sent")
-                await code_store.put_code(db, kind="sms", subject=phone, code=code, ttl_s=code_store.SMS_CODE_TTL_S, client_ip=client_ip)
+                await code_store.record_email_send(db, email=email, client_ip=client_ip, outcome="sent")
+                await code_store.put_code(db, kind="email", subject=email, code=code, ttl_s=code_store.EMAIL_CODE_TTL_S, client_ip=client_ip)
         except TimeoutError as error:
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="sms_send_busy") from error
-        except SmsConfigurationError as error:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="email_send_busy") from error
+        except EmailConfigurationError as error:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
-        return {"message": "SMS code sent successfully"}
+        return {"message": "Email code sent successfully"}
 
     @app.post("/api/v1/auth/login", status_code=status.HTTP_200_OK, tags=["auth"])
     async def login(body: LoginBody, request: Request, response: Response):
@@ -1110,7 +1109,7 @@ def create_app(
 
     @app.post("/api/v1/auth/register", status_code=status.HTTP_201_CREATED, tags=["auth"])
     async def register_user(body: UserRegister, db: DbSession):
-        """Register a phone account through the unified user service."""
+        """Register an email account through the unified user service."""
         service = UserService(db)
         try:
             user = await service.register_user(body)
@@ -1118,15 +1117,15 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
             ) from error
-        except InvalidSmsCodeError as error:
+        except InvalidEmailCodeError as error:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
             ) from error
-        except (PhoneNumberAlreadyUsedError, UserAlreadyExistsError) as error:
+        except (EmailAlreadyUsedError, UserAlreadyExistsError) as error:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail=str(error)
             ) from error
-        except InvalidPhoneNumberError as error:
+        except InvalidEmailError as error:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
         return {
             "message": "User registered successfully",

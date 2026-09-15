@@ -138,17 +138,17 @@ async def test_new_user_is_persisted_with_guest_role(mysql_session_factory) -> N
 
 
 @pytest.mark.asyncio
-async def test_phone_registration_uses_unified_service_transaction(
+async def test_email_registration_uses_unified_service_transaction(
     mysql_session_factory, monkeypatch
 ) -> None:
     consume_code = AsyncMock(side_effect=[True, True])
     monkeypatch.setattr(code_store, "consume_code", consume_code)
-    phone = f"+86139{uuid4().int % 10**8:08d}"
+    email = f"user{uuid4().hex[:10]}@example.com"
     data = UserRegister(
-        phone_number=phone,
-        sms_code="123456",
+        email=email,
+        email_code="123456",
         password="InitialPw0rd1",
-        display_name="Phone user",
+        display_name="Email user",
         captcha_id="captcha-test",
         captcha_code="ABCD",
     )
@@ -156,15 +156,16 @@ async def test_phone_registration_uses_unified_service_transaction(
     async with mysql_session_factory() as session:
         async with session.begin():
             user = await UserService(session).register_user(data)
-            assert user.username == "".join(ch for ch in phone if ch.isdigit())
-            assert user.phone_number == phone
-            assert user.registration_source == "phone"
+            assert user.username.startswith("user")
+            assert user.email == email
+            assert user.email_normalized == email
+            assert user.registration_source == "email"
             assert await rbac_service.roles_for(session, user.id) == frozenset({"guest"})
 
     assert consume_code.await_count == 2
     assert [call.kwargs["kind"] for call in consume_code.await_args_list] == [
         "captcha",
-        "sms",
+        "email",
     ]
 
 
