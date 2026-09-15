@@ -1093,7 +1093,7 @@ class AuthCodeModel(Base):
 
     id: Mapped[str] = mapped_column(UUID, primary_key=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    subject: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject: Mapped[str] = mapped_column(String(254), nullable=False)
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, index=True)
     client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)

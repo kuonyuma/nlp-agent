@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import smtplib
 from email.mime.text import MIMEText
-from typing import Optional
+from typing import Optional, Protocol
+
+from configs.settings import auth_env_bool, auth_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +42,11 @@ def mask_email_for_logging(email: str) -> str:
 
 def development_email_code_logging_enabled() -> bool:
     """Return whether a local developer explicitly opted into code logging."""
-    return os.getenv("NLP_AGENT_EMAIL_EXPOSE_CODE", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return auth_env_bool("NLP_AGENT_EMAIL_EXPOSE_CODE", False)
+
+
+class EmailProvider(Protocol):
+    async def send_verification_code(self, email: str, code: str) -> bool: ...
 
 
 class SmtpEmailProvider:
@@ -127,32 +127,39 @@ class EmailConfigurationError(RuntimeError):
     """Raised when production email delivery has not been configured."""
 
 
-def create_email_provider_from_env() -> Optional[SmtpEmailProvider]:
+def create_email_provider_from_env() -> Optional[EmailProvider]:
     """Create an SMTP email provider from environment variables.
 
     Returns a provider when SMTP credentials are present, a deterministic stub
     for the HTTP test environment, or ``None`` when development mode is on.
     """
-    if os.getenv("NLP_AGENT_API_HTTP_EMAIL_PROVIDER", "").strip().lower() == "stub":
+    if (auth_env_value("NLP_AGENT_API_HTTP_EMAIL_PROVIDER", "") or "").strip().lower() == "stub":
         return DeterministicEmailProvider(
-            failure_prefix=os.getenv("NLP_AGENT_API_HTTP_EMAIL_FAILURE_PREFIX", "").strip()
+            failure_prefix=(
+                auth_env_value("NLP_AGENT_API_HTTP_EMAIL_FAILURE_PREFIX", "") or ""
+            ).strip()
         )
 
-    host = os.getenv("NLP_AGENT_SMTP_HOST")
-    username = os.getenv("NLP_AGENT_SMTP_USER")
-    password = os.getenv("NLP_AGENT_SMTP_PASSWORD")
-    sender = os.getenv("NLP_AGENT_SMTP_FROM")
-    port = int(os.getenv("NLP_AGENT_SMTP_PORT", "465"))
-    security = os.getenv("NLP_AGENT_SMTP_SECURITY", "ssl").strip().lower()
+    host = auth_env_value("NLP_AGENT_SMTP_HOST")
+    username = auth_env_value("NLP_AGENT_SMTP_USER")
+    password = auth_env_value("NLP_AGENT_SMTP_PASSWORD")
+    sender = auth_env_value("NLP_AGENT_SMTP_FROM")
+    raw_port = auth_env_value("NLP_AGENT_SMTP_PORT", "465") or "465"
+    security = (auth_env_value("NLP_AGENT_SMTP_SECURITY", "ssl") or "ssl").strip().lower()
+
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise EmailConfigurationError("NLP_AGENT_SMTP_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise EmailConfigurationError("NLP_AGENT_SMTP_PORT must be between 1 and 65535")
+    if security not in {"ssl", "starttls", "none"}:
+        raise EmailConfigurationError(
+            "NLP_AGENT_SMTP_SECURITY must be one of: ssl, starttls, none"
+        )
 
     if not all([host, username, password, sender]):
-        development = os.getenv("NLP_AGENT_EMAIL_DEVELOPMENT_MODE", "false").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        if development:
+        if auth_env_bool("NLP_AGENT_EMAIL_DEVELOPMENT_MODE", False):
             return None
         raise EmailConfigurationError(
             "Email delivery is not configured; set NLP_AGENT_SMTP_* or explicitly enable NLP_AGENT_EMAIL_DEVELOPMENT_MODE"

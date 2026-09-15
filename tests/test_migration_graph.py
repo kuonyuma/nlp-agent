@@ -9,6 +9,8 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 
+from server.infrastructure.mysql.models import AuthCodeModel
+
 
 def test_migration_graph_has_one_head_after_all_feature_branches_are_merged() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
@@ -103,6 +105,40 @@ def test_migration_revision_ids_fit_alembic_version_column() -> None:
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
 
     assert all(len(revision.revision) <= 32 for revision in scripts.walk_revisions())
+
+
+def test_auth_code_subject_accepts_full_length_email_addresses() -> None:
+    assert AuthCodeModel.__table__.c.subject.type.length == 254
+
+
+def test_email_registration_migration_expands_auth_code_subject(monkeypatch) -> None:
+    migration = importlib.import_module(
+        "migrations.versions.20260914_55_email_registration"
+    )
+    alterations: list[tuple[str, str, dict[str, object]]] = []
+    fake_op = SimpleNamespace(
+        alter_column=lambda table, column, **kwargs: alterations.append(
+            (table, column, kwargs)
+        ),
+        execute=lambda statement: None,
+    )
+    monkeypatch.setattr(migration, "op", fake_op)
+    monkeypatch.setattr(migration, "_user_columns", lambda: {"email", "email_normalized"})
+    monkeypatch.setattr(
+        migration,
+        "_has_table",
+        lambda name: name
+        in {"nlp_auth_codes", "nlp_email_send_audits", "nlp_email_send_locks"},
+    )
+
+    migration.upgrade()
+
+    assert len(alterations) == 1
+    table, column, options = alterations[0]
+    assert (table, column) == ("nlp_auth_codes", "subject")
+    assert options["existing_type"].length == 64
+    assert options["type_"].length == 254
+    assert options["existing_nullable"] is False
 
 
 def test_usage_cache_backfill_repairs_only_provable_legacy_facts(

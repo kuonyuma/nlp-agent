@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import { useAuth } from "@/platform/auth/AuthContext";
@@ -133,10 +133,13 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
   const [regCaptchaId, setRegCaptchaId] = useState("");
   const [regCaptchaImage, setRegCaptchaImage] = useState("");
   const [regCaptchaCode, setRegCaptchaCode] = useState("");
+  const captchaRequestVersion = useRef({ email: 0, reg: 0 });
 
   const loadCaptcha = useCallback(async (target: "email" | "reg") => {
+    const requestVersion = ++captchaRequestVersion.current[target];
     try {
       const resp = await api.getCaptcha();
+      if (requestVersion !== captchaRequestVersion.current[target]) return true;
       if (target === "email") {
         setEmailCaptchaId(resp.captcha_id);
         setEmailCaptchaImage(resp.image);
@@ -144,12 +147,44 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
         setRegCaptchaId(resp.captcha_id);
         setRegCaptchaImage(resp.image);
       }
+      return true;
     } catch {
-      // user can click refresh to retry
+      if (requestVersion !== captchaRequestVersion.current[target]) return true;
+      if (target === "email") {
+        setEmailCaptchaId("");
+        setEmailCaptchaImage("");
+      } else {
+        setRegCaptchaId("");
+        setRegCaptchaImage("");
+      }
+      return false;
     }
   }, []);
 
   useEffect(() => { void loadCaptcha("email"); }, [loadCaptcha]); // eslint-disable-line react-hooks/set-state-in-effect
+
+  useEffect(() => {
+    if (emailCooldown <= 0) return;
+    const timer = window.setTimeout(() => setEmailCooldown((value) => Math.max(0, value - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [emailCooldown]);
+
+  const changeEmail = (value: string) => {
+    const mustRefreshConsumedCaptcha = emailSent;
+    setEmail(value);
+    setError("");
+    setEmailSent(false);
+    setEmailCode("");
+    setRegCaptchaId("");
+    setRegCaptchaImage("");
+    setRegCaptchaCode("");
+    if (mustRefreshConsumedCaptcha) {
+      setEmailCaptchaId("");
+      setEmailCaptchaImage("");
+      setEmailCaptchaCode("");
+      void loadCaptcha("email");
+    }
+  };
 
   const sendCode = async () => {
     if (!email.trim() || emailSending || emailCooldown > 0 || !emailCaptchaCode.trim()) return;
@@ -160,13 +195,9 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
       setEmailCooldown(60);
       setEmailSent(true);
       // 保留用户已输入的图片验证码字符串，不在此处清空
-      await loadCaptcha("reg");
-      const timer = setInterval(() => {
-        setEmailCooldown((prev) => {
-          if (prev <= 1) { clearInterval(timer); return 0; }
-          return prev - 1;
-        });
-      }, 1000);
+      if (!(await loadCaptcha("reg"))) {
+        setError("邮箱验证码已发送，但注册验证码加载失败，请点击刷新重试。");
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "发送验证码失败");
       await loadCaptcha("email");
@@ -203,7 +234,7 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
   };
 
   const inputCls = "mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-50";
-  const captchaImgCls = "h-9 rounded border border-gray-300 cursor-pointer";
+  const captchaImgCls = "h-12 w-32 shrink-0 rounded border border-gray-300 object-cover cursor-pointer";
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -212,7 +243,7 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
       <div>
         <label htmlFor="reg-email" className="block text-sm font-medium text-gray-700">邮箱</label>
         <input id="reg-email" type="email" autoComplete="email" autoFocus required value={email}
-          onChange={(e) => setEmail(e.target.value)} disabled={submitting} placeholder="请输入邮箱" maxLength={254} className={inputCls} />
+          onChange={(e) => changeEmail(e.target.value)} disabled={submitting || emailSending} placeholder="请输入邮箱" maxLength={254} className={inputCls} />
       </div>
 
       {/* CAPTCHA for email code */}
@@ -221,7 +252,7 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
         <div className="mt-1 flex items-center gap-2">
           <input type="text" required value={emailCaptchaCode}
             onChange={(e) => setEmailCaptchaCode(e.target.value)} disabled={submitting}
-            placeholder="输入图中字符" maxLength={10} className={inputCls} />
+            placeholder="输入图中字符" maxLength={10} className={`${inputCls} min-w-0 flex-1`} />
           {emailCaptchaImage && (
             <img src={emailCaptchaImage} alt="验证码" className={captchaImgCls}
               onClick={() => void loadCaptcha("email")} title="点击刷新" />
@@ -271,15 +302,17 @@ function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
       </div>
 
       {/* CAPTCHA for registration */}
-      {emailSent && regCaptchaImage && (
+      {emailSent && (
         <div>
           <label className="block text-sm font-medium text-gray-700">注册验证</label>
           <div className="mt-1 flex items-center gap-2">
             <input type="text" required value={regCaptchaCode}
               onChange={(e) => setRegCaptchaCode(e.target.value)} disabled={submitting}
-              placeholder="输入图中字符" maxLength={10} className={inputCls} />
-            <img src={regCaptchaImage} alt="注册验证码" className={captchaImgCls}
-              onClick={() => void loadCaptcha("reg")} title="点击刷新" />
+              placeholder="输入图中字符" maxLength={10} className={`${inputCls} min-w-0 flex-1`} />
+            {regCaptchaImage && (
+              <img src={regCaptchaImage} alt="注册验证码" className={captchaImgCls}
+                onClick={() => void loadCaptcha("reg")} title="点击刷新" />
+            )}
             <button type="button" onClick={() => void loadCaptcha("reg")}
               className="shrink-0 rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600" title="刷新">
               <RefreshCw size={16} />

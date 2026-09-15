@@ -118,6 +118,13 @@ def upgrade() -> None:
     # The shared auth-code table is created by 20260828_34 with an SMS-worded
     # comment; keep its stored comment aligned with TABLE_COMMENTS.
     if _has_table("nlp_auth_codes"):
+        op.alter_column(
+            "nlp_auth_codes",
+            "subject",
+            existing_type=sa.String(64),
+            type_=sa.String(254),
+            existing_nullable=False,
+        )
         op.execute(
             "ALTER TABLE `nlp_auth_codes` COMMENT = "
             "'图形/邮箱一次性验证码的哈希存储，含过期时间与发送频控记录。'"
@@ -204,6 +211,13 @@ def downgrade() -> None:
         op.drop_column("nlp_users", "email")
 
     if _has_table("nlp_auth_codes"):
+        op.alter_column(
+            "nlp_auth_codes",
+            "subject",
+            existing_type=sa.String(254),
+            type_=sa.String(64),
+            existing_nullable=False,
+        )
         op.execute(
             "ALTER TABLE `nlp_auth_codes` COMMENT = "
             "'图形/短信一次性验证码的哈希存储，含过期时间与发送频控记录。'"

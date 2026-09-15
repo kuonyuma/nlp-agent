@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { LockKeyhole, RefreshCw, X } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/platform/http/api";
 
 type Tab = "login" | "register";
@@ -173,10 +173,13 @@ function RegisterForm({
   const [regCaptchaImage, setRegCaptchaImage] = useState("");
   const [regCaptchaCode, setRegCaptchaCode] = useState("");
   const [emailSent, setEmailSent] = useState(false);
+  const captchaRequestVersion = useRef({ email: 0, reg: 0 });
 
   const loadCaptcha = useCallback(async (target: "email" | "reg") => {
+    const requestVersion = ++captchaRequestVersion.current[target];
     try {
       const resp = await api.getCaptcha();
+      if (requestVersion !== captchaRequestVersion.current[target]) return true;
       if (target === "email") {
         setEmailCaptchaId(resp.captcha_id);
         setEmailCaptchaImage(resp.image);
@@ -184,12 +187,44 @@ function RegisterForm({
         setRegCaptchaId(resp.captcha_id);
         setRegCaptchaImage(resp.image);
       }
+      return true;
     } catch {
-      // silently fail — user can retry by clicking refresh
+      if (requestVersion !== captchaRequestVersion.current[target]) return true;
+      if (target === "email") {
+        setEmailCaptchaId("");
+        setEmailCaptchaImage("");
+      } else {
+        setRegCaptchaId("");
+        setRegCaptchaImage("");
+      }
+      return false;
     }
   }, []);
 
   useEffect(() => { void loadCaptcha("email"); }, [loadCaptcha]); // eslint-disable-line react-hooks/set-state-in-effect
+
+  useEffect(() => {
+    if (emailCooldown <= 0) return;
+    const timer = window.setTimeout(() => setEmailCooldown((value) => Math.max(0, value - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [emailCooldown]);
+
+  const changeEmail = (value: string) => {
+    const mustRefreshConsumedCaptcha = emailSent;
+    setEmail(value);
+    setError("");
+    setEmailSent(false);
+    setEmailCode("");
+    setRegCaptchaId("");
+    setRegCaptchaImage("");
+    setRegCaptchaCode("");
+    if (mustRefreshConsumedCaptcha) {
+      setEmailCaptchaId("");
+      setEmailCaptchaImage("");
+      setEmailCaptchaCode("");
+      void loadCaptcha("email");
+    }
+  };
 
   const sendCode = async () => {
     if (!email.trim() || emailSending || emailCooldown > 0 || !emailCaptchaCode.trim()) return;
@@ -201,16 +236,9 @@ function RegisterForm({
       setEmailSent(true);
       // Keep emailCaptchaCode value (don't clear it) - user may need to see what they entered
       // Load registration CAPTCHA for the next step
-      await loadCaptcha("reg");
-      const timer = setInterval(() => {
-        setEmailCooldown((prev) => {
-          if (prev <= 1) {
-            clearInterval(timer);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
+      if (!(await loadCaptcha("reg"))) {
+        setError("邮箱验证码已发送，但注册验证码加载失败，请点击刷新重试。");
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "发送验证码失败");
       // Refresh email captcha on failure
@@ -265,8 +293,8 @@ function RegisterForm({
           autoComplete="email"
           autoFocus
           value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          disabled={submitting}
+          onChange={(event) => changeEmail(event.target.value)}
+          disabled={submitting || emailSending}
           placeholder="请输入邮箱"
           maxLength={254}
           required
@@ -284,13 +312,13 @@ function RegisterForm({
             placeholder="输入图中字符"
             maxLength={10}
             required
-            style={{ flex: 1 }}
+            style={{ flex: 1, minWidth: 0 }}
           />
           {emailCaptchaImage && (
             <img
               src={emailCaptchaImage}
               alt="验证码"
-              style={{ height: 36, borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
+              style={{ width: 128, height: 48, flexShrink: 0, objectFit: "cover", borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
               onClick={() => void loadCaptcha("email")}
               title="点击刷新"
             />
@@ -316,10 +344,11 @@ function RegisterForm({
             placeholder="6位验证码"
             maxLength={8}
             required
-            style={{ flex: 1 }}
+            style={{ flex: 1, minWidth: 0 }}
           />
           <button
             type="button"
+            aria-label="发送验证码"
             onClick={sendCode}
             disabled={emailSending || emailCooldown > 0 || !email.trim() || !emailCaptchaCode.trim()}
             style={{
@@ -375,7 +404,7 @@ function RegisterForm({
       </label>
 
       {/* CAPTCHA for registration */}
-      {emailSent && regCaptchaImage && (
+      {emailSent && (
         <label>
           <span>注册验证</span>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -386,15 +415,17 @@ function RegisterForm({
               placeholder="输入图中字符"
               maxLength={10}
               required
-              style={{ flex: 1 }}
+              style={{ flex: 1, minWidth: 0 }}
             />
-            <img
-              src={regCaptchaImage}
-              alt="注册验证码"
-              style={{ height: 36, borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
-              onClick={() => void loadCaptcha("reg")}
-              title="点击刷新"
-            />
+            {regCaptchaImage && (
+              <img
+                src={regCaptchaImage}
+                alt="注册验证码"
+                style={{ width: 128, height: 48, flexShrink: 0, objectFit: "cover", borderRadius: 4, border: "1px solid var(--border, #d1d5db)", cursor: "pointer" }}
+                onClick={() => void loadCaptcha("reg")}
+                title="点击刷新"
+              />
+            )}
             <button
               type="button"
               onClick={() => void loadCaptcha("reg")}
