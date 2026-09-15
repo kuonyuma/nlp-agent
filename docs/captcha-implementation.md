@@ -6,7 +6,7 @@
 
 ### `GET /api/v1/auth/captcha`
 
-生成四位图片验证码，返回验证码 ID 和 Base64 PNG：
+生成四位图片验证码（后端画布 200×80，前端以 160×64 展示），返回验证码 ID 和 Base64 PNG：
 
 ```json
 {

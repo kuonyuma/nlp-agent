@@ -24,9 +24,9 @@ _CHARS = string.ascii_uppercase + string.digits
 # Remove ambiguous characters
 _CHARS = "".join(c for c in _CHARS if c not in {"O", "0", "I", "1", "L"})
 
-_IMG_WIDTH = 160
-_IMG_HEIGHT = 60
-_FONT_SIZE = 36
+_IMG_WIDTH = 200
+_IMG_HEIGHT = 80
+_FONT_SIZE = 48
 
 
 def _random_color(low: int = 30, high: int = 150) -> tuple[int, int, int]:
@@ -58,13 +58,13 @@ def generate_captcha_image() -> tuple[str, str, str]:
             font = ImageFont.load_default()
 
     # Draw each character with random rotation and position
-    x_offset = 15
+    x_offset = 12
     for ch in code:
-        y_offset = random.randint(5, 15)
+        y_offset = random.randint(7, 17)
         color = _random_color(20, 120)
         # Draw with slight rotation effect via individual text placement
         draw.text((x_offset, y_offset), ch, fill=color, font=font)
-        x_offset += random.randint(28, 38)
+        x_offset += random.randint(42, 46)
 
     # Add noise lines
     for _ in range(6):
