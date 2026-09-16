@@ -338,4 +338,17 @@ describe("sandbox titlebar layout", () => {
     expect(layoutRule).toContain("min-height: 0");
     expect(permissionScrollRule).toContain("overflow: auto");
   });
+
+  it("keeps settings content inside the dialog with an internal scroller", () => {
+    const matchingRule = (pattern: RegExp, fragment: string) => [...stylesheet.matchAll(pattern)]
+      .map((match) => match[1])
+      .find((rule) => rule.includes(fragment)) ?? "";
+    const contentRule = matchingRule(/\.settings-content\s*\{([^}]*)\}/g, "min-height: 0");
+    const scrollRule = matchingRule(/\.settings-scroll\s*\{([^}]*)\}/g, "flex: 1 1 auto");
+
+    expect(contentRule).toContain("min-height: 0");
+    expect(scrollRule).toContain("min-height: 0");
+    expect(scrollRule).toContain("flex: 1 1 auto");
+    expect(scrollRule).toContain("overflow-y: auto");
+  });
 });
