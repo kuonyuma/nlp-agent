@@ -11,6 +11,7 @@ def test_domestic_hosts_bypass_proxy_and_external_hosts_use_it() -> None:
     policy = OutboundNetworkPolicy(proxy_url="http://host.docker.internal:7897")
 
     assert policy.proxy_for_url("https://api.deepseek.com/v1") is None
+    assert policy.proxy_for_url("https://ses.tencentcloudapi.com") is None
     assert policy.proxy_for_url("https://www.example.cn/search") is None
     assert (
         policy.proxy_for_url("https://export.arxiv.org/api/query")

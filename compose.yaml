@@ -88,13 +88,13 @@ services:
       NLP_AGENT_GATEWAY_TRANSPORT: redis
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
       NOVA_OUTBOUND_PROXY_URL: "${NOVA_OUTBOUND_PROXY_URL:-}"
-      NOVA_DIRECT_DOMAINS: "${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
+      NOVA_DIRECT_DOMAINS: "${NOVA_DIRECT_DOMAINS:-.cn,.xn--fiqs8s,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn,ses.tencentcloudapi.com}"
       HTTP_PROXY: ${NOVA_OUTBOUND_PROXY_URL:-}
       HTTPS_PROXY: ${NOVA_OUTBOUND_PROXY_URL:-}
       http_proxy: ${NOVA_OUTBOUND_PROXY_URL:-}
       https_proxy: ${NOVA_OUTBOUND_PROXY_URL:-}
-      NO_PROXY: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
-      no_proxy: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
+      NO_PROXY: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.xn--fiqs8s,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn,ses.tencentcloudapi.com}"
+      no_proxy: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.xn--fiqs8s,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn,ses.tencentcloudapi.com}"
       NLP_AGENT_LOG_DIR: /app/logs
       NLP_AGENT_LOG_SERVICE: nova-web
       NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
@@ -128,13 +128,13 @@ services:
       NLP_AGENT_GATEWAY_TRANSPORT: redis
       NLP_AGENT_REDIS_URL: redis://redis:6379/0
       NOVA_OUTBOUND_PROXY_URL: "${NOVA_OUTBOUND_PROXY_URL:-}"
-      NOVA_DIRECT_DOMAINS: "${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
+      NOVA_DIRECT_DOMAINS: "${NOVA_DIRECT_DOMAINS:-.cn,.xn--fiqs8s,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn,ses.tencentcloudapi.com}"
       HTTP_PROXY: ${NOVA_OUTBOUND_PROXY_URL:-}
       HTTPS_PROXY: ${NOVA_OUTBOUND_PROXY_URL:-}
       http_proxy: ${NOVA_OUTBOUND_PROXY_URL:-}
       https_proxy: ${NOVA_OUTBOUND_PROXY_URL:-}
-      NO_PROXY: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
-      no_proxy: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.中国,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn}"
+      NO_PROXY: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.xn--fiqs8s,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn,ses.tencentcloudapi.com}"
+      no_proxy: "localhost,127.0.0.1,::1,redis,mysql,nova-web,nova-worker,nova-monitor,nova-sandbox-manager,host.docker.internal,${NOVA_DIRECT_DOMAINS:-.cn,.xn--fiqs8s,api.deepseek.com,dashscope.aliyuncs.com,api.moonshot.cn,open.bigmodel.cn,ses.tencentcloudapi.com}"
       NLP_AGENT_LOG_DIR: /app/logs
       NLP_AGENT_LOG_SERVICE: nova-worker
       NLP_AGENT_LOG_STDOUT: "${NLP_AGENT_LOG_STDOUT:-true}"
