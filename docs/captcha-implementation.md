@@ -17,7 +17,7 @@
 
 ### `POST /api/v1/auth/email/send`
 
-验证第一张图片后，通过 SMTP 发送六位邮箱验证码：
+验证第一张图片后，通过配置的邮件 provider 发送六位邮箱验证码：
 
 ```json
 {
@@ -50,7 +50,26 @@
 
 后端会校验第二张图片验证码与邮箱验证码，检查邮箱是否重复，然后创建用户、个人工作空间和默认 `guest` 角色。
 
-## SMTP 配置
+## 邮件 provider 配置
+
+默认 provider 是 `smtp`，用于保持现有开发环境兼容。生产环境可切换到腾讯云 SES：
+
+```dotenv
+NLP_AGENT_EMAIL_PROVIDER=tencent_ses
+NLP_AGENT_TENCENT_SES_SECRET_ID=your-secret-id
+NLP_AGENT_TENCENT_SES_SECRET_KEY=your-secret-key
+NLP_AGENT_TENCENT_SES_REGION=ap-hongkong
+NLP_AGENT_TENCENT_SES_FROM=noreply@mail.lsnunlp.com
+NLP_AGENT_TENCENT_SES_FROM_NAME=LSNU NLP
+NLP_AGENT_TENCENT_SES_TEMPLATE_ID=218769
+NLP_AGENT_TENCENT_SES_SUBJECT=approved-template-subject
+```
+
+`ap-hongkong` 是腾讯云 SES 的服务 API 地域，与应用服务器所在城市无关；成都服务器也应使用 SES 身份所在的地域。腾讯 SES 模板中的 `{{code}}` 会通过 `TemplateData` 传入。
+
+腾讯 SES 的发信模板页面不单独设置邮件主题，但 `SendEmail` 请求仍要求 `Subject` 字段。因此 `NLP_AGENT_TENCENT_SES_SUBJECT` 是后端发送请求时使用的邮件标题；它不会作为模板变量，也不需要在模板正文中配置。
+
+### SMTP 配置
 
 本地运行时可在项目根目录 `.env` 设置：
 
@@ -63,7 +82,7 @@ NLP_AGENT_SMTP_PASSWORD=authorization-code
 NLP_AGENT_SMTP_FROM=mailer@example.com
 ```
 
-`NLP_AGENT_SMTP_SECURITY` 只允许 `ssl`、`starttls` 或 `none`。生产环境必须配置真实 SMTP；仅本地开发可显式设置 `NLP_AGENT_EMAIL_DEVELOPMENT_MODE=true` 跳过发送。若还需在开发日志中看到验证码，必须额外设置 `NLP_AGENT_EMAIL_EXPOSE_CODE=true`，不要在生产环境启用。
+`NLP_AGENT_SMTP_SECURITY` 只允许 `ssl`、`starttls` 或 `none`。需要回滚或本地继续使用 SMTP 时，将 `NLP_AGENT_EMAIL_PROVIDER` 设为 `smtp`。生产环境必须配置真实 SMTP 或腾讯 SES；仅本地开发可显式设置 `NLP_AGENT_EMAIL_DEVELOPMENT_MODE=true` 跳过发送。若还需在开发日志中看到验证码，必须额外设置 `NLP_AGENT_EMAIL_EXPOSE_CODE=true`，不要在生产环境启用。
 
 ## 前端流程
 
@@ -76,8 +95,8 @@ NLP_AGENT_SMTP_FROM=mailer@example.com
 ## 故障排查
 
 - 图片验证码不可见：检查 `GET /api/v1/auth/captcha`，然后点击刷新。
-- 邮件接口返回 503：检查 SMTP 必填项和安全模式，确认应用读取的是项目根目录 `.env`。
-- 收不到邮件：检查 SMTP 服务授权码、发件地址、垃圾邮件目录和后端日志。
+- 邮件接口返回 503：检查 provider 选择、腾讯 SES 必填项（包括 API 地域/模板 ID/主题）或 SMTP 必填项，确认应用读取的是项目根目录 `.env`。
+- 收不到邮件：检查腾讯 SES 模板审核状态、发信地址/域名、收件地址垃圾邮件目录和后端日志；使用 SMTP 时检查授权码。
 - 验证码错误：验证码可能输入错误、超过两分钟或已经被消费，重新获取即可。
 
 ## 相关文件

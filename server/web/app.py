@@ -977,7 +977,7 @@ def create_app(
         Server-side controls (the frontend 60s countdown is UX only):
         - the CAPTCHA answer is consumed single-use from ``nlp_auth_codes``;
           - per-email cooldown / per-email hourly / per-IP hourly send limits;
-          - real delivery via the configured SMTP provider; missing production
+          - real delivery via the configured email provider; missing production
             configuration returns 503 and never prints the verification code;
         - the code is stored hashed with a hard 120s expiry enforced at
           consumption time.
