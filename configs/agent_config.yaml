@@ -378,7 +378,10 @@ prompts:
 agent_runtime:
   coordinator:
     max_iterations: 12
-    max_duration_s: 120
+    # Keep the turn ceiling aligned with the long-thinking model preset.
+    # First-token and stream-idle limits are enforced separately by the model
+    # runtime and the Gateway activity monitor.
+    max_duration_s: 600
     max_tokens: 128000
     max_tool_calls: 32
     max_injections: 15

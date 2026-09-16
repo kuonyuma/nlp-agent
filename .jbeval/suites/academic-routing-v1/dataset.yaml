@@ -110,6 +110,33 @@ cases:
       expected_no_tool: true
       require_citation_integrity: false
 
+  - id: negative-attention-derivation
+    input: 请推导 Self-Attention 的 Q/K/V 矩阵计算和 softmax 过程，不需要查论文。
+    tags: [negative, nlp, derivation, no-tool]
+    expectation:
+      required_tools: []
+      forbidden_tools: [academic_search]
+      expected_no_tool: true
+      require_citation_integrity: false
+
+  - id: negative-transformer-explanation
+    input: 解释 Transformer 的 Encoder-Decoder 结构和各模块作用，不需要论文出处。
+    tags: [negative, nlp, concept, no-tool]
+    expectation:
+      required_tools: []
+      forbidden_tools: [academic_search]
+      expected_no_tool: true
+      require_citation_integrity: false
+
+  - id: negative-backpropagation-derivation
+    input: 请用简单例子推导神经网络的反向传播公式，不需要外部资料。
+    tags: [negative, nlp, derivation, no-tool]
+    expectation:
+      required_tools: []
+      forbidden_tools: [academic_search]
+      expected_no_tool: true
+      require_citation_integrity: false
+
   - id: negative-explicit-url
     input: 阅读 https://example.com/report 并总结页面内容，不要检索其他资料。
     tags: [negative, url-reading]

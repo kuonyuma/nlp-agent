@@ -222,7 +222,8 @@ GLMChatModel.ERROR_FINISH_REASONS = {
 
 - **执行时机**：在 `astream` 与 `ainvoke` 内部流式读取循环结束后（`received=True` 且成功 `return` 之前）。
 - **生命周期语义**：
-  - 若已输出可见内容，抛出 `StreamInterruptedError`（不进行重试/回退，不向前端拼接新模型生成）；
+  - 若已输出正文或工具调用，抛出 `StreamInterruptedError`（不进行重试/回退，不向前端拼接新模型生成）；
+  - 若仅输出 reasoning 且尚未输出正文或工具调用，遇到可重试错误时允许透明重试或 Fallback；
   - 若未输出任何可见内容，命中重试异常则触发透明重试或 Fallback；
   - `finish_reason` 正常进入该 Attempt 的 `InvocationOutcome` 记录。
 

@@ -166,6 +166,7 @@ class BackendGateway:
         self.quota_service = getattr(self.repository, "quota_service", None)
         self.sessions = sessions
         self.events = GatewayEventBroker()
+        self._in_process_executor: InProcessTurnExecutor | None = None
         # Explicit repositories and dispatchers are used by tests and local
         # integrations; only the fully automatic runtime path should create
         # the production Redis/MySQL dispatcher.
@@ -223,6 +224,7 @@ class BackendGateway:
                     else None
                 ),
             )
+            self._in_process_executor = executor
             self.dispatcher = dispatcher or InProcessTurnDispatcher(executor.run)
         self._session_turn_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.shutdown_grace_s = max(
@@ -1121,6 +1123,8 @@ class BackendGateway:
         event_type: GatewayEventType,
         payload: dict,
     ) -> None:
+        if self._in_process_executor is not None:
+            self._in_process_executor.mark_activity(turn_id, event_type)
         await self._emit(turn_id, session_id, event_type, payload)
 
     async def _emit(

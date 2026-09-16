@@ -642,6 +642,35 @@ async def test_stream_never_replays_after_visible_delta():
 
 
 @pytest.mark.asyncio
+async def test_reasoning_only_stream_failure_retries_before_answer_output():
+    class ReasoningThenDisconnect:
+        def __init__(self):
+            self.calls = 0
+
+        async def astream(self, _input, config=None, **_kwargs):
+            del config
+            self.calls += 1
+            if self.calls == 1:
+                yield AIMessageChunk(
+                    content="",
+                    additional_kwargs={"reasoning_content": "partial reasoning"},
+                )
+                raise ConnectionResetError("connection lost mid-stream")
+            yield AIMessageChunk(content="complete answer")
+
+    model = ReasoningThenDisconnect()
+    runtime = ResilientChatModel([candidate("primary", model, attempts=2)])
+
+    chunks = [
+        chunk async for chunk in runtime.astream([HumanMessage(content="hello")])
+    ]
+
+    assert model.calls == 2
+    assert chunks[0].additional_kwargs["reasoning_content"] == "partial reasoning"
+    assert chunks[-1].content == "complete answer"
+
+
+@pytest.mark.asyncio
 async def test_stream_ends_when_provider_emits_finish_reason(monkeypatch):
     monkeypatch.setattr(
         model_runtime_module,

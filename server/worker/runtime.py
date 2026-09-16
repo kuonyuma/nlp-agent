@@ -116,8 +116,11 @@ async def run_worker() -> None:
     publisher = RedisEventPublisher(redis, config)
     reliability = TurnReliabilityService()
     worker_id = f"{socket.gethostname()}-{id(redis)}"
+    executor: InProcessTurnExecutor | None = None
 
     async def emit(turn_id: str, session_id: str, event_type: GatewayEventType, payload: dict) -> None:
+        if executor is not None:
+            executor.mark_activity(turn_id, event_type)
         execution_context = current_turn_execution_context()
         event_arguments: dict[str, Any] = {
             "turn_id": turn_id,
