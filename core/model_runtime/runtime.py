@@ -580,14 +580,31 @@ class ResilientChatModel:
 
     @staticmethod
     def _visible_chunk(chunk: Any) -> bool:
+        """Return whether a chunk contains any externally observable output."""
+
+        return ResilientChatModel._answer_visible_chunk(chunk) or bool(
+            (getattr(chunk, "additional_kwargs", None) or {}).get(
+                "reasoning_content"
+            )
+        )
+
+    @staticmethod
+    def _answer_visible_chunk(chunk: Any) -> bool:
+        """Return whether a chunk contains answer or tool-call output.
+
+        Reasoning can be emitted before a provider connection fails. It is
+        observable to the protocol, but it is not a usable answer by itself;
+        keeping this distinction lets retryable reasoning-only failures retry
+        without replaying a completed answer.
+        """
+
         if getattr(chunk, "content", None):
             return True
         if getattr(chunk, "tool_call_chunks", None) or getattr(
             chunk, "tool_calls", None
         ):
             return True
-        additional = getattr(chunk, "additional_kwargs", None) or {}
-        return bool(additional.get("reasoning_content"))
+        return False
 
     @staticmethod
     def _finish_reason_error(
@@ -904,6 +921,7 @@ class ResilientChatModel:
                 await self._reserve_feature_attempt(invocation)
                 received = False
                 visible = False
+                answer_visible = False
                 first = True
                 started = time.monotonic()
                 latest_usage: CanonicalTokenUsage = CanonicalTokenUsage(
@@ -963,6 +981,9 @@ class ResilientChatModel:
                             received = True
                             chunk_visible = self._visible_chunk(chunk)
                             visible = visible or chunk_visible
+                            answer_visible = answer_visible or self._answer_visible_chunk(
+                                chunk
+                            )
                             normalized = (
                                 normalize_chunk(chunk)
                                 if isinstance(chunk, AIMessageChunk)
@@ -1066,7 +1087,11 @@ class ResilientChatModel:
                             partial_usage = partial_usage.model_copy(
                                 update={"provider_response_id": provider_response_id}
                             )
-                    if visible:
+                    # A retryable stream failure after reasoning-only output
+                    # can still produce a complete answer on a fresh attempt.
+                    # Once answer text or tool-call arguments were emitted,
+                    # preserve the existing no-replay safety boundary.
+                    if visible and (answer_visible or not decision.retryable):
                         global_telemetry.event(
                             "model.stream_interrupted",
                             level="error",

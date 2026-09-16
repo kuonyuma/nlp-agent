@@ -25,14 +25,55 @@ EventSink = Callable[[str, str, GatewayEventType, dict], Awaitable[None]]
 _EXERCISE_RESULT_RE = re.compile(r"<!--\s*exercise-result:\s*(\{.*?\})\s*-->", re.DOTALL)
 _GUIDED_RESULT_RE = re.compile(r"<!--\s*guided-result:\s*(\{.*?\})\s*-->", re.DOTALL)
 _CANCEL_DRAIN_TIMEOUT_S = 0.25
+_DEFAULT_FIRST_TOKEN_TIMEOUT_S = 180.0
+_DEFAULT_STREAM_IDLE_TIMEOUT_S = 90.0
+
+
+def _coordinator_stream_timeouts() -> tuple[float, float]:
+    """Return the first-token and stream-idle limits for the coordinator route."""
+
+    try:
+        from configs.settings import settings
+
+        config = settings._config
+        route = config.get("model_routes", {}).get("coordinator", {})
+        preset_names = [route.get("primary"), *(route.get("fallbacks", []) or [])]
+        policies = [
+            config.get("model_presets", {}).get(name, {}).get("timeouts", {})
+            for name in preset_names
+            if name
+        ]
+        policies = [policy for policy in policies if policy]
+        if policies:
+            return (
+                max(float(policy.get("first_token_s", _DEFAULT_FIRST_TOKEN_TIMEOUT_S)) for policy in policies),
+                max(float(policy.get("stream_idle_s", _DEFAULT_STREAM_IDLE_TIMEOUT_S)) for policy in policies),
+            )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        pass
+    return _DEFAULT_FIRST_TOKEN_TIMEOUT_S, _DEFAULT_STREAM_IDLE_TIMEOUT_S
 
 
 class TurnExecutionTimeoutError(TimeoutError):
     """Raised when a turn workflow does not settle within its deadline."""
 
-    def __init__(self, timeout_s: float) -> None:
-        super().__init__(f"turn execution exceeded {timeout_s:g}s")
+    def __init__(
+        self,
+        timeout_s: float,
+        *,
+        reason: str = "absolute",
+        idle_s: float | None = None,
+    ) -> None:
+        if reason == "first_token":
+            message = f"turn execution produced no activity within {idle_s or timeout_s:g}s"
+        elif reason == "idle":
+            message = f"turn execution was idle for {idle_s or timeout_s:g}s"
+        else:
+            message = f"turn execution exceeded {timeout_s:g}s"
+        super().__init__(message)
         self.timeout_s = timeout_s
+        self.reason = reason
+        self.idle_s = idle_s
 
 
 def _extract_result(pattern: re.Pattern[str], text: str) -> tuple[str, dict[str, Any] | None]:
@@ -57,26 +98,68 @@ class InProcessTurnExecutor:
         on_turn_completed: Callable[[str], None] | None = None,
         *,
         turn_timeout_s: float | None = None,
+        first_token_timeout_s: float | None = None,
+        stream_idle_timeout_s: float | None = None,
     ) -> None:
         self._engine = engine
         self._repository = repository
         self._emit = emit
         self._on_turn_completed = on_turn_completed
         self._abandoned_tasks: set[asyncio.Task[Any]] = set()
+        self._activity_events: dict[str, asyncio.Event] = {}
+        self._activity_waits_for_first_token: dict[str, bool] = {}
         self._explicit_turn_timeout = turn_timeout_s is not None
         self._turn_timeout_s = float(
             turn_timeout_s
             if turn_timeout_s is not None
             else configured_budget("coordinator").max_duration_s
         )
+        default_first_token_s, default_stream_idle_s = _coordinator_stream_timeouts()
+        self._first_token_timeout_s = float(
+            first_token_timeout_s
+            if first_token_timeout_s is not None
+            else default_first_token_s
+        )
+        self._stream_idle_timeout_s = float(
+            stream_idle_timeout_s
+            if stream_idle_timeout_s is not None
+            else default_stream_idle_s
+        )
         if self._turn_timeout_s <= 0:
             raise ValueError("turn_timeout_s must be greater than zero")
+        if self._first_token_timeout_s <= 0:
+            raise ValueError("first_token_timeout_s must be greater than zero")
+        if self._stream_idle_timeout_s <= 0:
+            raise ValueError("stream_idle_timeout_s must be greater than zero")
         parameters = inspect.signature(engine.run_turn).parameters
         parameter_count = len(parameters)
         self._accepts_learning = parameter_count >= 6
         self._accepts_teaching_materials = parameter_count >= 7
         self._accepts_model_profile = "model_profile" in parameters
         self._accepts_knowledge_book_context = "knowledge_book_context" in parameters
+
+    def mark_activity(
+        self,
+        turn_id: str,
+        event_type: GatewayEventType | None = None,
+    ) -> None:
+        """Wake the timeout monitor when the engine emits turn activity."""
+
+        if event_type in {
+            GatewayEventType.TOOL_COMPLETED,
+            GatewayEventType.TOOL_FAILED,
+            GatewayEventType.TURN_HANDOVER,
+            GatewayEventType.WORKER_UPDATE,
+        }:
+            self._activity_waits_for_first_token[turn_id] = True
+        elif event_type is None or event_type in {
+            GatewayEventType.MESSAGE_DELTA,
+            GatewayEventType.TOOL_STARTED,
+        }:
+            self._activity_waits_for_first_token[turn_id] = False
+        event = self._activity_events.get(turn_id)
+        if event is not None:
+            event.set()
 
     async def run(self, task: TurnTask, execution_context: Any | None = None) -> None:
         fence = self._fence(execution_context)
@@ -254,24 +337,93 @@ class InProcessTurnExecutor:
         timeout_s = self._turn_timeout_s if self._explicit_turn_timeout else image_turn_timeout(
             self._turn_timeout_s, image_count
         )
-        with bind_image_turn(image_count, timeout_s):
-            execution = asyncio.create_task(
-                self._run_turn_workflow(task, execution_context),
-                name=f"turn-workflow:{task.turn_id}",
-            )
         try:
-            done, _pending = await asyncio.wait(
-                {execution}, timeout=timeout_s
-            )
-        except asyncio.CancelledError:
-            # The outer executor owns the external-cancellation signal and
-            # will call cancel_turn exactly once after this cleanup returns.
-            await self._cancel_and_drain(task, execution, request_engine_cancel=False)
-            raise
-        if done:
-            return execution.result()
-        await self._cancel_and_drain(task, execution)
-        raise TurnExecutionTimeoutError(timeout_s)
+            with bind_image_turn(image_count, timeout_s):
+                execution = asyncio.create_task(
+                    self._run_turn_workflow(task, execution_context),
+                    name=f"turn-workflow:{task.turn_id}",
+                )
+            activity_event = asyncio.Event()
+            self._activity_events[task.turn_id] = activity_event
+            self._activity_waits_for_first_token[task.turn_id] = True
+            try:
+                return await self._wait_for_execution(
+                    task,
+                    execution,
+                    activity_event,
+                    timeout_s,
+                )
+            except asyncio.CancelledError:
+                # The outer executor owns the external-cancellation signal and
+                # will call cancel_turn exactly once after this cleanup returns.
+                await self._cancel_and_drain(
+                    task, execution, request_engine_cancel=False
+                )
+                raise
+            except TurnExecutionTimeoutError:
+                await self._cancel_and_drain(task, execution)
+                raise
+        finally:
+            self._activity_events.pop(task.turn_id, None)
+            self._activity_waits_for_first_token.pop(task.turn_id, None)
+
+    async def _wait_for_execution(
+        self,
+        task: TurnTask,
+        execution: asyncio.Task[tuple[str, Any]],
+        activity_event: asyncio.Event,
+        timeout_s: float,
+    ) -> tuple[str, Any]:
+        """Wait with first-token, stream-idle, and absolute turn deadlines."""
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        observed_activity = not self._activity_waits_for_first_token.get(
+            task.turn_id, True
+        )
+        activity_waiter = asyncio.create_task(
+            activity_event.wait(),
+            name=f"turn-activity:{task.turn_id}",
+        )
+        try:
+            while True:
+                elapsed = loop.time() - started
+                remaining = timeout_s - elapsed
+                if remaining <= 0:
+                    raise TurnExecutionTimeoutError(timeout_s)
+                idle_limit = (
+                    self._stream_idle_timeout_s
+                    if observed_activity
+                    else self._first_token_timeout_s
+                )
+                done, _pending = await asyncio.wait(
+                    {execution, activity_waiter},
+                    timeout=min(remaining, idle_limit),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if execution in done:
+                    return execution.result()
+                if activity_waiter in done:
+                    observed_activity = not self._activity_waits_for_first_token.get(
+                        task.turn_id, False
+                    )
+                    activity_event.clear()
+                    activity_waiter = asyncio.create_task(
+                        activity_event.wait(),
+                        name=f"turn-activity:{task.turn_id}",
+                    )
+                    continue
+                if loop.time() - started >= timeout_s:
+                    raise TurnExecutionTimeoutError(timeout_s)
+                raise TurnExecutionTimeoutError(
+                    timeout_s,
+                    reason="idle" if observed_activity else "first_token",
+                    idle_s=idle_limit,
+                )
+        finally:
+            if not activity_waiter.done():
+                activity_waiter.cancel()
+            await asyncio.gather(activity_waiter, return_exceptions=True)
 
     @staticmethod
     def _fence(execution_context: Any | None) -> dict[str, int]:

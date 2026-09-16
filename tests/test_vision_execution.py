@@ -47,7 +47,7 @@ def test_worker_and_coordinator_share_batched_deadline_without_leaking_context()
         )
         assert short_duration < short_wait < 240
     assert current_image_turn() is None
-    assert configured_budget("coordinator").max_duration_s == 120
+    assert configured_budget("coordinator").max_duration_s == 600
 
 
 def image_toolset(invoke):

@@ -50,7 +50,7 @@ GLM 使用专用 `glm` Adapter，通过国内 BigModel Endpoint `https://open.bi
 
 GLM 请求始终设置 `tool_stream=true`，使长工具参数生成能够持续产生增量 chunk。与 Kimi 相同，只有包含工具调用的历史 Assistant 消息才会回传 `reasoning_content`。GLM 的 `prompt_tokens_details.cached_tokens` 会归一化为统一缓存 Token 字段。
 
-GLM 还可能在 HTTP 请求正常结束时通过 `finish_reason` 表示错误。`model_context_window_exceeded` 按上下文超限处理，`network_error` 按可重试过载处理，`sensitive` 按不可重试错误处理。首个可见 delta 前可以执行既有 retry/fallback；已经输出正文、reasoning 或工具参数后会抛出 `StreamInterruptedError`，不会把另一轮输出拼接到原流。
+GLM 还可能在 HTTP 请求正常结束时通过 `finish_reason` 表示错误。`model_context_window_exceeded` 按上下文超限处理，`network_error` 按可重试过载处理，`sensitive` 按不可重试错误处理。首个可见 delta 前可以执行既有 retry/fallback；已经输出正文或工具参数后会抛出 `StreamInterruptedError`，不会把另一轮输出拼接到原流。若只有 reasoning 增量而尚未产生正文或工具参数，且错误属于可重试的连接、超时或过载错误，则允许透明重试；这样不会把没有形成答案的半截推理误当作最终结果。
 
 数字业务码在通用 HTTP 状态之前分类：`1113` 是欠费、`1261` 是 Prompt 超长、`1301` 是安全拦截，均不可重试；`1302` 是可重试限流；`1305` 是可重试过载；`1308–1311` 与 `1313–1321` 属于用量上限或订阅权益限制，不进行短退避重试。完整依据与暂不映射的代码见 `docs/model_runtime_p0_specs.md`。
 
@@ -75,7 +75,8 @@ Developer UI 的 Provider 页面可以选择 `deepseek`、`qwen`、`kimi`、`glm
 流式调用遵守：
 
 - 首个可见 delta 前失败，可以重试或 fallback；
-- 已输出正文、reasoning 或工具调用 delta 后失败，抛出 `StreamInterruptedError`；
+- 已输出正文或工具调用 delta 后失败，抛出 `StreamInterruptedError`；
+- 仅输出 reasoning delta 后发生可重试错误时，允许 retry/fallback；
 - 不会把新模型从头生成的内容静默拼接到已有流；
 - reasoning、content、tool argument 和 usage chunk 都能维持流活性。
 

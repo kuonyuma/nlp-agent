@@ -8,7 +8,7 @@ from core.learning import TeachingMaterials
 from core.session_context import SessionContext
 from gateway.contracts import GatewayEventType, TurnStatus
 from gateway.dispatch import TurnTask
-from gateway.turn_execution import InProcessTurnExecutor
+from gateway.turn_execution import InProcessTurnExecutor, TurnExecutionTimeoutError
 
 
 class SuccessfulEngine:
@@ -19,7 +19,7 @@ class SuccessfulEngine:
         return None
 
 
-@pytest.mark.parametrize("explicit_timeout,expected", [(None, 270), (3, 3)])
+@pytest.mark.parametrize("explicit_timeout,expected", [(None, 600), (3, 3)])
 async def test_image_turn_deadline_reaches_engine_and_respects_explicit_override(explicit_timeout, expected):
     from core.agent_runtime import configured_budget
     from core.vision_execution import current_image_turn
@@ -72,6 +72,28 @@ class CancellationIgnoringEngine(HangingEngine):
             except asyncio.CancelledError:
                 self.cancellation_attempts += 1
         return "late answer"
+
+
+class StreamingActivityEngine:
+    def __init__(self, *, continuous: bool):
+        self.continuous = continuous
+        self.mark_activity = None
+        self.cancelled = []
+        self._never = asyncio.Event()
+
+    async def run_turn(self, _context, turn_id, _content):
+        assert self.mark_activity is not None
+        self.mark_activity(turn_id)
+        if self.continuous:
+            for _ in range(4):
+                await asyncio.sleep(0.01)
+                self.mark_activity(turn_id)
+            return "streamed answer"
+        await self._never.wait()
+        return "unreachable"
+
+    async def cancel_turn(self, _context, turn_id):
+        self.cancelled.append(turn_id)
 
 
 class FailingLearningRepository:
@@ -307,6 +329,73 @@ async def test_engine_timeout_converges_hanging_turn_to_failed_terminal_event():
         GatewayEventType.TURN_FAILED,
     ]
     assert events[-1][1]["error_kind"] == "TurnExecutionTimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_stream_activity_keeps_a_turn_alive_until_absolute_deadline():
+    async def emit(*_args):
+        return None
+
+    engine = StreamingActivityEngine(continuous=True)
+    executor = InProcessTurnExecutor(
+        engine,
+        ClaimAwareRepository(),
+        emit,
+        turn_timeout_s=0.12,
+        first_token_timeout_s=0.02,
+        stream_idle_timeout_s=0.025,
+    )
+    engine.mark_activity = executor.mark_activity
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"),
+        turn_id="turn-streaming-activity",
+        content="hello",
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        teaching_materials=TeachingMaterials(),
+        guided_session_id=None,
+        exercise_session_id=None,
+    )
+
+    final_text, _updated = await executor._run_turn_with_timeout(task)
+
+    assert final_text == "streamed answer"
+    assert engine.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_stream_activity_fails_after_idle_deadline():
+    async def emit(*_args):
+        return None
+
+    engine = StreamingActivityEngine(continuous=False)
+    executor = InProcessTurnExecutor(
+        engine,
+        ClaimAwareRepository(),
+        emit,
+        turn_timeout_s=0.2,
+        first_token_timeout_s=0.02,
+        stream_idle_timeout_s=0.025,
+    )
+    engine.mark_activity = executor.mark_activity
+    task = TurnTask(
+        context=SessionContext(session_id="session-1"),
+        turn_id="turn-streaming-idle",
+        content="hello",
+        learning_context=None,
+        learning_progress=None,
+        exercise_state=None,
+        teaching_materials=TeachingMaterials(),
+        guided_session_id=None,
+        exercise_session_id=None,
+    )
+
+    with pytest.raises(TurnExecutionTimeoutError) as raised:
+        await executor._run_turn_with_timeout(task)
+
+    assert raised.value.reason == "idle"
+    assert engine.cancelled == ["turn-streaming-idle"]
 
 
 @pytest.mark.asyncio
