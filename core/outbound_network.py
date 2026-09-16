@@ -15,11 +15,12 @@ from urllib.parse import urlsplit
 
 DEFAULT_DIRECT_DOMAINS: tuple[str, ...] = (
     ".cn",
-    ".中国",
+    ".xn--fiqs8s",
     "api.deepseek.com",
     "dashscope.aliyuncs.com",
     "api.moonshot.cn",
     "open.bigmodel.cn",
+    "ses.tencentcloudapi.com",
 )
 
 

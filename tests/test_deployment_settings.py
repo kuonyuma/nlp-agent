@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import httpx
+import pytest
 import yaml
 
 from configs.settings import Settings
@@ -81,6 +83,47 @@ def test_compose_passes_outbound_proxy_to_web_and_worker_containers():
         assert "${NOVA_DIRECT_DOMAINS:-" in environment["NO_PROXY"]
         assert "redis" in environment["NO_PROXY"]
         assert "mysql" in environment["NO_PROXY"]
+
+
+@pytest.mark.asyncio
+async def test_compose_default_no_proxy_is_accepted_by_httpx(monkeypatch):
+    compose = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "compose.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    environment = compose["services"]["nova-web"]["environment"]
+    direct_domains_expression = environment["NOVA_DIRECT_DOMAINS"]
+    default_direct_domains = direct_domains_expression.removeprefix(
+        "${NOVA_DIRECT_DOMAINS:-"
+    ).removesuffix("}")
+    rendered_no_proxy = environment["NO_PROXY"].replace(
+        direct_domains_expression, default_direct_domains
+    )
+
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("NO_PROXY", rendered_no_proxy)
+    monkeypatch.setenv("no_proxy", rendered_no_proxy)
+
+    client = httpx.AsyncClient()
+    try:
+        assert client._transport_for_url(
+            httpx.URL("https://ses.tencentcloudapi.com")
+        ) is client._transport
+        assert client._transport_for_url(
+            httpx.URL("https://www.example.com")
+        ) is not client._transport
+    finally:
+        await client.aclose()
 
 
 def test_model_provider_api_key_settings_bind_defaults_and_env_overrides(monkeypatch):
