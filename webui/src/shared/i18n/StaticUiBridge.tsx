@@ -24,7 +24,7 @@ const zhToEn: Record<string, string> = {
   "Nova 仍在持续成长。无论你喜欢写代码、研究模型、设计界面，还是改进学习内容，都欢迎参与我们的开发和建设。": "Nova is still growing. Whether you enjoy coding, researching models, designing interfaces, or improving learning content, you are welcome to help build it.",
   "Nova 仍在持续成长，期待与你一起完善更好的 NLP 学习体验。": "Nova is still growing, and we look forward to building a better NLP learning experience with you.",
   "NLP / 大语言模型": "NLP / large language models", "Agent 开发": "Agent development", "Python / 后端开发": "Python / backend development", "前端开发": "Frontend development", "测试与评测": "Testing and evaluation", "NLP 学习内容建设": "NLP learning content",
-  "可以参与的方向": "Ways to contribute", "加入 Nova": "Join Nova", "关闭加入 Nova": "Close Join Nova",
+  "可以参与的方向": "Ways to contribute", "GitHub 仓库": "GitHub repository", "加入 Nova": "Join Nova", "关闭加入 Nova": "Close Join Nova",
   "我们欢迎对 NLP、AI Agent 和教育智能感兴趣的同学参与 Nova。": "We welcome students interested in NLP, AI agents, and intelligent education to contribute to Nova.",
   "加入 QQ 群，与我们一起参与 Nova 的开发与建设。": "Join the QQ group and help develop and build Nova with us.",
   "QQ 群": "QQ group", "在 QQ 中搜索以下群号申请加入。": "Search for the following group number in QQ to request access.", "群号": "Group number",

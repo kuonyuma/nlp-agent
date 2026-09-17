@@ -3231,8 +3231,9 @@ button { color: inherit; }
 .settings-about-tags .is-design i { background: #ec4899; }
 .settings-about-tags .is-testing i { background: #f59e0b; }
 .settings-about-tags .is-content i { background: #a855f7; }
-.settings-about-action { display: flex; justify-content: flex-end; margin-top: 20px; }
-.settings-about-action .settings-primary-button { min-height: 40px; justify-content: center; padding: 9px 16px; font-weight: 650; white-space: nowrap; }
+.settings-about-action { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.settings-about-action .settings-primary-button,.settings-about-action .settings-link-button { min-height: 40px; justify-content: center; padding: 9px 16px; font-weight: 650; white-space: nowrap; }
+.settings-about-action .settings-link-button { text-decoration: none; }
 
 .join-nova-dialog { position: fixed; z-index: 91; top: 50%; left: 50%; width: min(calc(100vw - 40px), 440px); max-height: min(86vh, 680px); overflow-y: auto; transform: translate(-50%, -50%); }
 .join-nova-dialog-body { padding: 18px 21px 21px; }
@@ -3246,7 +3247,7 @@ button { color: inherit; }
 @media (max-width: 480px) {
   .settings-about-labs,.settings-about-tags { grid-template-columns: 1fr; }
   .settings-about-tags li:last-child { grid-column: auto; }
-  .settings-about-action { justify-content: stretch; }
-  .settings-about-action .settings-primary-button { width: 100%; }
+  .settings-about-action { align-items: stretch; flex-direction: column; }
+  .settings-about-action .settings-primary-button,.settings-about-action .settings-link-button { width: 100%; }
   .join-nova-qq-number { align-items: flex-start; flex-direction: column; gap: 5px; }
 }

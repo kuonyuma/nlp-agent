@@ -1,4 +1,4 @@
-import { ArrowRight, BadgeInfo, BookOpenCheck, ChevronDown, ChevronRight, CircleHelp, Clock3, Coins, Database, Gauge, Globe2, Info, MessageSquarePlus, MonitorCog, Moon, Settings2, Sun, X } from "lucide-react";
+import { ArrowRight, BadgeInfo, BookOpenCheck, ChevronDown, ChevronRight, CircleHelp, Clock3, Coins, Database, Gauge, Github, Globe2, Info, MessageSquarePlus, MonitorCog, Moon, Settings2, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
@@ -34,6 +34,8 @@ const aboutContributionAreas = [
   { id: "testing", label: "测试与评测" },
   { id: "content", label: "NLP 学习内容建设" },
 ] as const;
+
+const PROJECT_REPOSITORY_URL = "https://github.com/liunor/nlp-agent";
 
 const levelLabel: Record<LearningContext["level"], string> = { beginner: "入门", intermediate: "进阶", advanced: "高阶" };
 const modeLabel: Record<LearningContext["mode"], string> = { explain: "讲解", socratic: "苏格拉底追问", practice: "练习", review: "复习" };
@@ -307,6 +309,7 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
                   {aboutContributionAreas.map((area) => <li key={area.id} className={`is-${area.id}`}><i aria-hidden="true" />{area.label}</li>)}
                 </ul>
                 <div className="settings-about-action">
+                  <a className="settings-link-button" href={PROJECT_REPOSITORY_URL} target="_blank" rel="noreferrer">GitHub 仓库 <Github size={15} /></a>
                   <button className="settings-primary-button" type="button" onClick={() => setJoinNovaOpen(true)}>加入 Nova <ArrowRight size={15} /></button>
                 </div>
               </SettingGroup>

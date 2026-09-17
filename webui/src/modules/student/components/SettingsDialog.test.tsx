@@ -67,6 +67,10 @@ describe("SettingsDialog", () => {
     expect(contributionList).toBeVisible();
     expect(within(contributionList).getAllByRole("listitem")).toHaveLength(7);
     expect(screen.queryByText("2026.07 · 延安")).not.toBeInTheDocument();
+    const repositoryLink = screen.getByRole("link", { name: "GitHub 仓库" });
+    expect(repositoryLink).toHaveAttribute("href", "https://github.com/liunor/nlp-agent");
+    expect(repositoryLink).toHaveAttribute("target", "_blank");
+    expect(repositoryLink).toHaveAttribute("rel", "noreferrer");
 
     fireEvent.click(screen.getByRole("button", { name: "加入 Nova" }));
     const joinDialog = screen.getByRole("dialog", { name: "加入 Nova" });
