@@ -51,6 +51,38 @@ describe("SettingsDialog", () => {
     getUsageMock.mockResolvedValue({ events: 0, priced_credits_micro: 0, unpriced_events: 0, credits_complete: true, tokens: {}, breakdown: [] });
   });
 
+  it("shows the About page and opens and closes the Join Nova dialog", () => {
+    const { container } = render(<SettingsDialog {...baseProps} />);
+
+    const aboutEntry = screen.getByRole("button", { name: "关于我们" });
+    expect(aboutEntry).toBeVisible();
+    fireEvent.click(aboutEntry);
+
+    expect(screen.queryByText("Nova · LSNU NLP Learning Agent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Nova" })).not.toBeInTheDocument();
+    expect(screen.getByText("了解 Nova 以及项目背后的团队。")).toBeVisible();
+    expect(container.querySelector(".settings-about-team-card")).toBeVisible();
+    expect(container.querySelectorAll(".settings-about-labs article")).toHaveLength(2);
+    const contributionList = screen.getByRole("list", { name: "可以参与的方向" });
+    expect(contributionList).toBeVisible();
+    expect(within(contributionList).getAllByRole("listitem")).toHaveLength(7);
+    expect(screen.queryByText("2026.07 · 延安")).not.toBeInTheDocument();
+    const repositoryLink = screen.getByRole("link", { name: "GitHub 仓库" });
+    expect(repositoryLink).toHaveAttribute("href", "https://github.com/liunor/nlp-agent");
+    expect(repositoryLink).toHaveAttribute("target", "_blank");
+    expect(repositoryLink).toHaveAttribute("rel", "noreferrer");
+
+    fireEvent.click(screen.getByRole("button", { name: "加入 Nova" }));
+    const joinDialog = screen.getByRole("dialog", { name: "加入 Nova" });
+    expect(joinDialog).toBeVisible();
+    expect(within(joinDialog).getByText("1080497980")).toBeVisible();
+    expect(within(joinDialog).getByText("在 QQ 中搜索以下群号申请加入。")).toBeVisible();
+    expect(within(joinDialog).queryByText("联系方式将在后续开放。")).not.toBeInTheDocument();
+
+    fireEvent.click(within(joinDialog).getByRole("button", { name: "关闭加入 Nova" }));
+    expect(screen.queryByRole("dialog", { name: "加入 Nova" })).not.toBeInTheDocument();
+  });
+
   it("renders only the newest published version with a readable date", async () => {
     listPublishedReleaseNotesMock.mockResolvedValue({
       items: [

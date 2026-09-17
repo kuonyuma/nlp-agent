@@ -1,8 +1,9 @@
-import { BadgeInfo, BookOpenCheck, ChevronDown, ChevronRight, CircleHelp, Clock3, Coins, Database, Gauge, Globe2, MessageSquarePlus, MonitorCog, Moon, Settings2, Sun, X } from "lucide-react";
+import { ArrowRight, BadgeInfo, BookOpenCheck, ChevronDown, ChevronRight, CircleHelp, Clock3, Coins, Database, Gauge, Github, Globe2, Info, MessageSquarePlus, MonitorCog, Moon, Settings2, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
 import { QuotaUsagePage } from "@/modules/quota/QuotaUsagePage";
+import { JoinNovaDialog } from "@/modules/student/components/JoinNovaDialog";
 import { api } from "@/platform/http/api";
 import type { FeedbackCategory, FeedbackThread, LearningContext, ReleaseNoteEntry, UserSettings } from "@/shared/types";
 import { ConfirmDialog } from "@/shared/ui/ConfirmDialog";
@@ -10,7 +11,7 @@ import { supportedLocales } from "@/shared/i18n/config";
 import { saveFeedback } from "@/shared/utils/feedback";
 import { APP_NAME } from "@/shared/version";
 
-type SettingsSection = "general" | "appearance" | "chat" | "learning" | "data" | "quota" | "feedback" | "updates";
+type SettingsSection = "general" | "appearance" | "chat" | "learning" | "data" | "quota" | "feedback" | "updates" | "about";
 
 const sections: Array<{ id: SettingsSection; label: string; icon: typeof Settings2 }> = [
   { id: "general", label: "通用", icon: Settings2 },
@@ -21,7 +22,20 @@ const sections: Array<{ id: SettingsSection; label: string; icon: typeof Setting
   { id: "quota", label: "额度与用量", icon: Coins },
   { id: "feedback", label: "意见反馈", icon: MessageSquarePlus },
   { id: "updates", label: "版本与更新", icon: BadgeInfo },
+  { id: "about", label: "关于我们", icon: Info },
 ];
+
+const aboutContributionAreas = [
+  { id: "llm", label: "NLP / 大语言模型" },
+  { id: "agent", label: "Agent 开发" },
+  { id: "backend", label: "Python / 后端开发" },
+  { id: "frontend", label: "前端开发" },
+  { id: "design", label: "UI / UX" },
+  { id: "testing", label: "测试与评测" },
+  { id: "content", label: "NLP 学习内容建设" },
+] as const;
+
+const PROJECT_REPOSITORY_URL = "https://github.com/liunor/nlp-agent";
 
 const levelLabel: Record<LearningContext["level"], string> = { beginner: "入门", intermediate: "进阶", advanced: "高阶" };
 const modeLabel: Record<LearningContext["mode"], string> = { explain: "讲解", socratic: "苏格拉底追问", practice: "练习", review: "复习" };
@@ -88,6 +102,7 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
   const [releaseNotes, setReleaseNotes] = useState<ReleaseNoteEntry[] | null>(null);
   const [releaseNotesError, setReleaseNotesError] = useState(false);
   const [releaseNotesAttempt, setReleaseNotesAttempt] = useState(0);
+  const [joinNovaOpen, setJoinNovaOpen] = useState(false);
   const canTeach = roles.includes("teacher") || roles.includes("developer");
   const canDevelop = roles.includes("developer");
   const hasExplicitPermissions = Boolean(permissions?.length);
@@ -167,7 +182,7 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
           <p><CircleHelp size={14} />额度只读展示，分配和策略调整由开发者统一管理。</p>
         </aside>
         <div className="settings-content">
-          <header><div><strong>{visibleSections.find((item) => item.id === section)?.label}</strong><p>{section === "data" ? "数据、隐私与开发者配置集中在此管理。" : section === "quota" ? "查看当前额度与 Token 用量。" : "修改会立即保存，并在下次打开时恢复。"}</p></div><button className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}><X size={19} /></button></header>
+          <header><div><strong>{visibleSections.find((item) => item.id === section)?.label}</strong><p>{section === "data" ? "数据、隐私与开发者配置集中在此管理。" : section === "quota" ? "查看当前额度与 Token 用量。" : section === "about" ? "了解 Nova 以及项目背后的团队。" : "修改会立即保存，并在下次打开时恢复。"}</p></div><button className="icon-button" type="button" aria-label="关闭设置" onClick={onClose}><X size={19} /></button></header>
           <div className="settings-scroll">
             {section === "general" && <>
               <SettingGroup title="界面语言" description="语言偏好会同步保存到本地后端，并立即切换学生模式的界面语言。"><label className="settings-field"><span><Globe2 size={15} />阅读语言</span><select value={settings.locale} onChange={(event) => onChange({ locale: event.target.value })}>{supportedLocales.map((locale) => <option key={locale.code} value={locale.code}>{locale.nativeLabel} · {locale.label}</option>)}</select></label></SettingGroup>
@@ -277,6 +292,28 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
                 {releaseNotesError ? <button className="settings-link-button" type="button" onClick={() => setReleaseNotesAttempt((current) => current + 1)}>重新加载 <ChevronRight size={15} /></button> : releaseNotes === null ? <div className="settings-note">正在读取…</div> : currentRelease ? <div className="release-notes-list" aria-label={`v${currentRelease.version} 更新说明`}><ul className="release-notes">{currentRelease.notes.map((item) => <li key={item}>{item}</li>)}</ul></div> : <div className="settings-note">暂无已发布的更新说明。</div>}
               </SettingGroup>
             </>}
+            {section === "about" && <div className="settings-about-page">
+              <SettingGroup title="项目与团队">
+                <div className="settings-about-team-card">
+                  <div className="settings-about-school"><strong>乐山师范学院</strong><span>人工智能与机器人学院</span></div>
+                  <div className="settings-about-labs">
+                    <article><strong>四川省哲学社会科学重点实验室</strong><span>特殊教育语言智能</span></article>
+                    <article><strong>四川省高校重点实验室</strong><span>互联网自然语言智能处理</span></article>
+                  </div>
+                </div>
+              </SettingGroup>
+
+              <SettingGroup title="加入我们" description="对 NLP、AI Agent 或软件开发感兴趣？">
+                <p className="settings-about-copy">Nova 仍在持续成长，期待与你一起完善更好的 NLP 学习体验。</p>
+                <ul className="settings-about-tags" aria-label="可以参与的方向">
+                  {aboutContributionAreas.map((area) => <li key={area.id} className={`is-${area.id}`}><i aria-hidden="true" />{area.label}</li>)}
+                </ul>
+                <div className="settings-about-action">
+                  <a className="settings-link-button" href={PROJECT_REPOSITORY_URL} target="_blank" rel="noreferrer">GitHub 仓库 <Github size={15} /></a>
+                  <button className="settings-primary-button" type="button" onClick={() => setJoinNovaOpen(true)}>加入 Nova <ArrowRight size={15} /></button>
+                </div>
+              </SettingGroup>
+            </div>}
           </div>
         </div>
       </section>
@@ -292,9 +329,10 @@ export function SettingsDialog({ open, settings, learningContext, roles = [], pe
   }}
   onClose={() => setResetConfirmOpen(false)}
 />
+<JoinNovaDialog open={joinNovaOpen} onClose={() => setJoinNovaOpen(false)} />
 </>;
 }
 
-function SettingGroup({ title, description, children }: { title: string; description: string; children?: ReactNode }) { return <section className="settings-group"><div><h2>{title}</h2><p>{description}</p></div>{children}</section>; }
+function SettingGroup({ title, description, children }: { title: string; description?: string; children?: ReactNode }) { return <section className="settings-group"><div><h2>{title}</h2>{description && <p>{description}</p>}</div>{children}</section>; }
 function ToggleRow({ title, detail, checked, onChange }: { title: string; detail: string; checked: boolean; onChange: (checked: boolean) => void }) { return <label className="settings-toggle-row"><span><strong>{title}</strong><small>{detail}</small></span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /></label>; }
 function ThemeButton({ active, icon, label, onClick }: { active: boolean; icon: ReactNode; label: string; onClick: () => void }) { return <button type="button" className={active ? "active" : ""} onClick={onClick}>{icon}<span>{label}</span></button>; }
