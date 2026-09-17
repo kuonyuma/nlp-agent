@@ -63,7 +63,6 @@ from server.web.contracts import (
     LoginBody,
     ReplaceUserRolesBody,
     ReplaceRolePermissionsBody,
-    ReplaceRoleMenusBody,
     CreateClassroomBody,
     ReplaceClassroomMemberBody,
     InjectChatBody,
@@ -2316,20 +2315,6 @@ def create_app(
         await hub.close_user(user_id)
         return {"classroom_id": classroom_id, "user_id": user_id, "member_role": body.member_role, "status": body.status}
 
-    @app.get("/api/v1/system/menus", tags=["rbac"])
-    async def get_menus(request: Request, principal: Principal):
-        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
-        async with authorization_session_factory(request)() as session:
-            menus = await rbac_service.menus(session)
-        return {"items": [
-            {"id": item.id, "parent_id": item.parent_id, "type": item.menu_type,
-             "name": item.name, "route_path": item.route_path,
-             "component_key": item.component_key, "permission_id": item.permission_id,
-             "client_scope": item.client_scope, "sort_order": item.sort_order,
-             "visible": item.visible, "status": item.status}
-            for item in menus
-        ]}
-
     @app.get("/api/v1/system/menus/visible", tags=["rbac"])
     async def get_visible_menus(request: Request, principal: Principal):
         async with authorization_session_factory(request)() as session:
@@ -2342,24 +2327,6 @@ def create_app(
              "visible": item.visible, "status": item.status}
             for item in menus
         ]}
-
-    @app.put("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])
-    async def put_role_menus(role_code: str, body: ReplaceRoleMenusBody, request: Request, principal: Principal, _claims: WriteClaims):
-        authorization_service.require(principal, Permission.SYSTEM_ROLE_MANAGE)
-        try:
-            async with authorization_session_factory(request)() as session:
-                async with session.begin():
-                    await rbac_service.replace_role_menus(session, role_code=role_code, menu_ids=body.menu_ids, actor_user_id=principal.user_id)
-        except (KeyError, PermissionError, ValueError) as error:
-            raise _rbac_http_error(error) from error
-        return {"role_code": role_code, "menu_ids": sorted(body.menu_ids)}
-
-    @app.get("/api/v1/system/roles/{role_code}/menus", tags=["rbac"])
-    async def get_role_menus(role_code: str, request: Request, principal: Principal):
-        authorization_service.require(principal, Permission.SYSTEM_PERMISSION_READ)
-        async with authorization_session_factory(request)() as session:
-            menu_ids = await rbac_service.role_menu_ids(session, role_code)
-        return {"role_code": role_code, "menu_ids": sorted(menu_ids)}
 
     @app.get("/api/v1/audit/authorization", tags=["rbac"])
     async def list_authorization_audit(

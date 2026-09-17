@@ -94,34 +94,9 @@ def upgrade() -> None:
     # Agent capabilities. Keep this online and idempotent so an operator's
     # existing role projection is repaired without overwriting other grants.
     if context.is_offline_mode():
-        # Offline SQL is generated for a fresh database, so the idempotency
-        # reads below are not available. Emit the same seed rows that a clean
-        # online upgrade would insert.
-        op.bulk_insert(
-            permissions,
-            [permission_row(permission) for permission in GUEST_AGENT_PERMISSIONS],
-        )
-        op.bulk_insert(
-            role_permissions,
-            [
-                {
-                    "role_id": guest_role_id,
-                    "permission_id": permission_id(permission),
-                }
-                for permission in GUEST_AGENT_PERMISSIONS
-            ],
-        )
-        op.bulk_insert(
-            role_scopes,
-            [
-                {
-                    "role_id": guest_role_id,
-                    "permission_id": permission_id(permission),
-                    "scope_type": permission_scope(permission),
-                }
-                for permission in GUEST_AGENT_PERMISSIONS
-            ],
-        )
+        # The foundation migration already seeds the current permission and
+        # role catalogues in a fresh offline script. Preserve only this
+        # migration's backup-table state; repeating grants would violate keys.
         op.bulk_insert(
             backups,
             [

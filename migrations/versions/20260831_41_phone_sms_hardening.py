@@ -1,6 +1,6 @@
 """Canonical phone identities and durable SMS send-rate audit records."""
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy.dialects.mysql import DATETIME
 import re
@@ -29,14 +29,19 @@ def _legacy_normalize(value: str | None) -> str | None:
 
 def upgrade() -> None:
     bind = op.get_bind()
-    columns = {c["name"] for c in sa.inspect(bind).get_columns("nlp_users")}
+    offline = context.is_offline_mode()
+    columns = (
+        set()
+        if offline
+        else {c["name"] for c in sa.inspect(bind).get_columns("nlp_users")}
+    )
     if "phone_number_normalized" not in columns:
         op.add_column("nlp_users", sa.Column("phone_number_normalized", sa.String(16), nullable=True))
 
     # This migration also repairs deployments that added the column but
     # failed before backfill/index creation. Do not make the repair path
     # depend on whether the column was added in this invocation.
-    rows = bind.execute(sa.text(
+    rows = [] if offline else bind.execute(sa.text(
         "SELECT id, phone_number FROM nlp_users "
         "WHERE phone_number IS NOT NULL AND phone_number_normalized IS NULL"
     )).fetchall()
@@ -53,7 +58,7 @@ def upgrade() -> None:
 
     # Preserve every account, but keep the oldest canonical identity when
     # historical rows collide. The remaining rows can still log in by username.
-    duplicates = bind.execute(sa.text(
+    duplicates = [] if offline else bind.execute(sa.text(
         "SELECT phone_number_normalized FROM nlp_users "
         "WHERE phone_number_normalized IS NOT NULL "
         "GROUP BY phone_number_normalized HAVING COUNT(*) > 1"
@@ -74,9 +79,9 @@ def upgrade() -> None:
                 {"id": user_id},
             )
 
-    inspector = sa.inspect(bind)
-    unique_constraints = inspector.get_unique_constraints("nlp_users")
-    unique_indexes = inspector.get_indexes("nlp_users")
+    inspector = None if offline else sa.inspect(bind)
+    unique_constraints = [] if inspector is None else inspector.get_unique_constraints("nlp_users")
+    unique_indexes = [] if inspector is None else inspector.get_indexes("nlp_users")
     has_phone_unique = any(
         item.get("name") == "uq_nlp_users_phone_number_normalized"
         or (
@@ -91,8 +96,8 @@ def upgrade() -> None:
     if "ix_nlp_users_phone_number_normalized" not in index_names:
         op.create_index("ix_nlp_users_phone_number_normalized", "nlp_users", ["phone_number_normalized"])
 
-    inspector = sa.inspect(bind)
-    if "nlp_sms_send_audits" not in inspector.get_table_names():
+    inspector = None if offline else sa.inspect(bind)
+    if inspector is None or "nlp_sms_send_audits" not in inspector.get_table_names():
         op.create_table(
             "nlp_sms_send_audits",
             sa.Column("id", sa.String(36, collation="ascii_bin"), primary_key=True),
@@ -129,27 +134,50 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    if "nlp_sms_send_audits" in inspector.get_table_names():
+    offline = context.is_offline_mode()
+    inspector = None if offline else sa.inspect(bind)
+    if inspector is None or "nlp_sms_send_audits" in inspector.get_table_names():
         index_names = {
             item.get("name")
-            for item in inspector.get_indexes("nlp_sms_send_audits")
+            for item in (
+                [
+                    {"name": "ix_nlp_sms_send_audits_ip_created"},
+                    {"name": "ix_nlp_sms_send_audits_phone_created"},
+                ]
+                if inspector is None
+                else inspector.get_indexes("nlp_sms_send_audits")
+            )
         }
         if "ix_nlp_sms_send_audits_ip_created" in index_names:
             op.drop_index("ix_nlp_sms_send_audits_ip_created", table_name="nlp_sms_send_audits")
         if "ix_nlp_sms_send_audits_phone_created" in index_names:
             op.drop_index("ix_nlp_sms_send_audits_phone_created", table_name="nlp_sms_send_audits")
         op.drop_table("nlp_sms_send_audits")
-    inspector = sa.inspect(bind)
-    columns = {c["name"] for c in inspector.get_columns("nlp_users")}
+    inspector = None if offline else sa.inspect(bind)
+    columns = (
+        {"phone_number_normalized"}
+        if inspector is None
+        else {c["name"] for c in inspector.get_columns("nlp_users")}
+    )
     if "phone_number_normalized" in columns:
         unique_names = {
             item.get("name")
-            for item in inspector.get_unique_constraints("nlp_users")
+            for item in (
+                [{"name": "uq_nlp_users_phone_number_normalized"}]
+                if inspector is None
+                else inspector.get_unique_constraints("nlp_users")
+            )
         }
         if "uq_nlp_users_phone_number_normalized" in unique_names:
             op.drop_constraint("uq_nlp_users_phone_number_normalized", "nlp_users", type_="unique")
-        index_names = {item.get("name") for item in inspector.get_indexes("nlp_users")}
+        index_names = {
+            item.get("name")
+            for item in (
+                [{"name": "ix_nlp_users_phone_number_normalized"}]
+                if inspector is None
+                else inspector.get_indexes("nlp_users")
+            )
+        }
         if "ix_nlp_users_phone_number_normalized" in index_names:
             op.drop_index("ix_nlp_users_phone_number_normalized", table_name="nlp_users")
         op.drop_column("nlp_users", "phone_number_normalized")

@@ -356,11 +356,7 @@ export const api = {
   listRolePermissions: (roleCode: string) => request<{ role_code: string; permissions: Record<string, string[]> }>(`/system/roles/${encodeURIComponent(roleCode)}/permissions`),
   replaceRolePermissions: (roleCode: string, permission_codes: string[], scopes: Record<string, string[]>) =>
     request<void>(`/system/roles/${encodeURIComponent(roleCode)}/permissions`, { method: "PUT", body: JSON.stringify({ permission_codes, scopes }) }),
-  listMenus: () => request<{ items: SystemMenu[] }>("/system/menus"),
   listVisibleMenus: () => request<{ items: SystemMenu[] }>("/system/menus/visible"),
-  replaceRoleMenus: (roleCode: string, menu_ids: string[]) =>
-    request<void>(`/system/roles/${encodeURIComponent(roleCode)}/menus`, { method: "PUT", body: JSON.stringify({ menu_ids }) }),
-  listRoleMenus: (roleCode: string) => request<{ role_code: string; menu_ids: string[] }>(`/system/roles/${encodeURIComponent(roleCode)}/menus`),
   listAuthorizationAudit: (params?: { limit?: number; offset?: number; actorUserId?: string; decision?: string; reasonCode?: string }) => {
     const query = new URLSearchParams();
     if (params?.limit != null) query.set("limit", String(params.limit));

@@ -7,7 +7,7 @@ their bucket type renamed so old rows continue to be queryable under the new
 domain vocabulary.
 """
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy.dialects.mysql import BIGINT
 
@@ -31,6 +31,8 @@ _CHECK_NAMES = {
 
 
 def _check_constraints(bind, table_name: str) -> list[dict]:
+    if context.is_offline_mode():
+        return []
     return sa.inspect(bind).get_check_constraints(table_name)
 
 
@@ -40,6 +42,14 @@ def _is_bucket_type_constraint(constraint: dict, period: str) -> bool:
 
 
 def _drop_bucket_type_constraints(bind, table_name: str) -> None:
+    if context.is_offline_mode():
+        op.execute(
+            sa.text(
+                f"ALTER TABLE {table_name} DROP CHECK "
+                f"`{_CHECK_NAMES[table_name]}`"
+            )
+        )
+        return
     constraints = [
         constraint
         for constraint in _check_constraints(bind, table_name)
@@ -61,10 +71,16 @@ def _drop_bucket_type_constraints(bind, table_name: str) -> None:
 
 
 def upgrade() -> None:
-    columns = {
-        column["name"]
-        for column in sa.inspect(op.get_bind()).get_columns("nlp_quota_policies")
-    }
+    columns = (
+        {"monthly_limit_micro"}
+        if context.is_offline_mode()
+        else {
+            column["name"]
+            for column in sa.inspect(op.get_bind()).get_columns(
+                "nlp_quota_policies"
+            )
+        }
+    )
     if "monthly_limit_micro" in columns and "weekly_limit_micro" not in columns:
         op.alter_column(
             "nlp_quota_policies",
@@ -84,7 +100,7 @@ def upgrade() -> None:
         constraint_name = _CHECK_NAMES[table_name]
         bind = op.get_bind()
         existing_constraints = _check_constraints(bind, table_name)
-        if not any(
+        if context.is_offline_mode() or not any(
             _is_bucket_type_constraint(constraint, "weekly")
             and _is_bucket_type_constraint(constraint, "daily")
             for constraint in existing_constraints
@@ -116,7 +132,7 @@ def downgrade() -> None:
             for constraint in existing_constraints
             if _is_bucket_type_constraint(constraint, "weekly")
         ]
-        if weekly_constraints:
+        if context.is_offline_mode() or weekly_constraints:
             _drop_bucket_type_constraints(bind, table_name)
         op.execute(
             sa.text(
@@ -139,10 +155,16 @@ def downgrade() -> None:
                     constraint_name,
                     "bucket_type IN ('daily', 'monthly')",
                 )
-    columns = {
-        column["name"]
-        for column in sa.inspect(op.get_bind()).get_columns("nlp_quota_policies")
-    }
+    columns = (
+        {"weekly_limit_micro"}
+        if context.is_offline_mode()
+        else {
+            column["name"]
+            for column in sa.inspect(op.get_bind()).get_columns(
+                "nlp_quota_policies"
+            )
+        }
+    )
     if "weekly_limit_micro" in columns and "monthly_limit_micro" not in columns:
         op.alter_column(
             "nlp_quota_policies",

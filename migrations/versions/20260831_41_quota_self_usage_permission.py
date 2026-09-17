@@ -20,12 +20,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Fresh-install offline scripts already receive the permission from the
-    # RBAC foundation's current catalogue.  The idempotent online path below
-    # is for databases created before the quota permission was introduced.
-    if context.is_offline_mode():
-        return
-
     permission = Permission.QUOTA_USAGE_READ_SELF
     permissions = sa.table(
         "nlp_permissions",
@@ -50,15 +44,39 @@ def upgrade() -> None:
         sa.column("permission_id", sa.String()),
         sa.column("scope_type", sa.String()),
     )
-    bind = op.get_bind()
     permission_row_value = permission_row(permission)
+    permission_value = permission_id(permission)
+    scope_value = permission_scope(permission)
+    if context.is_offline_mode():
+        op.bulk_insert(permissions, [permission_row_value])
+        op.bulk_insert(
+            role_permissions,
+            [
+                {
+                    "role_id": role_id(role_code),
+                    "permission_id": permission_value,
+                }
+                for role_code in ROLE_NAMES
+            ],
+        )
+        op.bulk_insert(
+            role_scopes,
+            [
+                {
+                    "role_id": role_id(role_code),
+                    "permission_id": permission_value,
+                    "scope_type": scope_value,
+                }
+                for role_code in ROLE_NAMES
+            ],
+        )
+        return
+    bind = op.get_bind()
     if bind.execute(
         sa.select(permissions.c.id).where(permissions.c.id == permission_id(permission))
     ).first() is None:
         op.bulk_insert(permissions, [permission_row_value])
 
-    permission_value = permission_id(permission)
-    scope_value = permission_scope(permission)
     for role_code in ROLE_NAMES:
         builtin_role_id = role_id(role_code)
         if bind.execute(

@@ -14,13 +14,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # The fresh-install RBAC migration imports the current catalog and thus
-    # already emits these rows in offline SQL.  An offline script cannot
-    # perform the existence checks used for an upgrade of an older database;
-    # emitting duplicate unique-key inserts would make the generated script
-    # invalid.  Existing deployments use the online idempotent backfill below.
-    if context.is_offline_mode():
-        return
     quota_permissions = (Permission.SYSTEM_QUOTA_READ, Permission.SYSTEM_QUOTA_MANAGE)
     permission_rows = [permission_row(item) for item in quota_permissions]
     menu = menu_row(next(item for item in MENU_CATALOG if item[0] == "developer.quotas"))
@@ -29,13 +22,42 @@ def upgrade() -> None:
     role_permissions = sa.table("nlp_role_permissions", sa.column("role_id", sa.String()), sa.column("permission_id", sa.String()))
     role_menus = sa.table("nlp_role_menus", sa.column("role_id", sa.String()), sa.column("menu_id", sa.String()))
     role_scopes = sa.table("nlp_role_permission_scopes", sa.column("role_id", sa.String()), sa.column("permission_id", sa.String()), sa.column("scope_type", sa.String()))
+    developer_id = role_id("developer")
+    if context.is_offline_mode():
+        op.bulk_insert(permissions, permission_rows)
+        op.bulk_insert(menus, [menu])
+        op.bulk_insert(
+            role_permissions,
+            [
+                {
+                    "role_id": developer_id,
+                    "permission_id": permission_id(permission),
+                }
+                for permission in quota_permissions
+            ],
+        )
+        op.bulk_insert(
+            role_scopes,
+            [
+                {
+                    "role_id": developer_id,
+                    "permission_id": permission_id(permission),
+                    "scope_type": "system",
+                }
+                for permission in quota_permissions
+            ],
+        )
+        op.bulk_insert(
+            role_menus,
+            [{"role_id": developer_id, "menu_id": menu["id"]}],
+        )
+        return
     bind = op.get_bind()
     for permission in permission_rows:
         if bind.execute(sa.select(permissions.c.id).where(permissions.c.id == permission["id"])).first() is None:
             op.bulk_insert(permissions, [permission])
     if bind.execute(sa.select(menus.c.id).where(menus.c.id == menu["id"])).first() is None:
         op.bulk_insert(menus, [menu])
-    developer_id = role_id("developer")
     for quota_permission in quota_permissions:
         perm_id = permission_id(quota_permission)
         if bind.execute(sa.select(role_permissions.c.permission_id).where(role_permissions.c.role_id == developer_id, role_permissions.c.permission_id == perm_id)).first() is None:

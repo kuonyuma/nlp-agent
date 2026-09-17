@@ -1,4 +1,5 @@
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -121,6 +122,7 @@ async def test_tencent_ses_provider_passes_credentials_and_region_to_sdk(monkeyp
 
 @pytest.mark.asyncio
 async def test_tencent_ses_api_exception_returns_false_without_logging_code(caplog):
+    caplog.set_level(logging.ERROR, logger="server.user.email_provider")
     error = TencentCloudSDKException(
         code="FailedOperation.SendEmailErr",
         message="send failed",

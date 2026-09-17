@@ -2,7 +2,7 @@
 
 import re
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -30,6 +30,10 @@ def _legacy_normalize(value: str | None) -> str | None:
 
 def upgrade() -> None:
     """Repair the column and its data without assuming migration 41 ran fully."""
+    # A fresh offline script already emits the complete schema in migration 41.
+    # This revision only repairs partially applied live databases.
+    if context.is_offline_mode():
+        return
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     columns = {item["name"] for item in inspector.get_columns("nlp_users")}

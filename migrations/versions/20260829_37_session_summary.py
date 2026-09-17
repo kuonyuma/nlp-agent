@@ -4,7 +4,7 @@ Revision ID: 20260829_37_session_summary
 Revises: 20260829_36_usage_indexes
 """
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 from sqlalchemy.dialects.mysql import DATETIME
@@ -31,7 +31,9 @@ def upgrade() -> None:
     # The add is guarded because a concurrent migration may already have
     # introduced this column; re-adding it fails CI with ``1060 Duplicate
     # column name``.
-    if not _has_column("nlp_conversations", "title_updated_at"):
+    if context.is_offline_mode() or not _has_column(
+        "nlp_conversations", "title_updated_at"
+    ):
         op.add_column(
             "nlp_conversations",
             sa.Column("title_updated_at", DATETIME(fsp=6), nullable=True),
@@ -39,5 +41,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if _has_column("nlp_conversations", "title_updated_at"):
+    if context.is_offline_mode() or _has_column(
+        "nlp_conversations", "title_updated_at"
+    ):
         op.drop_column("nlp_conversations", "title_updated_at")

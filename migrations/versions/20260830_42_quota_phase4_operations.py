@@ -1,7 +1,7 @@
 """Add Phase 4 reconciliation, rollup, alert, credit, and archive state."""
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects.mysql import DATETIME
 
 from server.quota.models import (
@@ -21,7 +21,8 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    inspector = sa.inspect(bind)
+    offline = context.is_offline_mode()
+    inspector = None if offline else sa.inspect(bind)
     if bind.dialect.name == "mysql":
         op.alter_column(
             "nlp_quota_ledger_entries",
@@ -30,9 +31,14 @@ def upgrade() -> None:
             type_=sa.String(length=32),
             existing_nullable=False,
         )
-    existing_columns = {
-        column["name"] for column in inspector.get_columns("nlp_usage_events")
-    }
+    existing_columns = (
+        set()
+        if inspector is None
+        else {
+            column["name"]
+            for column in inspector.get_columns("nlp_usage_events")
+        }
+    )
     if "archived_at" not in existing_columns:
         op.add_column(
             "nlp_usage_events",
@@ -43,9 +49,12 @@ def upgrade() -> None:
             "nlp_usage_events",
             sa.Column("archive_batch_id", sa.String(length=36), nullable=True),
         )
-    if "ix_nlp_usage_events_archive_occurred" not in {
-        index["name"] for index in inspector.get_indexes("nlp_usage_events")
-    }:
+    existing_indexes = (
+        set()
+        if inspector is None
+        else {index["name"] for index in inspector.get_indexes("nlp_usage_events")}
+    )
+    if "ix_nlp_usage_events_archive_occurred" not in existing_indexes:
         op.create_index(
             "ix_nlp_usage_events_archive_occurred",
             "nlp_usage_events",
@@ -58,11 +67,12 @@ def upgrade() -> None:
         QuotaUsageArchiveBatchModel,
         QuotaAlertModel,
     ):
-        model.__table__.create(bind=bind, checkfirst=True)
+        model.__table__.create(bind=bind, checkfirst=not offline)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
+    offline = context.is_offline_mode()
     for model in (
         QuotaAlertModel,
         QuotaUsageArchiveBatchModel,
@@ -70,17 +80,25 @@ def downgrade() -> None:
         QuotaDailyRollupModel,
         QuotaCreditOperationModel,
     ):
-        model.__table__.drop(bind=bind, checkfirst=True)
-    inspector = sa.inspect(bind)
-    if "ix_nlp_usage_events_archive_occurred" in {
-        index["name"] for index in inspector.get_indexes("nlp_usage_events")
-    }:
+        model.__table__.drop(bind=bind, checkfirst=not offline)
+    inspector = None if offline else sa.inspect(bind)
+    existing_indexes = (
+        {"ix_nlp_usage_events_archive_occurred"}
+        if inspector is None
+        else {index["name"] for index in inspector.get_indexes("nlp_usage_events")}
+    )
+    if "ix_nlp_usage_events_archive_occurred" in existing_indexes:
         op.drop_index(
             "ix_nlp_usage_events_archive_occurred", table_name="nlp_usage_events"
         )
-    existing_columns = {
-        column["name"] for column in inspector.get_columns("nlp_usage_events")
-    }
+    existing_columns = (
+        {"archive_batch_id", "archived_at"}
+        if inspector is None
+        else {
+            column["name"]
+            for column in inspector.get_columns("nlp_usage_events")
+        }
+    )
     if "archive_batch_id" in existing_columns:
         op.drop_column("nlp_usage_events", "archive_batch_id")
     if "archived_at" in existing_columns:

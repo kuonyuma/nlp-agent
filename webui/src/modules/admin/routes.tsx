@@ -52,7 +52,6 @@ export function AdminRoutes() {
         <Route index element={<AdminOverview />} />
         <Route path="users" element={<Navigate to="/developer/users" replace />} />
         <Route path="roles" element={<Navigate to="/developer/roles" replace />} />
-        <Route path="menus" element={<Navigate to="/developer/menus" replace />} />
         <Route path="audit" element={<AuditRedirect />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

@@ -1,7 +1,7 @@
 """Track cache measurement coverage and repair legacy model attribution."""
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 
 revision = "20260912_54_usage_cache_fix"
@@ -11,6 +11,8 @@ depends_on = None
 
 
 def _usage_columns() -> set[str]:
+    if context.is_offline_mode():
+        return set()
     inspector = sa.inspect(op.get_bind())
     return {
         column["name"]
@@ -115,5 +117,5 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Attribution repairs are intentionally retained: the former process IDs
     # were not semantic Worker identities and cannot be restored safely.
-    if "cache_status" in _usage_columns():
+    if context.is_offline_mode() or "cache_status" in _usage_columns():
         op.drop_column("nlp_usage_events", "cache_status")
