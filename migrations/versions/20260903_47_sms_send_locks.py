@@ -1,6 +1,6 @@
 """Add durable transaction locks for concurrent SMS rate checks."""
 
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects.mysql import DATETIME
 import sqlalchemy as sa
 
@@ -12,7 +12,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    if "nlp_sms_send_locks" not in sa.inspect(op.get_bind()).get_table_names():
+    if context.is_offline_mode() or "nlp_sms_send_locks" not in sa.inspect(
+        op.get_bind()
+    ).get_table_names():
         op.create_table(
             "nlp_sms_send_locks",
             sa.Column("phone_number", sa.String(16), primary_key=True),
@@ -28,5 +30,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if "nlp_sms_send_locks" in sa.inspect(op.get_bind()).get_table_names():
+    if context.is_offline_mode() or "nlp_sms_send_locks" in sa.inspect(
+        op.get_bind()
+    ).get_table_names():
         op.drop_table("nlp_sms_send_locks")

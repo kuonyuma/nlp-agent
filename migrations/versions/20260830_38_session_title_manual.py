@@ -4,7 +4,7 @@ Revision ID: 20260830_38_session_title_manual
 Revises: 20260829_37_session_summary
 """
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 from sqlalchemy.dialects.mysql import DATETIME
@@ -27,12 +27,16 @@ def upgrade() -> None:
     # summarizer takes before paying for an LLM call, deduplicating concurrent
     # workers.  Both are guarded because a concurrent migration may already
     # have introduced them.
-    if not _has_column("nlp_conversations", "title_is_manual"):
+    if context.is_offline_mode() or not _has_column(
+        "nlp_conversations", "title_is_manual"
+    ):
         op.add_column(
             "nlp_conversations",
             sa.Column("title_is_manual", sa.Boolean(), nullable=False, server_default="0"),
         )
-    if not _has_column("nlp_conversations", "summary_lease_expires_at"):
+    if context.is_offline_mode() or not _has_column(
+        "nlp_conversations", "summary_lease_expires_at"
+    ):
         op.add_column(
             "nlp_conversations",
             sa.Column("summary_lease_expires_at", DATETIME(fsp=6), nullable=True),
@@ -40,7 +44,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if _has_column("nlp_conversations", "summary_lease_expires_at"):
+    if context.is_offline_mode() or _has_column(
+        "nlp_conversations", "summary_lease_expires_at"
+    ):
         op.drop_column("nlp_conversations", "summary_lease_expires_at")
-    if _has_column("nlp_conversations", "title_is_manual"):
+    if context.is_offline_mode() or _has_column(
+        "nlp_conversations", "title_is_manual"
+    ):
         op.drop_column("nlp_conversations", "title_is_manual")

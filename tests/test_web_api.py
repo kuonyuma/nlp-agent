@@ -194,6 +194,15 @@ def test_developer_session_management_stats_endpoint_is_not_exposed(web_app):
     }
 
 
+def test_retired_menu_management_endpoints_are_not_exposed(web_app):
+    app, _engine = web_app
+
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+
+    assert "/api/v1/system/menus" not in paths
+    assert "/api/v1/system/roles/{role_code}/menus" not in paths
+
+
 def test_guest_session_has_only_guest_capabilities(web_app):
     app, _engine = web_app
     with TestClient(app) as client:

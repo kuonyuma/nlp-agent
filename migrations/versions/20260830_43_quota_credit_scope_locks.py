@@ -1,7 +1,7 @@
 """Make credit operation idempotency and reset scopes transactional."""
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects.mysql import DATETIME
 
 from server.quota.models import QuotaCreditScopeLockModel
@@ -15,11 +15,17 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    columns = {
-        column["name"]
-        for column in inspector.get_columns("nlp_quota_credit_operations")
-    }
+    offline = context.is_offline_mode()
+    columns = (
+        set()
+        if offline
+        else {
+            column["name"]
+            for column in sa.inspect(bind).get_columns(
+                "nlp_quota_credit_operations"
+            )
+        }
+    )
     if "effective_from" not in columns:
         op.add_column(
             "nlp_quota_credit_operations",
@@ -69,17 +75,23 @@ def upgrade() -> None:
         # SQLite cannot alter a nullable column to NOT NULL portably.  Fresh
         # SQLite test schemas use the ORM model, while production MySQL gets
         # the strict constraint above.
-    QuotaCreditScopeLockModel.__table__.create(bind=bind, checkfirst=True)
+    QuotaCreditScopeLockModel.__table__.create(bind=bind, checkfirst=not offline)
 
 
 def downgrade() -> None:
     bind = op.get_bind()
-    QuotaCreditScopeLockModel.__table__.drop(bind=bind, checkfirst=True)
-    inspector = sa.inspect(bind)
-    columns = {
-        column["name"]
-        for column in inspector.get_columns("nlp_quota_credit_operations")
-    }
+    offline = context.is_offline_mode()
+    QuotaCreditScopeLockModel.__table__.drop(bind=bind, checkfirst=not offline)
+    columns = (
+        {"effective_from", "expires_at"}
+        if offline
+        else {
+            column["name"]
+            for column in sa.inspect(bind).get_columns(
+                "nlp_quota_credit_operations"
+            )
+        }
+    )
     if "expires_at" in columns:
         op.drop_column("nlp_quota_credit_operations", "expires_at")
     if "effective_from" in columns:

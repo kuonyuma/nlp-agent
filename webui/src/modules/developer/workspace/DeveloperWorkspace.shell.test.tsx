@@ -86,6 +86,16 @@ describe("DeveloperWorkspace shell access", () => {
     expect(screen.queryByRole("button", { name: "Agent 会话" })).not.toBeInTheDocument();
   });
 
+  it("does not resurrect retired menu management from a stale database row", async () => {
+    listVisibleMenusMock.mockResolvedValue({ items: ALL_ROUTES.map((route) => menu(route)) });
+    getDeveloperSnapshotMock.mockResolvedValue(snapshot);
+
+    render(<DeveloperWorkspace />);
+
+    expect(await screen.findByText("后端基础工作台")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "菜单管理" })).not.toBeInTheDocument();
+  });
+
   it("renders the overview for a fully provisioned developer with snapshot data", async () => {
     listVisibleMenusMock.mockResolvedValue({ items: ALL_ROUTES.map((route) => menu(route)) });
     getDeveloperSnapshotMock.mockResolvedValue(snapshot);

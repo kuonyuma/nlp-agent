@@ -1,7 +1,7 @@
 """Add metering facts and configurable prices for billable tool features."""
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects import mysql
 
 
@@ -27,6 +27,8 @@ _USAGE_COLUMNS = (
 
 
 def _column_names(table_name: str) -> set[str]:
+    if context.is_offline_mode():
+        return set()
     inspector = sa.inspect(op.get_bind())
     return {column["name"] for column in inspector.get_columns(table_name)}
 
@@ -55,12 +57,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    usage_columns = _column_names("nlp_usage_events")
+    usage_columns = (
+        set(_USAGE_COLUMNS)
+        if context.is_offline_mode()
+        else _column_names("nlp_usage_events")
+    )
     for name in reversed(_USAGE_COLUMNS):
         if name in usage_columns:
             op.drop_column("nlp_usage_events", name)
 
-    pricing_columns = _column_names("nlp_pricing_rules")
+    pricing_columns = (
+        set(_PRICING_COLUMNS)
+        if context.is_offline_mode()
+        else _column_names("nlp_pricing_rules")
+    )
     for name in reversed(_PRICING_COLUMNS):
         if name in pricing_columns:
             op.drop_column("nlp_pricing_rules", name)

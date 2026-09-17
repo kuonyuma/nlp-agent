@@ -42,9 +42,7 @@ def upgrade() -> None:
     permission_value = permission_id(permission)
     developer_role = role_id("developer")
     if context.is_offline_mode():
-        # Offline SQL is generated for a fresh database, so the idempotency
-        # reads below are not available.  Emit the same three seed rows that a
-        # clean online upgrade would insert.
+        # This permission is newer than the frozen foundation seed data.
         op.bulk_insert(permissions, [permission_row(permission)])
         op.bulk_insert(
             role_permissions,

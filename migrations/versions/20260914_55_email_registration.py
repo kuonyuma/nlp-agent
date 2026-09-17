@@ -6,7 +6,7 @@ now-unused SMS tables and phone columns (the product is not live, so no
 back-compat for phone accounts is required).
 """
 
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects.mysql import DATETIME
 import sqlalchemy as sa
 
@@ -29,7 +29,89 @@ def _user_columns() -> set:
     return {c["name"] for c in _inspector().get_columns("nlp_users")}
 
 
+def _upgrade_offline() -> None:
+    op.add_column("nlp_users", sa.Column("email", sa.String(254), nullable=True))
+    op.create_index("ix_nlp_users_email", "nlp_users", ["email"])
+    op.add_column(
+        "nlp_users", sa.Column("email_normalized", sa.String(254), nullable=True)
+    )
+    op.create_unique_constraint(
+        "uq_nlp_users_email_normalized", "nlp_users", ["email_normalized"]
+    )
+    op.create_index(
+        "ix_nlp_users_email_normalized", "nlp_users", ["email_normalized"]
+    )
+    op.create_table(
+        "nlp_email_send_audits",
+        sa.Column("id", sa.String(36, collation="ascii_bin"), primary_key=True),
+        sa.Column("email", sa.String(254), nullable=False),
+        sa.Column("client_ip", sa.String(64), nullable=True),
+        sa.Column("outcome", sa.String(16), nullable=False, server_default="sent"),
+        sa.Column(
+            "created_at",
+            DATETIME(fsp=6),
+            nullable=False,
+            server_default=sa.text("utc_timestamp(6)"),
+        ),
+        comment="邮箱验证码发送审计记录，独立于可消费的一次性验证码保存，用于可靠频控。",
+        mysql_charset="utf8mb4",
+    )
+    op.create_index(
+        "ix_nlp_email_send_audits_email_created",
+        "nlp_email_send_audits",
+        ["email", "created_at"],
+    )
+    op.create_index(
+        "ix_nlp_email_send_audits_ip_created",
+        "nlp_email_send_audits",
+        ["client_ip", "created_at"],
+    )
+    op.create_table(
+        "nlp_email_send_locks",
+        sa.Column("email", sa.String(254), primary_key=True),
+        sa.Column(
+            "locked_at",
+            DATETIME(fsp=6),
+            nullable=False,
+            server_default=sa.text("utc_timestamp(6)"),
+        ),
+        comment="邮箱频控的事务锁行，不保存验证码或用户隐私以外的业务数据。",
+        mysql_charset="utf8mb4",
+    )
+    op.drop_index(
+        "ix_nlp_sms_send_audits_ip_created", table_name="nlp_sms_send_audits"
+    )
+    op.drop_index(
+        "ix_nlp_sms_send_audits_phone_created", table_name="nlp_sms_send_audits"
+    )
+    op.drop_table("nlp_sms_send_audits")
+    op.drop_table("nlp_sms_send_locks")
+    op.drop_constraint(
+        "uq_nlp_users_phone_number_normalized", "nlp_users", type_="unique"
+    )
+    op.drop_index(
+        "ix_nlp_users_phone_number_normalized", table_name="nlp_users"
+    )
+    op.drop_column("nlp_users", "phone_number_normalized")
+    op.drop_index("ix_nlp_users_phone_number", table_name="nlp_users")
+    op.drop_column("nlp_users", "phone_number")
+    op.alter_column(
+        "nlp_auth_codes",
+        "subject",
+        existing_type=sa.String(64),
+        type_=sa.String(254),
+        existing_nullable=False,
+    )
+    op.execute(
+        "ALTER TABLE `nlp_auth_codes` COMMENT = "
+        "'图形/邮箱一次性验证码的哈希存储，含过期时间与发送频控记录。'"
+    )
+
+
 def upgrade() -> None:
+    if context.is_offline_mode():
+        _upgrade_offline()
+        return
     columns = _user_columns()
     if "email" not in columns:
         op.add_column("nlp_users", sa.Column("email", sa.String(254), nullable=True))

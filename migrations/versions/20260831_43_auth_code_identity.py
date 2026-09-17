@@ -1,6 +1,6 @@
 """Enforce one active verification code per kind and subject."""
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "20260831_43_auth_code_identity"
@@ -19,7 +19,14 @@ def upgrade() -> None:
         "(newer.created_at > older.created_at OR "
         "(newer.created_at = older.created_at AND newer.id > older.id))"
     ))
-    names = {item.get("name") for item in sa.inspect(bind).get_unique_constraints("nlp_auth_codes")}
+    names = (
+        set()
+        if context.is_offline_mode()
+        else {
+            item.get("name")
+            for item in sa.inspect(bind).get_unique_constraints("nlp_auth_codes")
+        }
+    )
     if "uq_nlp_auth_codes_kind_subject" not in names:
         op.create_unique_constraint(
             "uq_nlp_auth_codes_kind_subject", "nlp_auth_codes", ["kind", "subject"]

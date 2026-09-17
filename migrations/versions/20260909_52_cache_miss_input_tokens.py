@@ -1,7 +1,7 @@
 """Persist Provider-reported cache misses on usage events."""
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects import mysql
 
 
@@ -13,6 +13,8 @@ depends_on = None
 
 
 def _column_names() -> set[str]:
+    if context.is_offline_mode():
+        return set()
     inspector = sa.inspect(op.get_bind())
     return {column["name"] for column in inspector.get_columns("nlp_usage_events")}
 
@@ -31,5 +33,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if "cache_miss_input_tokens" in _column_names():
+    if context.is_offline_mode() or "cache_miss_input_tokens" in _column_names():
         op.drop_column("nlp_usage_events", "cache_miss_input_tokens")
